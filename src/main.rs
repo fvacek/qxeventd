@@ -10,7 +10,7 @@ use url::Url;
 use crate::{
     appstate::{QxAppState, QxLockedAppState, QxSharedAppState},
     config::Config,
-    events::{create_event, list_events, update_event, EventRecord},
+    events::{create_event, delete_event, list_events, read_event, update_event, EventRecord},
     logger::setup_logger,
     migrate::migrate_db,
 };
@@ -128,8 +128,14 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             "create" [None, Write, "{s|n:name,s|n:date,s:api_token,s:owner}", "i"] (rec: EventRecord) => {
                 Some(res_to_rpcvalue(create_event(&app_state, rec).await))
             }
+            "read" [None, Write, "i", "{s|n:name,s|n:date,s:api_token,s:owner}"] (id: i64) => {
+                Some(res_to_rpcvalue(read_event(&app_state, id).await))
+            }
             "update" [None, Write, "{s|n:name,s|n:date,s:api_token,s:owner}", "n"] (rec: rpcvalue::Map) => {
                 Some(res_to_rpcvalue(update_event(&app_state, rec).await))
+            }
+            "delete" [None, Write, "i", "n"] (id: i64) => {
+                Some(res_to_rpcvalue(delete_event(&app_state, id).await))
             }
         }
     );

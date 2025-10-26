@@ -8,7 +8,7 @@ use crate::appstate::QxLockedAppState;
 
 #[derive(Debug,Serialize,Deserialize,FromRpcValue,Default)]
 pub struct EventRecord {
-    pub id: Option<i32>,
+    pub id: Option<i64>,
     pub name: Option<String>,
     pub date: Option<chrono::DateTime<FixedOffset>>,
     pub api_token: Option<String>,
@@ -48,14 +48,47 @@ pub async fn create_event(app_state: &QxLockedAppState, rec: EventRecord) -> any
     Ok(events)
 }
 
+pub async fn read_event(app_state: &QxLockedAppState, id: i64) -> anyhow::Result<EventRecord> {
+    let state = app_state.read().await;
+    let event = state.db_pool.conn(move |conn| {
+        let event = conn.query_row(
+                "SELECT name, date, api_token, owner FROM events WHERE id = :id",
+                named_params! { ":id": id, },
+                |row| Ok(EventRecord {
+                    id: Some(id),
+                    name: row.get("name")?,
+                    date: row.get("date")?,
+                    api_token: row.get("api_token")?,
+                    owner: row.get("owner")?
+                })
+            );
+        event
+    }).await?;
+    Ok(event)
+}
 pub async fn update_event(app_state: &QxLockedAppState, rec: rpcvalue::Map) -> anyhow::Result<i64> {
+    update_table(app_state, "events".to_string(), rec).await
+}
+
+pub async fn delete_event(app_state: &QxLockedAppState, id: i64) -> anyhow::Result<()> {
+    let state = app_state.read().await;
+    state.db_pool.conn(move |conn| {
+        conn.execute(
+                "DELETE FROM events WHERE id = :id",
+                named_params! { ":id": id, },
+            )
+    }).await?;
+    Ok(())
+}
+
+async fn update_table(app_state: &QxLockedAppState, table_name: String, rec: rpcvalue::Map) -> anyhow::Result<i64> {
     let state = app_state.read().await;
 
     let updated = state.db_pool.conn(move |conn| {
-        let mut sql = String::from("UPDATE events SET ");
+        let mut sql = format!("UPDATE {} SET ", table_name);
         let mut updates = Vec::new();
         let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
-        
+
         // Extract ID first
         let id = rec.get("id")
             .ok_or(async_sqlite::rusqlite::Error::InvalidPath("Missing id".into()))?
@@ -66,7 +99,7 @@ pub async fn update_event(app_state: &QxLockedAppState, rec: rpcvalue::Map) -> a
             if key != "id" {  // Skip the id field for SET clause
                 let param_name = format!(":{}", key);
                 updates.push(format!("{} = {}", key, param_name));
-                
+
                 let sql_value = match value {
                     RpcValue { value: rpcvalue::Value::String(s), .. } => s.as_str().to_string().into(),
                     RpcValue { value: rpcvalue::Value::Int(i), .. } => (*i).into(),
@@ -74,7 +107,7 @@ pub async fn update_event(app_state: &QxLockedAppState, rec: rpcvalue::Map) -> a
                     RpcValue { value: rpcvalue::Value::Null, .. } => async_sqlite::rusqlite::types::Value::Null,
                     _ => return Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(format!("Unsupported value type for field {}", key).into())),
                 };
-                
+
                 params.push((param_name, sql_value));
             }
         }
