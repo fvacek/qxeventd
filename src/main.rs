@@ -1,6 +1,6 @@
 
 use clap::{arg, command, Parser};
-use log::info;
+use log::{info};
 use flexi_logger::{Logger};
 use shvproto::util::parse_log_verbosity;
 
@@ -54,19 +54,29 @@ async fn run_application() {
 }
 
 fn setup_logger(cli_opts: &Opts) -> Result<(), flexi_logger::FlexiLoggerError> {
-    let verbosity_str = if let Some(module_names) = &cli_opts.verbose {
-        parse_log_verbosity(module_names, module_path!()).iter().map(|(module, level)| {
-            if let Some(module) = module {
-                format!("{}:{}", module, level)
-            } else {
-                format!("{}", level)
-            }
-        }).collect::<Vec<String>>().join(",")
+    // Build the verbosity spec string (e.g. "mycrate=debug,net=info")
+    let verbosity_spec = if let Some(module_names) = &cli_opts.verbose {
+        let parsed = parse_log_verbosity(module_names, module_path!());
+
+        // Join module=level pairs into a flexi_logger filter string
+        let has_default = parsed.iter().any(|(m, _)| m.is_none());
+        let mut specs: Vec<String> = parsed
+            .iter()
+            .map(|(m, level)| match m {
+                Some(name) => format!("{}={}", name, level),
+                None => level.to_string(),
+            })
+            .collect();
+
+        if !has_default {
+            specs.push("info".into());
+        }
+        specs.join(",")
     } else {
         "info".into()
     };
-    println!("verbosity: {}", verbosity_str);
-    Logger::try_with_env_or_str(&verbosity_str)?
+    // println!("verbosity: {}", verbosity_spec);
+    Logger::try_with_env_or_str(&verbosity_spec)?
         .format(|w, now, record| {
             let target = if record.target().is_empty() {
                 String::new()
