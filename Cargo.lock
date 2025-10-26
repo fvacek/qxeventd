@@ -452,6 +452,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1585,6 +1586,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-sqlite",
+ "chrono",
  "clap",
  "flexi_logger",
  "log",
@@ -1655,6 +1657,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
 dependencies = [
  "bitflags 2.10.0",
+ "chrono",
  "fallible-iterator",
  "fallible-streaming-iterator",
  "hashlink",

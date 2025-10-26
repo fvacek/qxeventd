@@ -10,8 +10,10 @@ const MIGRATION_ARRAY: &[M] = &[
         r#"
         CREATE TABLE events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            date TEXT,
             owner TEXT,
-            api_token TEXT,
+            api_token TEXT
         );
         "#,
     ),
@@ -26,17 +28,17 @@ const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub async fn migrate_db() -> Result<Pool> {
     let config = GLOBAL_CONFIG.get().expect("Global config should be initialized");
-    let db_file = if config.data_dir.is_empty() {
-        ":memory:".to_string()
+    let (db_file, journal_mode) = if config.data_dir.is_empty() {
+        (":memory:".to_string(), JournalMode::Memory)
     } else {
         std::fs::create_dir_all(&config.data_dir)?;
         const DB_FILE: &str = "qxevent.sqlite";
-        format!("{}/{DB_FILE}", config.data_dir)
+        (format!("{}/{DB_FILE}", config.data_dir), JournalMode::Wal)
     };
 
     let pool = PoolBuilder::new()
                     .path(db_file)
-                    .journal_mode(JournalMode::Wal)
+                    .journal_mode(journal_mode)
                     .open()
                     .await?;
 

@@ -16,6 +16,7 @@ log = "0.4"
 clap = { version = "4.0", features = ["derive"] }
 serde_yaml = "0.9"
 url = "2.2"
-async-sqlite = "0.5"
+async-sqlite = { version = "0.5", features = ["chrono"] }
 rusqlite_migration = "2.3.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
+chrono = { version = "0.4.42", features = ["serde"] }

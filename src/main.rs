@@ -1,18 +1,26 @@
+use std::{backtrace::Backtrace, sync::OnceLock};
 
-use std::sync::OnceLock;
-
-use clap::{arg, command, Parser};
-use log::{info};
+use clap::{Parser, arg, command};
+use log::{error, info};
 use shvclient::appnodes::DotAppNode;
+use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 use smol::lock::RwLock;
 use url::Url;
 
-use crate::{appstate::{QxAppState, QxLockedAppState, QxSharedAppState}, config::Config, logger::setup_logger, migrate::migrate_db};
+use crate::{
+    appstate::{QxAppState, QxLockedAppState, QxSharedAppState},
+    config::Config,
+    events::list_events,
+    logger::setup_logger,
+    migrate::migrate_db,
+};
+use shvproto::{to_rpcvalue, RpcValue};
 
 mod appstate;
 mod config;
-mod migrate;
+mod events;
 mod logger;
+mod migrate;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -29,17 +37,12 @@ struct Opts {
     #[arg(short, long)]
     mount: Option<String>,
 
-    /// Database connection string
     #[arg(
         short,
         long,
         help = "Data directory, database file will be stored here."
     )]
     data_dir: Option<String>,
-
-    /// Database connection string
-    #[arg(short, long)]
-    write_database_token: Option<String>,
 
     /// Print effective config
     #[arg(long)]
@@ -100,14 +103,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-
-
-
     let db_pool = migrate_db().await?;
-    let app_state: QxSharedAppState = shvclient::AppState::new(RwLock::new(QxAppState{ db_pool }));
+    let app_state: QxSharedAppState = shvclient::AppState::new(RwLock::new(QxAppState { db_pool }));
 
     let dot_app_node = shvclient::fixed_node!(
-        sql_handler<QxLockedAppState>(request, _client_cmd_tx, _app_state) {
+        handler<QxLockedAppState>(request, _client_cmd_tx, _app_state) {
             "name" [IsGetter, Browse, "n", "s"] => {
                 Some(Ok(env!("CARGO_PKG_NAME").into()))
             }
@@ -120,15 +120,41 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     );
 
-    let config = GLOBAL_CONFIG.get().expect("Global config should be initialized");
+    let events_node = shvclient::fixed_node!(
+        handler<QxLockedAppState>(request, _client_cmd_tx, app_state) {
+            "list" [None, Read, "n", "[{n:id,s:name,s:date}]"] => {
+                Some(vec_to_rpcvalue(list_events(&app_state).await))
+            }
+        }
+    );
+
+    let config = GLOBAL_CONFIG
+        .get()
+        .expect("Global config should be initialized");
 
     shvclient::Client::new()
         .app(DotAppNode::new(env!("CARGO_PKG_NAME")))
         .mount(".app", dot_app_node)
-        // .mount("sql", sql_node)
+        .mount("events", events_node)
         .with_app_state(app_state)
         // .run_with_init(&client_config, app_tasks)
         .run(&config.client)
-        .await.map_err(|err| err.to_string().into())
+        .await
+        .map_err(|err| err.to_string().into())
+}
 
+fn anyhow_to_rpc_error(err: anyhow::Error) -> RpcError {
+    error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
+    RpcError::new(RpcErrorCode::MethodCallException, format!("Error: {err}"))
+}
+
+fn vec_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<Vec<T>>) -> Result<RpcValue, RpcError> {
+    res.and_then(|list| {
+        let rpc_values: Result<Vec<RpcValue>, _> = list.into_iter()
+            .map(|rec| to_rpcvalue(&rec))
+            .collect();
+        rpc_values.map(|values| values.into())
+            .map_err(|err| anyhow::anyhow!("Serialization error: {}", err))
+    })
+    .map_err(anyhow_to_rpc_error)
 }
