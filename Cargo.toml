@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "master", features = ["serde"]}
+shvrpc = { git = "https://github.com/silicon-heaven/libshvrpc-rs", branch = "master" }
+shvclient = { git = "https://github.com/silicon-heaven/libshvclient-rs", branch = "main", features = ["smol"]}
+
 smol = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -12,7 +16,6 @@ log = "0.4"
 clap = { version = "4.0", features = ["derive"] }
 serde_yaml = "0.9"
 url = "2.2"
-
-shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "master", features = ["serde"]}
-shvrpc = { git = "https://github.com/silicon-heaven/libshvrpc-rs", branch = "master" }
-shvclient = { git = "https://github.com/silicon-heaven/libshvclient-rs", branch = "main", features = ["smol"]}
+async-sqlite = "0.5"
+rusqlite_migration = "2.3.0"
+anyhow = { version = "1.0", features = ["backtrace"] }
