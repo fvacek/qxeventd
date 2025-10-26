@@ -10,7 +10,7 @@ use url::Url;
 use crate::{
     appstate::{QxAppState, QxLockedAppState, QxSharedAppState},
     config::Config,
-    events::list_events,
+    events::{create_event, list_events, update_event, EventRecord},
     logger::setup_logger,
     migrate::migrate_db,
 };
@@ -125,6 +125,12 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             "list" [None, Read, "n", "[{n:id,s:name,s:date}]"] => {
                 Some(vec_to_rpcvalue(list_events(&app_state).await))
             }
+            "create" [None, Write, "{s|n:name,s|n:date,s:api_token,s:owner}", "i"] (rec: EventRecord) => {
+                Some(res_to_rpcvalue(create_event(&app_state, rec).await))
+            }
+            "update" [None, Write, "{s|n:name,s|n:date,s:api_token,s:owner}", "n"] (rec: EventRecord) => {
+                Some(res_to_rpcvalue(update_event(&app_state, rec).await))
+            }
         }
     );
 
@@ -146,6 +152,14 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 fn anyhow_to_rpc_error(err: anyhow::Error) -> RpcError {
     error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
     RpcError::new(RpcErrorCode::MethodCallException, format!("Error: {err}"))
+}
+
+fn res_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<T>) -> Result<RpcValue, RpcError> {
+    res.and_then(|value| {
+        to_rpcvalue(&value)
+            .map_err(|err| anyhow::anyhow!("Serialization error: {}", err))
+    })
+    .map_err(anyhow_to_rpc_error)
 }
 
 fn vec_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<Vec<T>>) -> Result<RpcValue, RpcError> {

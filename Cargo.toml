@@ -20,3 +20,11 @@ async-sqlite = { version = "0.5", features = ["chrono"] }
 rusqlite_migration = "2.3.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
 chrono = { version = "0.4.42", features = ["serde"] }
+
+# For local development
+# [patch."https://github.com/silicon-heaven/libshvproto-rs"]
+# shvproto = { path = "../libshvproto-rs" }
+# [patch."https://github.com/silicon-heaven/libshvrpc-rs"]
+# shvrpc = { path = "../libshvrpc-rs" }
+# [patch."https://github.com/silicon-heaven/libshvclient-rs"]
+# shvclient = { path = "../libshvclient-rs" }

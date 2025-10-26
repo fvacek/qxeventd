@@ -1,13 +1,15 @@
-use chrono::Utc;
+use async_sqlite::rusqlite::named_params;
+use chrono::{FixedOffset};
 use serde::{Deserialize, Serialize};
+use shvproto::FromRpcValue;
 
 use crate::appstate::QxLockedAppState;
 
-#[derive(Debug,Serialize,Deserialize,Default)]
+#[derive(Debug,Serialize,Deserialize,FromRpcValue,Default)]
 pub struct EventRecord {
     pub id: Option<i32>,
     pub name: Option<String>,
-    pub date: Option<chrono::DateTime<Utc>>,
+    pub date: Option<chrono::DateTime<FixedOffset>>,
     pub api_token: Option<String>,
     pub owner: Option<String>,
 }
@@ -24,6 +26,40 @@ pub async fn list_events(app_state: &QxLockedAppState) -> anyhow::Result<Vec<Eve
                     ..Default::default()
                 })
             })?.collect()
+    }).await?;
+    Ok(events)
+}
+
+pub async fn create_event(app_state: &QxLockedAppState, rec: EventRecord) -> anyhow::Result<i64> {
+    let state = app_state.read().await;
+    let events = state.db_pool.conn(move |conn| {
+        conn.query_row(
+                "INSERT INTO events (name, date, api_token, owner) VALUES (:name, :date, :api_token, :owner) RETURNING id",
+                named_params! {
+                    ":name": rec.name,
+                    ":date": rec.date,
+                    ":api_token": rec.api_token,
+                    ":owner": rec.owner
+                },
+                |row| row.get::<_, i64>(0)
+            )
+    }).await?;
+    Ok(events)
+}
+
+pub async fn update_event(app_state: &QxLockedAppState, rec: EventRecord) -> anyhow::Result<i64> {
+    let state = app_state.read().await;
+    let events = state.db_pool.conn(move |conn| {
+        conn.query_row(
+                "INSERT INTO events (name, date, api_token, owner) VALUES (:name, :date, :api_token, :owner) RETURNING id",
+                named_params! {
+                    ":name": rec.name,
+                    ":date": rec.date,
+                    ":api_token": rec.api_token,
+                    ":owner": rec.owner
+                },
+                |row| row.get::<_, i64>(0)
+            )
     }).await?;
     Ok(events)
 }
