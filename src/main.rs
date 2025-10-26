@@ -14,7 +14,7 @@ use crate::{
     logger::setup_logger,
     migrate::migrate_db,
 };
-use shvproto::{to_rpcvalue, RpcValue};
+use shvproto::{rpcvalue, to_rpcvalue, RpcValue};
 
 mod appstate;
 mod config;
@@ -128,7 +128,7 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             "create" [None, Write, "{s|n:name,s|n:date,s:api_token,s:owner}", "i"] (rec: EventRecord) => {
                 Some(res_to_rpcvalue(create_event(&app_state, rec).await))
             }
-            "update" [None, Write, "{s|n:name,s|n:date,s:api_token,s:owner}", "n"] (rec: EventRecord) => {
+            "update" [None, Write, "{s|n:name,s|n:date,s:api_token,s:owner}", "n"] (rec: rpcvalue::Map) => {
                 Some(res_to_rpcvalue(update_event(&app_state, rec).await))
             }
         }
