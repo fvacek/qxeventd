@@ -1,11 +1,8 @@
-use std::backtrace::Backtrace;
-
 use async_sqlite::rusqlite::named_params;
-use chrono::{FixedOffset};
-use log::error;
+use chrono::FixedOffset;
 use serde::{Deserialize, Serialize};
-use shvproto::{rpcvalue, FromRpcValue, RpcValue};
-use anyhow::anyhow;
+use shvproto::{FromRpcValue, RpcValue, rpcvalue};
+
 
 use crate::appstate::QxLockedAppState;
 
@@ -55,50 +52,49 @@ pub async fn update_event(app_state: &QxLockedAppState, rec: rpcvalue::Map) -> a
     let state = app_state.read().await;
 
     let updated = state.db_pool.conn(move |conn| {
-        let sql = String::from("UPDATE events SET ");
-        let (sql2, params) = to_sql_params(rec)?;
+        let mut sql = String::from("UPDATE events SET ");
+        let mut updates = Vec::new();
+        let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
+        
+        // Extract ID first
+        let id = rec.get("id")
+            .ok_or(async_sqlite::rusqlite::Error::InvalidPath("Missing id".into()))?
+            .as_int() as i64;
 
-        let mut stmt = conn.prepare(&format!("{sql} {sql2}"))?;
-        let rows_affected = stmt.execute(&params[..])?;
+        // Process each field in the map
+        for (key, value) in rec.iter() {
+            if key != "id" {  // Skip the id field for SET clause
+                let param_name = format!(":{}", key);
+                updates.push(format!("{} = {}", key, param_name));
+                
+                let sql_value = match value {
+                    RpcValue { value: rpcvalue::Value::String(s), .. } => s.as_str().to_string().into(),
+                    RpcValue { value: rpcvalue::Value::Int(i), .. } => (*i).into(),
+                    RpcValue { value: rpcvalue::Value::DateTime(dt), .. } => dt.to_chrono_datetime().to_rfc3339().into(),
+                    RpcValue { value: rpcvalue::Value::Null, .. } => async_sqlite::rusqlite::types::Value::Null,
+                    _ => return Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(format!("Unsupported value type for field {}", key).into())),
+                };
+                
+                params.push((param_name, sql_value));
+            }
+        }
+
+        if updates.is_empty() {
+            return Err(async_sqlite::rusqlite::Error::InvalidPath("No fields to update".into()));
+        }
+
+        sql.push_str(&updates.join(", "));
+        sql.push_str(" WHERE id = :id");
+        params.push((":id".to_string(), id.into()));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> = params.iter()
+            .map(|(name, val)| (name.as_str(), val as &dyn async_sqlite::rusqlite::ToSql))
+            .collect();
+        let rows_affected = stmt.execute(&param_refs[..])?;
 
         Ok(rows_affected as i64)
     }).await?;
 
     Ok(updated)
-}
-
-fn rpcvalue_to_ruslite(value: RpcValue) -> Result<async_sqlite::rusqlite::types::Value, async_sqlite::rusqlite::Error> {
-    let val = match value.value {
-        rpcvalue::Value::Null => async_sqlite::rusqlite::types::Value::Null,
-        rpcvalue::Value::Bool(b) => b.into(),
-        rpcvalue::Value::String(s) => { let s2: String = *s; s2.into()},
-        shvproto::Value::Int(i) => i.into(),
-        shvproto::Value::UInt(u) => (u as i64).into(),
-        shvproto::Value::Double(d) => d.into(),
-        shvproto::Value::DateTime(dt) => (&dt.to_chrono_datetime() as &dyn async_sqlite::rusqlite::ToSql).into(),
-        _ => return Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(format!("Unsupported type {}", value.type_name()).into())),
-    };
-    Ok(val)
-}
-
-fn to_sql_params(rec: rpcvalue::Map) -> Result<(String, Vec<(&'static str, async_sqlite::rusqlite::types::Value)>), async_sqlite::rusqlite::Error> {
-    let id = rec.get("id").ok_or_else(|| create_rusqlite_error_invalid_column_name("Missing id"))?.as_int();
-    let mut sql = String::new();
-    let mut params: Vec<(&'static str, async_sqlite::rusqlite::types::Value)> = Vec::new();
-    for (key, value) in rec.into_iter() {
-        sql.push_str(&format!("{} = :{}, ", key, key));
-        params.push((key.as_str(), rpcvalue_to_ruslite(value)?));
-    }
-    if sql.ends_with(", ") {
-        sql.truncate(sql.len() - 2);
-    }
-    sql.push_str(" WHERE id = :id");
-    params.push((":id", id.into()));
-
-    Ok((sql, params))
-}
-
-fn create_rusqlite_error_invalid_column_name(err: &str) -> async_sqlite::rusqlite::Error {
-    error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
-    async_sqlite::rusqlite::Error::InvalidColumnName(err.into())
 }
