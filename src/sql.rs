@@ -1,6 +1,5 @@
-use crate::appstate::{QxLockedAppState, QxSharedAppState};
+use crate::appstate::{QxSharedAppState};
 use async_sqlite::rusqlite::types::ValueRef;
-use shvclient::ClientCommandSender;
 use shvproto::{RpcValue, rpcvalue};
 
 pub async fn list_records(
@@ -43,11 +42,17 @@ pub async fn list_records(
     Ok(events)
 }
 
-pub async fn create_record(state: QxSharedAppState, _shv_sender: ClientCommandSender<QxLockedAppState>, table: &str, record: rpcvalue::Map, _issuer: &str) -> anyhow::Result<i64> {
+pub async fn create_record(
+    state: QxSharedAppState,
+    table: &str,
+    record: rpcvalue::Map,
+) -> anyhow::Result<i64> {
     let state = state.read().await;
-    let table = table.to_string();
 
-    let updated = state
+    let table_name = table.to_string();
+    let record2 = record.clone();
+
+    let insert_id = state
         .db_pool
         .conn(move |conn| {
             let mut fields = Vec::new();
@@ -55,7 +60,7 @@ pub async fn create_record(state: QxSharedAppState, _shv_sender: ClientCommandSe
             let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
 
             // Process each field in the map
-            for (key, value) in record.iter() {
+            for (key, value) in record2.iter() {
                 if key == "id" {
                     // Skip the id field for SET clause
                     continue;
@@ -65,22 +70,10 @@ pub async fn create_record(state: QxSharedAppState, _shv_sender: ClientCommandSe
                 values.push(param_name.clone());
 
                 let sql_value = match value {
-                    RpcValue {
-                        value: rpcvalue::Value::String(s),
-                        ..
-                    } => s.as_str().to_string().into(),
-                    RpcValue {
-                        value: rpcvalue::Value::Int(i),
-                        ..
-                    } => (*i).into(),
-                    RpcValue {
-                        value: rpcvalue::Value::DateTime(dt),
-                        ..
-                    } => dt.to_chrono_datetime().to_rfc3339().into(),
-                    RpcValue {
-                        value: rpcvalue::Value::Null,
-                        ..
-                    } => async_sqlite::rusqlite::types::Value::Null,
+                    RpcValue { value: rpcvalue::Value::String(s), .. } => s.as_str().to_string().into(),
+                    RpcValue { value: rpcvalue::Value::Int(i), .. } => (*i).into(),
+                    RpcValue { value: rpcvalue::Value::DateTime(dt), .. } => dt.to_chrono_datetime().to_rfc3339().into(),
+                    RpcValue { value: rpcvalue::Value::Null, .. } => async_sqlite::rusqlite::types::Value::Null,
                     _ => {
                         return Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(
                             format!("Unsupported value type for field {}", key).into(),
@@ -97,18 +90,76 @@ pub async fn create_record(state: QxSharedAppState, _shv_sender: ClientCommandSe
                 ));
             }
 
-            let sql = format!("INSERT INTO {table} ({}) VALUES ({}) RETURNING id", fields.join(", "), values.join(", "));
+            let sql = format!("INSERT INTO {table_name} ({}) VALUES ({}) RETURNING id", fields.join(", "), values.join(", "));
 
-            let mut stmt = conn.prepare(&sql)?;
             let param_refs: Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> = params
                 .iter()
                 .map(|(name, val)| (name.as_str(), val as &dyn async_sqlite::rusqlite::ToSql))
                 .collect();
-            let rows_affected = stmt.execute(&param_refs[..])?;
-
-            Ok(rows_affected as i64)
+            let insert_id: i64 = conn.query_row(&sql, &param_refs[..], |row| row.get(0))?;
+            Ok(insert_id)
         })
         .await?;
+    Ok(insert_id)
+}
 
-    Ok(updated)
+pub async fn update_record(
+    state: QxSharedAppState,
+    table: &str,
+    id: i64,
+    record: rpcvalue::Map,
+) -> anyhow::Result<i64> {
+    let state = state.read().await;
+
+    let table_name = table.to_string();
+    let record2 = record.clone();
+
+    let rows_inserted = state
+        .db_pool
+        .conn(move |conn| {
+            let mut fields = Vec::new();
+            let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
+
+            // Process each field in the map
+            for (key, value) in record2.iter() {
+                if key == "id" {
+                    // Skip the id field for SET clause
+                    continue;
+                }
+                let param_name = format!(":{}", key);
+                fields.push(format!("{} = {}", key, param_name));
+
+                let sql_value = match value {
+                    RpcValue { value: rpcvalue::Value::String(s), .. } => s.as_str().to_string().into(),
+                    RpcValue { value: rpcvalue::Value::Int(i), .. } => (*i).into(),
+                    RpcValue { value: rpcvalue::Value::DateTime(dt), .. } => dt.to_chrono_datetime().to_rfc3339().into(),
+                    RpcValue { value: rpcvalue::Value::Null, .. } => async_sqlite::rusqlite::types::Value::Null,
+                    _ => {
+                        return Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(
+                            format!("Unsupported value type for field {}", key).into(),
+                        ));
+                    }
+                };
+
+                params.push((param_name, sql_value));
+            }
+
+            if fields.is_empty() {
+                return Err(async_sqlite::rusqlite::Error::InvalidPath(
+                    "No fields to update".into(),
+                ));
+            }
+            params.push(("id".into(), id.into()));
+
+            let sql = format!("UPDATE {table_name} SET {} WHERE id = :id", fields.join(", "));
+
+            let param_refs: Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> = params
+                .iter()
+                .map(|(name, val)| (name.as_str(), val as &dyn async_sqlite::rusqlite::ToSql))
+                .collect();
+            let rows_inserted = conn.execute(&sql, &param_refs[..])?;
+            Ok(rows_inserted)
+        })
+        .await?;
+    Ok(rows_inserted as i64)
 }
