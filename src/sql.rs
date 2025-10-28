@@ -2,6 +2,46 @@ use crate::appstate::{QxSharedAppState};
 use async_sqlite::rusqlite::types::ValueRef;
 use shvproto::{RpcValue, rpcvalue};
 
+fn convert_rpc_value_to_sql(key: &str, value: &RpcValue) -> Result<async_sqlite::rusqlite::types::Value, async_sqlite::rusqlite::Error> {
+    match value {
+        RpcValue { value: rpcvalue::Value::String(s), .. } => Ok(s.as_str().to_string().into()),
+        RpcValue { value: rpcvalue::Value::Int(i), .. } => Ok((*i).into()),
+        RpcValue { value: rpcvalue::Value::DateTime(dt), .. } => Ok(dt.to_chrono_datetime().to_rfc3339().into()),
+        RpcValue { value: rpcvalue::Value::Null, .. } => Ok(async_sqlite::rusqlite::types::Value::Null),
+        _ => Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(
+            format!("Unsupported value type for field {}", key).into(),
+        )),
+    }
+}
+
+fn process_record_params(record: &rpcvalue::Map) -> Result<Vec<(String, async_sqlite::rusqlite::types::Value)>, async_sqlite::rusqlite::Error> {
+    let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
+    
+    for (key, value) in record.iter() {
+        if key == "id" {
+            continue;
+        }
+        let param_name = format!(":{}", key);
+        let sql_value = convert_rpc_value_to_sql(key, value)?;
+        params.push((param_name, sql_value));
+    }
+    
+    if params.is_empty() {
+        return Err(async_sqlite::rusqlite::Error::InvalidPath(
+            "No fields to process".into(),
+        ));
+    }
+    
+    Ok(params)
+}
+
+fn create_param_refs(params: &[(String, async_sqlite::rusqlite::types::Value)]) -> Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> {
+    params
+        .iter()
+        .map(|(name, val)| (name.as_str(), val as &dyn async_sqlite::rusqlite::ToSql))
+        .collect()
+}
+
 pub async fn list_records(
     app_state: QxSharedAppState,
     table: &str,
@@ -55,47 +95,18 @@ pub async fn create_record(
     let insert_id = state
         .db_pool
         .conn(move |conn| {
-            let mut fields = Vec::new();
-            let mut values = Vec::new();
-            let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
-
-            // Process each field in the map
-            for (key, value) in record2.iter() {
-                if key == "id" {
-                    // Skip the id field for SET clause
-                    continue;
-                }
-                let param_name = format!(":{}", key);
-                fields.push(key.to_string());
-                values.push(param_name.clone());
-
-                let sql_value = match value {
-                    RpcValue { value: rpcvalue::Value::String(s), .. } => s.as_str().to_string().into(),
-                    RpcValue { value: rpcvalue::Value::Int(i), .. } => (*i).into(),
-                    RpcValue { value: rpcvalue::Value::DateTime(dt), .. } => dt.to_chrono_datetime().to_rfc3339().into(),
-                    RpcValue { value: rpcvalue::Value::Null, .. } => async_sqlite::rusqlite::types::Value::Null,
-                    _ => {
-                        return Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(
-                            format!("Unsupported value type for field {}", key).into(),
-                        ));
-                    }
-                };
-
-                params.push((param_name, sql_value));
-            }
-
-            if fields.is_empty() {
-                return Err(async_sqlite::rusqlite::Error::InvalidPath(
-                    "No fields to update".into(),
-                ));
-            }
+            let params = process_record_params(&record2)?;
+            
+            let fields: Vec<String> = params.iter()
+                .map(|(name, _)| name.trim_start_matches(':').to_string())
+                .collect();
+            let values: Vec<String> = params.iter()
+                .map(|(name, _)| name.clone())
+                .collect();
 
             let sql = format!("INSERT INTO {table_name} ({}) VALUES ({}) RETURNING id", fields.join(", "), values.join(", "));
 
-            let param_refs: Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> = params
-                .iter()
-                .map(|(name, val)| (name.as_str(), val as &dyn async_sqlite::rusqlite::ToSql))
-                .collect();
+            let param_refs = create_param_refs(&params);
             let insert_id: i64 = conn.query_row(&sql, &param_refs[..], |row| row.get(0))?;
             Ok(insert_id)
         })
@@ -117,46 +128,17 @@ pub async fn update_record(
     let rows_inserted = state
         .db_pool
         .conn(move |conn| {
-            let mut fields = Vec::new();
-            let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
-
-            // Process each field in the map
-            for (key, value) in record2.iter() {
-                if key == "id" {
-                    // Skip the id field for SET clause
-                    continue;
-                }
-                let param_name = format!(":{}", key);
-                fields.push(format!("{} = {}", key, param_name));
-
-                let sql_value = match value {
-                    RpcValue { value: rpcvalue::Value::String(s), .. } => s.as_str().to_string().into(),
-                    RpcValue { value: rpcvalue::Value::Int(i), .. } => (*i).into(),
-                    RpcValue { value: rpcvalue::Value::DateTime(dt), .. } => dt.to_chrono_datetime().to_rfc3339().into(),
-                    RpcValue { value: rpcvalue::Value::Null, .. } => async_sqlite::rusqlite::types::Value::Null,
-                    _ => {
-                        return Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(
-                            format!("Unsupported value type for field {}", key).into(),
-                        ));
-                    }
-                };
-
-                params.push((param_name, sql_value));
-            }
-
-            if fields.is_empty() {
-                return Err(async_sqlite::rusqlite::Error::InvalidPath(
-                    "No fields to update".into(),
-                ));
-            }
-            params.push(("id".into(), id.into()));
+            let mut params = process_record_params(&record2)?;
+            
+            let fields: Vec<String> = params.iter()
+                .map(|(name, _)| format!("{} = {}", name.trim_start_matches(':'), name))
+                .collect();
+            
+            params.push((":id".into(), id.into()));
 
             let sql = format!("UPDATE {table_name} SET {} WHERE id = :id", fields.join(", "));
 
-            let param_refs: Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> = params
-                .iter()
-                .map(|(name, val)| (name.as_str(), val as &dyn async_sqlite::rusqlite::ToSql))
-                .collect();
+            let param_refs = create_param_refs(&params);
             let rows_inserted = conn.execute(&sql, &param_refs[..])?;
             Ok(rows_inserted)
         })
