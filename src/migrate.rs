@@ -26,7 +26,7 @@ const MIGRATION_ARRAY: &[M] = &[
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
-pub async fn migrate_db() -> Result<Pool> {
+pub async fn create_db_connection() -> Result<Pool> {
     let config = GLOBAL_CONFIG.get().expect("Global config should be initialized");
     let (db_file, journal_mode) = if config.data_dir.is_empty() {
         (":memory:".to_string(), JournalMode::Memory)
@@ -38,8 +38,12 @@ pub async fn migrate_db() -> Result<Pool> {
 
     let pool = PoolBuilder::new()
                     .path(db_file)
-                    .journal_mode(journal_mode)
-                    .open()
+                    .journal_mode(journal_mode);
+    let pool = match journal_mode {
+        JournalMode::Memory => pool.num_conns(1),
+        _ => pool,
+    };
+    let pool = pool.open()
                     .await?;
 
     // Update the database schema, atomically

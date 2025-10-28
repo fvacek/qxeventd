@@ -3,10 +3,9 @@ use chrono::FixedOffset;
 use serde::{Deserialize, Serialize};
 use shvproto::{FromRpcValue, RpcValue, rpcvalue};
 
+use crate::{appstate::{QxLockedAppState, QxSharedAppState}, sql::list_records};
 
-use crate::appstate::QxLockedAppState;
-
-#[derive(Debug,Serialize,Deserialize,FromRpcValue,Default)]
+#[derive(Debug, Serialize, Deserialize, FromRpcValue, Default)]
 pub struct EventRecord {
     pub id: Option<i64>,
     pub name: Option<String>,
@@ -15,20 +14,8 @@ pub struct EventRecord {
     pub owner: Option<String>,
 }
 
-pub async fn list_events(app_state: &QxLockedAppState) -> anyhow::Result<Vec<EventRecord>> {
-    let state = app_state.read().await;
-    let events = state.db_pool.conn(|conn| {
-        let mut stmt = conn.prepare("SELECT id, name, date FROM events")?;
-        stmt.query_map([], |row| {
-                Ok(EventRecord {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    date: row.get(2)?,
-                    ..Default::default()
-                })
-            })?.collect()
-    }).await?;
-    Ok(events)
+pub async fn list_events(app_state: QxSharedAppState) -> anyhow::Result<Vec<rpcvalue::Map>> {
+    list_records(app_state, "events", Some(&["id", "name", "date", "owner"])).await
 }
 
 pub async fn create_event(app_state: &QxLockedAppState, rec: EventRecord) -> anyhow::Result<i64> {
@@ -50,84 +37,120 @@ pub async fn create_event(app_state: &QxLockedAppState, rec: EventRecord) -> any
 
 pub async fn read_event(app_state: &QxLockedAppState, id: i64) -> anyhow::Result<EventRecord> {
     let state = app_state.read().await;
-    let event = state.db_pool.conn(move |conn| {
-        let event = conn.query_row(
+    let event = state
+        .db_pool
+        .conn(move |conn| {
+            let event = conn.query_row(
                 "SELECT name, date, api_token, owner FROM events WHERE id = :id",
                 named_params! { ":id": id, },
-                |row| Ok(EventRecord {
-                    id: Some(id),
-                    name: row.get("name")?,
-                    date: row.get("date")?,
-                    api_token: row.get("api_token")?,
-                    owner: row.get("owner")?
-                })
+                |row| {
+                    Ok(EventRecord {
+                        id: Some(id),
+                        name: row.get("name")?,
+                        date: row.get("date")?,
+                        api_token: row.get("api_token")?,
+                        owner: row.get("owner")?,
+                    })
+                },
             );
-        event
-    }).await?;
+            event
+        })
+        .await?;
     Ok(event)
 }
-pub async fn update_event(app_state: &QxLockedAppState, rec: rpcvalue::Map) -> anyhow::Result<i64> {
-    update_table(app_state, "events".to_string(), rec).await
+pub async fn update_event(
+    app_state: &QxLockedAppState,
+    id: i64,
+    rec: rpcvalue::Map,
+) -> anyhow::Result<i64> {
+    update_table(app_state, "events".to_string(), id, rec).await
 }
 
 pub async fn delete_event(app_state: &QxLockedAppState, id: i64) -> anyhow::Result<()> {
     let state = app_state.read().await;
-    state.db_pool.conn(move |conn| {
-        conn.execute(
+    state
+        .db_pool
+        .conn(move |conn| {
+            conn.execute(
                 "DELETE FROM events WHERE id = :id",
                 named_params! { ":id": id, },
             )
-    }).await?;
+        })
+        .await?;
     Ok(())
 }
 
-async fn update_table(app_state: &QxLockedAppState, table_name: String, rec: rpcvalue::Map) -> anyhow::Result<i64> {
+async fn update_table(
+    app_state: &QxLockedAppState,
+    table_name: String,
+    id: i64,
+    rec: rpcvalue::Map,
+) -> anyhow::Result<i64> {
     let state = app_state.read().await;
 
-    let updated = state.db_pool.conn(move |conn| {
-        let mut sql = format!("UPDATE {} SET ", table_name);
-        let mut updates = Vec::new();
-        let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
+    let updated = state
+        .db_pool
+        .conn(move |conn| {
+            let mut sql = format!("UPDATE {} SET ", table_name);
+            let mut updates = Vec::new();
+            let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
 
-        // Extract ID first
-        let id = rec.get("id")
-            .ok_or(async_sqlite::rusqlite::Error::InvalidPath("Missing id".into()))?
-            .as_int() as i64;
-
-        // Process each field in the map
-        for (key, value) in rec.iter() {
-            if key != "id" {  // Skip the id field for SET clause
+            // Process each field in the map
+            for (key, value) in rec.iter() {
+                if key == "id" {
+                    // Skip the id field for SET clause
+                    continue;
+                }
                 let param_name = format!(":{}", key);
                 updates.push(format!("{} = {}", key, param_name));
 
                 let sql_value = match value {
-                    RpcValue { value: rpcvalue::Value::String(s), .. } => s.as_str().to_string().into(),
-                    RpcValue { value: rpcvalue::Value::Int(i), .. } => (*i).into(),
-                    RpcValue { value: rpcvalue::Value::DateTime(dt), .. } => dt.to_chrono_datetime().to_rfc3339().into(),
-                    RpcValue { value: rpcvalue::Value::Null, .. } => async_sqlite::rusqlite::types::Value::Null,
-                    _ => return Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(format!("Unsupported value type for field {}", key).into())),
+                    RpcValue {
+                        value: rpcvalue::Value::String(s),
+                        ..
+                    } => s.as_str().to_string().into(),
+                    RpcValue {
+                        value: rpcvalue::Value::Int(i),
+                        ..
+                    } => (*i).into(),
+                    RpcValue {
+                        value: rpcvalue::Value::DateTime(dt),
+                        ..
+                    } => dt.to_chrono_datetime().to_rfc3339().into(),
+                    RpcValue {
+                        value: rpcvalue::Value::Null,
+                        ..
+                    } => async_sqlite::rusqlite::types::Value::Null,
+                    _ => {
+                        return Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(
+                            format!("Unsupported value type for field {}", key).into(),
+                        ));
+                    }
                 };
 
                 params.push((param_name, sql_value));
             }
-        }
 
-        if updates.is_empty() {
-            return Err(async_sqlite::rusqlite::Error::InvalidPath("No fields to update".into()));
-        }
+            if updates.is_empty() {
+                return Err(async_sqlite::rusqlite::Error::InvalidPath(
+                    "No fields to update".into(),
+                ));
+            }
 
-        sql.push_str(&updates.join(", "));
-        sql.push_str(" WHERE id = :id");
-        params.push((":id".to_string(), id.into()));
+            sql.push_str(&updates.join(", "));
+            sql.push_str(" WHERE id = :id");
+            params.push((":id".to_string(), id.into()));
 
-        let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> = params.iter()
-            .map(|(name, val)| (name.as_str(), val as &dyn async_sqlite::rusqlite::ToSql))
-            .collect();
-        let rows_affected = stmt.execute(&param_refs[..])?;
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> = params
+                .iter()
+                .map(|(name, val)| (name.as_str(), val as &dyn async_sqlite::rusqlite::ToSql))
+                .collect();
+            let rows_affected = stmt.execute(&param_refs[..])?;
 
-        Ok(rows_affected as i64)
-    }).await?;
+            Ok(rows_affected as i64)
+        })
+        .await?;
 
     Ok(updated)
 }
