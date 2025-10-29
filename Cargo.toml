@@ -7,6 +7,7 @@ edition = "2024"
 shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "master", features = ["serde"]}
 shvrpc = { git = "https://github.com/silicon-heaven/libshvrpc-rs", branch = "master" }
 shvclient = { git = "https://github.com/silicon-heaven/libshvclient-rs", branch = "main", features = ["smol"]}
+qxsql = { git = "https://github.com/fvacek/qxsql.git", branch = "master" }
 
 smol = "2.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -20,6 +21,7 @@ async-sqlite = { version = "0.5", features = ["chrono"] }
 rusqlite_migration = "2.3.0"
 anyhow = { version = "1.0", features = ["backtrace"] }
 chrono = { version = "0.4.42", features = ["serde"] }
+async-trait = "0.1.89"
 
 # For local development
 # [patch."https://github.com/silicon-heaven/libshvproto-rs"]

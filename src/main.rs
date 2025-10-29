@@ -10,11 +10,11 @@ use url::Url;
 use crate::{
     appstate::{QxAppState, QxLockedAppState, QxSharedAppState},
     config::Config,
-    events::{delete_event, read_event},
     logger::setup_logger,
-    migrate::create_db_connection, sql::{create_record, list_records, update_record},
+    migrate::create_db_connection, sql::QxSql,
 };
-use shvproto::{rpcvalue, to_rpcvalue, RpcValue, Value};
+use shvproto::{to_rpcvalue, RpcValue};
+use qxsql::{sql::{RecListParam, SqlProvider}, string_list_to_ref_vec, QueryAndParams, RecChng, RecDeleteParam, RecInsertParam, RecOp, RecReadParam, RecUpdateParam};
 
 mod appstate;
 mod config;
@@ -121,41 +121,62 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     );
 
-    let events_node = shvclient::fixed_node!(
-        handler<QxLockedAppState>(request, _client_cmd_tx, app_state) {
-            "list" [None, Read, "n", "[{n:id,s:name,s:date}]"] => {
-                Some(vec_to_rpcvalue_into(list_records(app_state, "events", Some(&["id", "name", "date", "owner"])).await))
+    let sql_node = shvclient::fixed_node!(
+        handler<QxLockedAppState>(request, client_cmd_tx, app_state) {
+            "query" [None, Read, "[s:query,{s|i|b|t|n}:params]", "{{s:name}:fields,[[s|i|b|t|n]]:rows}"] (query: QueryAndParams) => {
+                let qxsql = QxSql(app_state);
+                let result = qxsql.query(query.query(), query.params()).await;
+                Some(res_to_rpcvalue(result))
             }
-            "create" [None, Write, "{s|n:name,s|n:date,s:api_token,s:owner}", "i"] (record: rpcvalue::Map) => {
-                Some(res_to_rpcvalue(create_record(app_state, "events", record).await))
+            "exec" [None, Read, "[s:query,{s|i|b|t|n}:params,s|n:issuer]", "{{s:name}:fields,[[s|i|b|t|n]]:rows}"] (query: QueryAndParams) => {
+                let qxsql = QxSql(app_state);
+                let result = qxsql.exec(query.query(), query.params()).await;
+                Some(res_to_rpcvalue(result))
             }
-            "read" [None, Write, "i", "{s|n:name,s|n:date,s:api_token,s:owner}"] (id: i64) => {
-                Some(res_to_rpcvalue(read_event(&app_state, id).await))
+            "list" [None, Read, "n", "[{n:id,s:name,s:date}]"] (param: RecListParam) => {
+                let qxsql = QxSql(app_state);
+                let fields = string_list_to_ref_vec(&param.fields);
+                let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
+                Some(res_to_rpcvalue(result))
             }
-            "update" [None, Write, "[i:id,{s|n:name,s|n:date,s:api_token,s:owner}:record]", "n"] (param: rpcvalue::List) => {
-                if param.len() != 2 {
-                    return Some(Err(RpcError::new(RpcErrorCode::MethodCallException, "Parameter must be list of two elements")));
+            "create" [None, Write, "{s:table,{s|i|b|t|n}:record,s:issuer}", "i"] (param: RecInsertParam) => {
+                let qxsql = QxSql(app_state);
+                let insert_id = qxsql.create_record(&param.table, &param.record).await;
+                if let Ok(insert_id) = insert_id {
+                    let recchng = RecChng {table:param.table, id:insert_id, record:Some(param.record), op: RecOp::Insert, issuer:param.issuer };
+                    let rec = to_rpcvalue(&recchng).expect("serde should work");
+                    client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
+                                    .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
                 }
-                let mut param = param;
-                let id = param.remove(0).as_i64();
-                let Value::Map(record) = param.remove(0).value else {
-                    return Some(Err(RpcError::new(RpcErrorCode::MethodCallException, "Second parameter must be Map")));
-                };
-                // let rec2 = *(rec.clone());
-                // let res = update_event(&app_state, id, rec2).await;
-                // if res.is_ok() {
-                //     let mut recchng = rpcvalue::Map::new();
-                //     recchng.insert("id".to_string(), id.into());
-                //     recchng.insert("record".to_string(), (*rec).into());
-                //     // recchng.insert("op".to_string(), "Update".into()));
-                //     // recchng.insert("issuer".to_string(), issuer.into());
-                //     client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(recchng.into())))
-                //                     .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
-                // }
-                Some(res_to_rpcvalue(update_record(app_state, "events", id, *record).await))
+                Some(res_to_rpcvalue(insert_id))
             }
-            "delete" [None, Write, "i", "n"] (id: i64) => {
-                Some(res_to_rpcvalue(delete_event(&app_state, id).await))
+            "read" [None, Read, "{s:table,i:id},{s}|n:fields", "{s|i|b|t|n}|n"] (param: RecReadParam) => {
+                let qxsql = QxSql(app_state);
+                let fields = string_list_to_ref_vec(&param.fields);
+                let result = qxsql.read_record(&param.table, param.id, fields).await;
+                Some(res_to_rpcvalue(result))
+            }
+            "update" [None, Write, "{s:table,i:id,{s|i|b|t|n}:record,s:issuer}", "b"] (param: RecUpdateParam) => {
+                let qxsql = QxSql(app_state);
+                let update_success = qxsql.update_record(&param.table, param.id, &param.record).await;
+                if let Ok(update_success) = update_success && update_success {
+                    let recchng = RecChng {table:param.table, id:param.id, record:Some(param.record), op: RecOp::Update, issuer:param.issuer };
+                    let rec = to_rpcvalue(&recchng).expect("serde should work");
+                    client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
+                                    .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
+                }
+                Some(res_to_rpcvalue(update_success))
+            }
+            "delete" [None, Write, "{s:table,i:id,s:issuer}", "b"] (param: RecDeleteParam) => {
+                let qxsql = QxSql(app_state);
+                let was_deleted = qxsql.delete_record(&param.table, param.id).await;
+                if let Ok(was_deleted) = was_deleted && was_deleted {
+                    let recchng = RecChng {table:param.table, id:param.id, record:None, op: RecOp::Delete, issuer:param.issuer };
+                    let rec = to_rpcvalue(&recchng).expect("serde should work");
+                    client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
+                                    .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
+                }
+                Some(res_to_rpcvalue(was_deleted))
             }
         }
     );
@@ -167,7 +188,7 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     shvclient::Client::new()
         .app(DotAppNode::new(env!("CARGO_PKG_NAME")))
         .mount(".app", dot_app_node)
-        .mount("events", events_node)
+        .mount("sql", sql_node)
         .with_app_state(app_state)
         // .run_with_init(&client_config, app_tasks)
         .run(&config.client)
@@ -184,27 +205,6 @@ fn res_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<T>) -> Result<RpcVal
     res.and_then(|value| {
         to_rpcvalue(&value)
             .map_err(|err| anyhow::anyhow!("Serialization error: {}", err))
-    })
-    .map_err(anyhow_to_rpc_error)
-}
-
-fn vec_to_rpcvalue_ser<T: serde::Serialize>(res: anyhow::Result<Vec<T>>) -> Result<RpcValue, RpcError> {
-    res.and_then(|list| {
-        let rpc_values: Result<Vec<RpcValue>, _> = list.into_iter()
-            .map(|rec| to_rpcvalue(&rec))
-            .collect();
-        rpc_values.map(|values| values.into())
-            .map_err(|err| anyhow::anyhow!("Serialization error: {}", err))
-    })
-    .map_err(anyhow_to_rpc_error)
-}
-
-fn vec_to_rpcvalue_into<T: Into<RpcValue>>(res: anyhow::Result<Vec<T>>) -> Result<RpcValue, RpcError> {
-    res.and_then(|list| {
-        let rpc_values: Vec<RpcValue> = list.into_iter()
-            .map(|rec| rec.into())
-            .collect();
-        Ok(rpc_values.into())
     })
     .map_err(anyhow_to_rpc_error)
 }
