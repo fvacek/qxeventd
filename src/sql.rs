@@ -35,20 +35,10 @@ fn process_record_params(record: &Record) -> Result<Vec<(String, async_sqlite::r
     let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
 
     for (key, value) in record.iter() {
-        if key == "id" {
-            continue;
-        }
         let param_name = format!(":{}", key);
         let sql_value = convert_dbvalue_to_sql(key, value)?;
         params.push((param_name, sql_value));
     }
-
-    if params.is_empty() {
-        return Err(async_sqlite::rusqlite::Error::InvalidPath(
-            "No fields to process".into(),
-        ));
-    }
-
     Ok(params)
 }
 
