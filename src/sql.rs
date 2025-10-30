@@ -110,9 +110,9 @@ mod tests {
     use crate::appstate::QxAppState;
     use async_sqlite::PoolBuilder;
     use chrono::Utc;
-    use qxsql::sql::SqlProvider;
+    use qxsql::sql::{record_from_slice, SqlProvider};
     use smol::lock::RwLock;
-    use std::collections::HashMap;
+
 
 
     async fn create_test_app_state() -> QxSharedAppState {
@@ -174,10 +174,11 @@ mod tests {
 
     #[test]
     fn test_process_record_params() {
-        let mut record = HashMap::new();
-        record.insert("name".to_string(), DbValue::String("test".to_string()));
-        record.insert("id".to_string(), DbValue::Int(1));
-        record.insert("null_field".to_string(), DbValue::Null);
+        let record = record_from_slice(&[
+            ("name", DbValue::String("test".to_string())),
+            ("id", DbValue::Int(1)),
+            ("null_field", DbValue::Null),
+        ]);
 
         let result = process_record_params(&record);
         assert!(result.is_ok());
@@ -210,10 +211,11 @@ mod tests {
         let app_state = create_test_app_state().await;
         let qx_sql = QxSql(app_state);
 
-        let mut params = HashMap::new();
-        params.insert("name".to_string(), DbValue::String("test_user".to_string()));
-        params.insert("value".to_string(), DbValue::Int(100));
-        params.insert("created_at".to_string(), DbValue::DateTime(Utc::now().into()));
+        let params = record_from_slice(&[
+            ("name", DbValue::String("test_user".to_string())),
+            ("value", DbValue::Int(100)),
+            ("created_at", DbValue::DateTime(Utc::now().into())),
+        ]);
 
         let result = qx_sql
             .exec(
@@ -245,10 +247,11 @@ mod tests {
         let qx_sql = QxSql(app_state);
 
         // First insert some test data
-        let mut insert_params = HashMap::new();
-        insert_params.insert("name".to_string(), DbValue::String("query_test".to_string()));
-        insert_params.insert("value".to_string(), DbValue::Int(200));
-        insert_params.insert("created_at".to_string(), DbValue::DateTime(Utc::now().into()));
+        let insert_params = record_from_slice(&[
+            ("name", DbValue::String("query_test".to_string())),
+            ("value", DbValue::Int(200)),
+            ("created_at", DbValue::DateTime(Utc::now().into())),
+        ]);
 
         let _ = qx_sql
             .exec(
@@ -259,8 +262,9 @@ mod tests {
             .expect("Failed to insert test data");
 
         // Now query the data
-        let mut query_params = HashMap::new();
-        query_params.insert("name".to_string(), DbValue::String("query_test".to_string()));
+        let query_params = record_from_slice(&[
+            ("name", DbValue::String("query_test".to_string())),
+        ]);
 
         let result = qx_sql
             .query("SELECT * FROM test_table WHERE name = :name", Some(&query_params))
@@ -302,10 +306,11 @@ mod tests {
 
         // Insert data with different types
         let dt = Utc::now();
-        let mut params = HashMap::new();
-        params.insert("name".to_string(), DbValue::String("type_test".to_string()));
-        params.insert("value".to_string(), DbValue::Int(42));
-        params.insert("created_at".to_string(), DbValue::DateTime(dt.into()));
+        let params = record_from_slice(&[
+            ("name", DbValue::String("type_test".to_string())),
+            ("value", DbValue::Int(42)),
+            ("created_at", DbValue::DateTime(dt.into())),
+        ]);
 
         let _ = qx_sql
             .exec(
@@ -316,8 +321,9 @@ mod tests {
             .expect("Failed to insert test data");
 
         // Query the data back
-        let mut query_params = HashMap::new();
-        query_params.insert("name".to_string(), DbValue::String("type_test".to_string()));
+        let query_params = record_from_slice(&[
+            ("name", DbValue::String("type_test".to_string())),
+        ]);
 
         let result = qx_sql
             .query("SELECT name, value, created_at FROM test_table WHERE name = :name", Some(&query_params))
@@ -345,10 +351,11 @@ mod tests {
         let qx_sql = QxSql(app_state);
 
         // Insert initial data
-        let mut insert_params = HashMap::new();
-        insert_params.insert("name".to_string(), DbValue::String("update_test".to_string()));
-        insert_params.insert("value".to_string(), DbValue::Int(100));
-        insert_params.insert("created_at".to_string(), DbValue::DateTime(Utc::now().into()));
+        let insert_params = record_from_slice(&[
+            ("name", "update_test".into()),
+            ("value", 100.into()),
+            ("created_at", DbValue::DateTime(Utc::now().into())),
+        ]);
 
         let _ = qx_sql
             .exec(
@@ -359,9 +366,10 @@ mod tests {
             .expect("Failed to insert test data");
 
         // Update the data
-        let mut update_params = HashMap::new();
-        update_params.insert("new_value".to_string(), DbValue::Int(200));
-        update_params.insert("name".to_string(), DbValue::String("update_test".to_string()));
+        let update_params = record_from_slice(&[
+            ("new_value", DbValue::Int(200)),
+            ("name", DbValue::String("update_test".to_string())),
+        ]);
 
         let result = qx_sql
             .exec(
@@ -381,10 +389,11 @@ mod tests {
         let qx_sql = QxSql(app_state);
 
         // Insert data to delete
-        let mut insert_params = HashMap::new();
-        insert_params.insert("name".to_string(), DbValue::String("delete_test".to_string()));
-        insert_params.insert("value".to_string(), DbValue::Int(300));
-        insert_params.insert("created_at".to_string(), DbValue::DateTime(Utc::now().into()));
+        let insert_params = record_from_slice(&[
+            ("name", DbValue::String("delete_test".to_string())),
+            ("value", DbValue::Int(300)),
+            ("created_at", DbValue::DateTime(Utc::now().into())),
+        ]);
 
         let _ = qx_sql
             .exec(
@@ -395,8 +404,9 @@ mod tests {
             .expect("Failed to insert test data");
 
         // Delete the data
-        let mut delete_params = HashMap::new();
-        delete_params.insert("name".to_string(), DbValue::String("delete_test".to_string()));
+        let delete_params = record_from_slice(&[
+            ("name", DbValue::String("delete_test".to_string())),
+        ]);
 
         let result = qx_sql
             .exec("DELETE FROM test_table WHERE name = :name", Some(&delete_params))
@@ -412,8 +422,9 @@ mod tests {
         let app_state = create_test_app_state().await;
         let qx_sql = QxSql(app_state);
 
-        let mut params = HashMap::new();
-        params.insert("name".to_string(), DbValue::String("nonexistent".to_string()));
+        let params = record_from_slice(&[
+            ("name", DbValue::String("nonexistent".to_string())),
+        ]);
 
         let result = qx_sql
             .query("SELECT * FROM test_table WHERE name = :name", Some(&params))
@@ -442,10 +453,11 @@ mod tests {
         let app_state = create_test_app_state().await;
         let qx_sql = QxSql(app_state);
 
-        let mut params = HashMap::new();
-        params.insert("name".to_string(), DbValue::String("null_test".to_string()));
-        params.insert("value".to_string(), DbValue::Null);
-        params.insert("created_at".to_string(), DbValue::Null);
+        let params = record_from_slice(&[
+            ("name", DbValue::String("null_test".to_string())),
+            ("value", DbValue::Null),
+            ("created_at", DbValue::Null),
+        ]);
 
         let result = qx_sql
             .exec(
@@ -459,8 +471,9 @@ mod tests {
         assert_eq!(exec_result.rows_affected, 1);
 
         // Verify we can query the null values back
-        let mut query_params = HashMap::new();
-        query_params.insert("name".to_string(), DbValue::String("null_test".to_string()));
+        let query_params = record_from_slice(&[
+            ("name", DbValue::String("null_test".to_string())),
+        ]);
 
         let query_result = qx_sql
             .query("SELECT * FROM test_table WHERE name = :name", Some(&query_params))
@@ -485,10 +498,11 @@ mod tests {
 
         // Insert multiple records
         for i in 1..=5 {
-            let mut params = HashMap::new();
-            params.insert("name".to_string(), DbValue::String(format!("user_{}", i)));
-            params.insert("value".to_string(), DbValue::Int(i * 10));
-            params.insert("created_at".to_string(), DbValue::DateTime(Utc::now().into()));
+            let params = record_from_slice(&[
+                ("name", DbValue::String(format!("user_{}", i))),
+                ("value", DbValue::Int(i * 10)),
+                ("created_at", DbValue::DateTime(Utc::now().into())),
+            ]);
 
             let result = qx_sql
                 .exec(
@@ -515,7 +529,7 @@ mod tests {
 
     #[test]
     fn test_process_record_params_empty() {
-        let record = HashMap::new();
+        let record = record_from_slice(&[]);
         let result = process_record_params(&record);
         assert!(result.is_ok());
         let params = result.unwrap();
@@ -542,9 +556,10 @@ mod tests {
         assert!(create_result.is_ok(), "Failed to create blob test table: {:?}", create_result.err());
 
         let blob_data = vec![1, 2, 3, 4, 5];
-        let mut params = HashMap::new();
-        params.insert("name".to_string(), DbValue::String("blob_test".to_string()));
-        params.insert("blob_data".to_string(), DbValue::Blob(blob_data.clone()));
+        let params = record_from_slice(&[
+            ("name", DbValue::String("blob_test".to_string())),
+            ("blob_data", DbValue::Blob(blob_data.clone())),
+        ]);
 
         // Insert data with blob
         let result = qx_sql
@@ -557,8 +572,9 @@ mod tests {
         assert!(result.is_ok(), "Failed to insert blob data: {:?}", result.err());
 
         // Query back the blob data
-        let mut query_params = HashMap::new();
-        query_params.insert("name".to_string(), DbValue::String("blob_test".to_string()));
+        let query_params = record_from_slice(&[
+            ("name", DbValue::String("blob_test".to_string())),
+        ]);
 
         let query_result = qx_sql
             .query("SELECT blob_data FROM blob_test_table WHERE name = :name", Some(&query_params))
