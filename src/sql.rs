@@ -1,14 +1,13 @@
 use crate::appstate::{QxSharedAppState};
 use async_sqlite::rusqlite::types::ValueRef;
 use async_trait::async_trait;
-use qxsql::{sql::{DbField, ExecResult, Record, SelectResult}, DbValue};
+use qxsql::{sql::{DbField, ExecResult, Record, QueryResult}, DbValue};
 
 pub struct QxSql(pub QxSharedAppState);
 
 #[async_trait]
-impl qxsql::sql::SqlProvider for QxSql {
-    async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<SelectResult> {
-        let empty_params = Record::default();
+impl qxsql::sql::QxSqlApi for QxSql {
+    async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> { let empty_params = Record::default();
         let params = params.unwrap_or(&empty_params);
         sql_query(&self.0, query, params).await
     }
@@ -54,7 +53,7 @@ async fn sql_query(
     app_state: &QxSharedAppState,
     query: &str,
     params: &Record
-) -> anyhow::Result<SelectResult> {
+) -> anyhow::Result<QueryResult> {
     let query = query.to_string();
     let params = process_record_params(params)?;
     let state = app_state.read().await;
@@ -79,7 +78,7 @@ async fn sql_query(
                     Ok(rec)
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(SelectResult { fields, rows })
+            Ok(QueryResult { fields, rows })
         })
         .await?;
     Ok(table)
@@ -110,7 +109,7 @@ mod tests {
     use crate::appstate::QxAppState;
     use async_sqlite::PoolBuilder;
     use chrono::Utc;
-    use qxsql::sql::{record_from_slice, SqlProvider};
+    use qxsql::sql::{record_from_slice, QxSqlApi};
     use smol::lock::RwLock;
 
 

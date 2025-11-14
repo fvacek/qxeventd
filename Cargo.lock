@@ -1604,11 +1604,12 @@ dependencies = [
 [[package]]
 name = "qxsql"
 version = "0.1.1"
-source = "git+https://github.com/fvacek/qxsql.git?branch=master#198d28b0709addd8f71272044685d04e5fa32297"
+source = "git+https://github.com/fvacek/qxsql.git?branch=master#e66b6f7826e8beace43441e6e115e0471c508691"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "log",
  "regex",
  "serde",
  "shvproto",

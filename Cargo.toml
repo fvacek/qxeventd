@@ -35,3 +35,5 @@ smol-potat = "1.1.2"
 # shvrpc = { path = "../libshvrpc-rs" }
 # [patch."https://github.com/silicon-heaven/libshvclient-rs"]
 # shvclient = { path = "../libshvclient-rs" }
+# [patch."https://github.com/fvacek/qxsql"]
+# qxsql = { path = "../qxsql" }

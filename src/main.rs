@@ -14,8 +14,7 @@ use crate::{
     migrate::create_db_connection, sql::QxSql,
 };
 use shvproto::{to_rpcvalue, RpcValue};
-use qxsql::{sql::{RecListParam, SqlProvider}, string_list_to_ref_vec, QueryAndParams, RecChng, RecDeleteParam, RecInsertParam, RecOp, RecReadParam, RecUpdateParam};
-
+use qxsql::{sql::{QxSqlApi, RecListParam, CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, QUERY_PARAMS, QUERY_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT}, string_list_to_ref_vec, QueryAndParams, RecChng, RecDeleteParam, RecInsertParam, RecOp, RecReadParam, RecUpdateParam};
 mod appstate;
 mod config;
 mod events;
@@ -35,7 +34,7 @@ struct Opts {
     url: Option<String>,
 
     /// Mount point on broker connected to, note that broker might not accept any path.
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "test/qx/eventd")]
     mount: Option<String>,
 
     #[arg(
@@ -123,23 +122,23 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let sql_node = shvclient::fixed_node!(
         handler<QxLockedAppState>(request, client_cmd_tx, app_state) {
-            "query" [None, Read, "[s:query,{s|i|b|t|n}:params]", "{{s:name}:fields,[[s|i|b|t|n]]:rows}"] (query: QueryAndParams) => {
+            "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
                 let qxsql = QxSql(app_state);
                 let result = qxsql.query(query.query(), query.params()).await;
                 Some(res_to_rpcvalue(result))
             }
-            "exec" [None, Read, "[s:query,{s|i|b|t|n}:params,s|n:issuer]", "{{s:name}:fields,[[s|i|b|t|n]]:rows}"] (query: QueryAndParams) => {
+            "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
                 let qxsql = QxSql(app_state);
                 let result = qxsql.exec(query.query(), query.params()).await;
                 Some(res_to_rpcvalue(result))
             }
-            "list" [None, Read, "n", "[{n:id,s:name,s:date}]"] (param: RecListParam) => {
+            "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
                 let qxsql = QxSql(app_state);
                 let fields = string_list_to_ref_vec(&param.fields);
                 let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
                 Some(res_to_rpcvalue(result))
             }
-            "create" [None, Write, "{s:table,{s|i|b|t|n}:record,s:issuer}", "i"] (param: RecInsertParam) => {
+            "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
                 let qxsql = QxSql(app_state);
                 let insert_id = qxsql.create_record(&param.table, &param.record).await;
                 if let Ok(insert_id) = insert_id {
@@ -150,13 +149,13 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 }
                 Some(res_to_rpcvalue(insert_id))
             }
-            "read" [None, Read, "{s:table,i:id},{s}|n:fields", "{s|i|b|t|n}|n"] (param: RecReadParam) => {
+            "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
                 let qxsql = QxSql(app_state);
                 let fields = string_list_to_ref_vec(&param.fields);
                 let result = qxsql.read_record(&param.table, param.id, fields).await;
                 Some(res_to_rpcvalue(result))
             }
-            "update" [None, Write, "{s:table,i:id,{s|i|b|t|n}:record,s:issuer}", "b"] (param: RecUpdateParam) => {
+            "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
                 let qxsql = QxSql(app_state);
                 let update_success = qxsql.update_record(&param.table, param.id, &param.record).await;
                 if let Ok(update_success) = update_success && update_success {
@@ -167,7 +166,7 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 }
                 Some(res_to_rpcvalue(update_success))
             }
-            "delete" [None, Write, "{s:table,i:id,s:issuer}", "b"] (param: RecDeleteParam) => {
+            "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
                 let qxsql = QxSql(app_state);
                 let was_deleted = qxsql.delete_record(&param.table, param.id).await;
                 if let Ok(was_deleted) = was_deleted && was_deleted {
