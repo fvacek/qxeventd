@@ -1,26 +1,33 @@
+use std::sync::Arc;
 use std::{backtrace::Backtrace, sync::OnceLock};
-
-use clap::{Parser, arg, command};
+use clap::Parser;
 use log::{error, info};
-use shvclient::appnodes::DotAppNode;
+use qxsql::{RecChng, RecDeleteParam, RecInsertParam, RecListParam, RecOp, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
+use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
+use shvclient::appnodes::{DotAppNode, DotDeviceNode};
 use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 use smol::lock::RwLock;
 use url::Url;
 
+use crate::eventnode::request_handler;
+use crate::qxappsql::QxAppSql;
 use crate::{
-    appstate::{QxAppState, QxLockedAppState, QxSharedAppState},
+    state::{State},
     config::Config,
     logger::setup_logger,
-    migrate::create_db_connection, sql::QxSql,
+    migrate::create_db_connection,
 };
-use shvproto::{to_rpcvalue, RpcValue};
-use qxsql::{sql::{QxSqlApi, RecListParam, CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, QUERY_PARAMS, QUERY_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT}, string_list_to_ref_vec, QueryAndParams, RecChng, RecDeleteParam, RecInsertParam, RecOp, RecReadParam, RecUpdateParam};
-mod appstate;
+use shvproto::{RpcValue, to_rpcvalue};
+use qxsql::{sql::{QxSqlApi, QUERY_PARAMS, QUERY_RESULT, QueryAndParams}};
+
+mod state;
 mod config;
 mod events;
 mod logger;
 mod migrate;
-mod sql;
+mod qxappsql;
+mod eventnode;
+mod eventrpcproxy;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -53,6 +60,8 @@ struct Opts {
     verbose: Option<String>,
 }
 
+type AppState = Arc<RwLock<State>>;
+
 static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -61,7 +70,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     setup_logger(&cli_opts)?;
 
     log::info!("=====================================================");
-    log::info!("{} starting", std::module_path!());
+    log::info!("{} starting", env!("CARGO_PKG_NAME"));
     log::info!("=====================================================");
     // log::info!(target: "ahoj", "with target");
     // log::error!("ERROR");
@@ -99,96 +108,93 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .expect("Global config should only be set once");
 
     // Run the async application
+    const SMOL_THREADS: &str = "SMOL_THREADS";
+    if std::env::var(SMOL_THREADS).is_err()
+        && let Ok(num_threads) = std::thread::available_parallelism() {
+            // set_var called before any other threads and smol runtime
+            unsafe { std::env::set_var(SMOL_THREADS, num_threads.to_string()); }
+        }
     smol::block_on(async_main())
+}
+
+struct SqlNode {
+    app_state: AppState,
+}
+
+shvclient::impl_static_node! {
+    SqlNode(&self, request, client_cmd_tx) {
+        "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
+            let qxsql = QxAppSql(self.app_state.clone());
+            let result = qxsql.query(query.query(), query.params()).await;
+            Some(res_to_rpcvalue(result))
+        }
+        "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
+            let qxsql = QxAppSql(self.app_state.clone());
+            let result = qxsql.exec(query.query(), query.params()).await;
+            Some(res_to_rpcvalue(result))
+        }
+        "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
+            let qxsql = QxAppSql(self.app_state.clone());
+            let fields = string_list_to_ref_vec(&param.fields);
+            let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
+            Some(res_to_rpcvalue(result))
+        }
+        "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
+            let qxsql = QxAppSql(self.app_state.clone());
+            let insert_id = qxsql.create_record(&param.table, &param.record).await;
+            if let Ok(insert_id) = insert_id {
+                let recchng = RecChng {table:param.table, id:insert_id, record:Some(param.record), op: RecOp::Insert, issuer:param.issuer };
+                let rec = to_rpcvalue(&recchng).expect("serde should work");
+                client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
+                                .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
+            }
+            Some(res_to_rpcvalue(insert_id))
+        }
+        "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
+            let qxsql = QxAppSql(self.app_state.clone());
+            let fields = string_list_to_ref_vec(&param.fields);
+            let result = qxsql.read_record(&param.table, param.id, fields).await;
+            Some(res_to_rpcvalue(result))
+        }
+        "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
+            let qxsql = QxAppSql(self.app_state.clone());
+            let update_success = qxsql.update_record(&param.table, param.id, &param.record).await;
+            if let Ok(update_success) = update_success && update_success {
+                let recchng = RecChng {table:param.table, id:param.id, record:Some(param.record), op: RecOp::Update, issuer:param.issuer };
+                let rec = to_rpcvalue(&recchng).expect("serde should work");
+                client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
+                                .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
+            }
+            Some(res_to_rpcvalue(update_success))
+        }
+        "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
+            let qxsql = QxAppSql(self.app_state.clone());
+            let was_deleted = qxsql.delete_record(&param.table, param.id).await;
+            if let Ok(was_deleted) = was_deleted && was_deleted {
+                let recchng = RecChng {table:param.table, id:param.id, record:None, op: RecOp::Delete, issuer:param.issuer };
+                let rec = to_rpcvalue(&recchng).expect("serde should work");
+                client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
+                                .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
+            }
+            Some(res_to_rpcvalue(was_deleted))
+        }
+    }
 }
 
 async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db_pool = create_db_connection().await?;
-    let app_state: QxSharedAppState = shvclient::AppState::new(RwLock::new(QxAppState { db_pool }));
-
-    let dot_app_node = shvclient::fixed_node!(
-        handler<QxLockedAppState>(request, _client_cmd_tx, _app_state) {
-            "name" [IsGetter, Browse, "n", "s"] => {
-                Some(Ok(env!("CARGO_PKG_NAME").into()))
-            }
-            "version" [IsGetter, Browse, "n", "s"] => {
-                Some(Ok(env!("CARGO_PKG_VERSION").into()))
-            }
-            "ping" [None, Browse, "n", "n"] => {
-                Some(Ok(().into()))
-            }
-        }
-    );
-
-    let sql_node = shvclient::fixed_node!(
-        handler<QxLockedAppState>(request, client_cmd_tx, app_state) {
-            "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
-                let qxsql = QxSql(app_state);
-                let result = qxsql.query(query.query(), query.params()).await;
-                Some(res_to_rpcvalue(result))
-            }
-            "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
-                let qxsql = QxSql(app_state);
-                let result = qxsql.exec(query.query(), query.params()).await;
-                Some(res_to_rpcvalue(result))
-            }
-            "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
-                let qxsql = QxSql(app_state);
-                let fields = string_list_to_ref_vec(&param.fields);
-                let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
-                Some(res_to_rpcvalue(result))
-            }
-            "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
-                let qxsql = QxSql(app_state);
-                let insert_id = qxsql.create_record(&param.table, &param.record).await;
-                if let Ok(insert_id) = insert_id {
-                    let recchng = RecChng {table:param.table, id:insert_id, record:Some(param.record), op: RecOp::Insert, issuer:param.issuer };
-                    let rec = to_rpcvalue(&recchng).expect("serde should work");
-                    client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
-                                    .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
-                }
-                Some(res_to_rpcvalue(insert_id))
-            }
-            "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
-                let qxsql = QxSql(app_state);
-                let fields = string_list_to_ref_vec(&param.fields);
-                let result = qxsql.read_record(&param.table, param.id, fields).await;
-                Some(res_to_rpcvalue(result))
-            }
-            "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
-                let qxsql = QxSql(app_state);
-                let update_success = qxsql.update_record(&param.table, param.id, &param.record).await;
-                if let Ok(update_success) = update_success && update_success {
-                    let recchng = RecChng {table:param.table, id:param.id, record:Some(param.record), op: RecOp::Update, issuer:param.issuer };
-                    let rec = to_rpcvalue(&recchng).expect("serde should work");
-                    client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
-                                    .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
-                }
-                Some(res_to_rpcvalue(update_success))
-            }
-            "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
-                let qxsql = QxSql(app_state);
-                let was_deleted = qxsql.delete_record(&param.table, param.id).await;
-                if let Ok(was_deleted) = was_deleted && was_deleted {
-                    let recchng = RecChng {table:param.table, id:param.id, record:None, op: RecOp::Delete, issuer:param.issuer };
-                    let rec = to_rpcvalue(&recchng).expect("serde should work");
-                    client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
-                                    .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
-                }
-                Some(res_to_rpcvalue(was_deleted))
-            }
-        }
-    );
-
+    let app_state = AppState::new(RwLock::new(State { db_pool }));
     let config = GLOBAL_CONFIG
         .get()
         .expect("Global config should be initialized");
 
     shvclient::Client::new()
         .app(DotAppNode::new(env!("CARGO_PKG_NAME")))
-        .mount(".app", dot_app_node)
-        .mount("sql", sql_node)
-        .with_app_state(app_state)
+        .device(DotDeviceNode::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), Some("00000".into())))
+        .mount_static("sql", SqlNode { app_state: app_state.clone() })
+        .mount_dynamic("event", move |rq, client_cmd_tx| {
+                        request_handler(rq, client_cmd_tx, app_state.clone())
+        })
         // .run_with_init(&client_config, app_tasks)
         .run(&config.client)
         .await
