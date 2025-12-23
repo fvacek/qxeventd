@@ -1,4 +1,4 @@
-use log::warn;
+use log::{info, warn};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
 use shvrpc::metamethod::MetaMethod;
@@ -9,22 +9,7 @@ use crate::qxappsql::QxAppSql;
 use qxsql::{sql::{QxSqlApi}};
 
 
-// History site node methods
-// const METH_NAME: &str = "name";
-// const NODE_SQL: &str = "sql";
-
-// const META_METHOD_NAME: MetaMethod = MetaMethod {
-//     name: Cow::Borrowed(METH_NAME),
-//     flags: shvrpc::metamethod::Flag::None as u32,
-//     access: shvrpc::metamethod::AccessLevel::Read,
-//     param: Cow::Borrowed("n"),
-//     result: Cow::Borrowed("s"),
-//     signals: SignalsDefinition::Static(&[]),
-//     description: Cow::Borrowed(""),
-// };
-
-// type RpcRequestResult = Result<RpcValue, RpcError>;
-
+#[derive(Debug)]
 enum NodeType<'a> {
     Root,
     Event(i32, &'a str),
@@ -47,7 +32,7 @@ fn split_first_fragment(path: &str) -> (&str, &str) {
         let rest = &path[ix + 1..];
         (dir, rest)
     } else {
-        ("", path)
+        (path, "")
     }
 }
 
@@ -61,108 +46,7 @@ fn split_first_fragment(path: &str) -> (&str, &str) {
 //     }
 // }
 
-
-
-// fn rpc_error_unknown_method(method: impl AsRef<str>) -> RpcError {
-//     RpcError::new(
-//         RpcErrorCode::MethodNotFound,
-//         format!("Unknown method '{}'", method.as_ref())
-//     )
-// }
-
-// async fn event_methods_getter(
-//     path: impl AsRef<str>,
-//     // app_state: Option<AppState<crate::state::State>>,
-// ) -> Option<MetaMethods> {
-//     let path = path.as_ref();
-//     if path.is_empty() {
-//         return Some(MetaMethods::from(&[
-//                 &META_METHOD_NAME,
-//                 ]));
-//     }
-//     if path == NODE_SQL {
-//         return Some(MetaMethods::from(&[
-//                 &META_METHOD_NAME,
-//                 ]));
-//     } else {
-//         None
-//     }
-// }
-
-// async fn event_request_handler(
-//     method: &str,
-// ) -> RpcRequestResult {
-//     match method {
-//         METH_LS => Ok(shvproto::List::new().into()),
-//         METH_NAME => {
-//             Ok("event".into())
-//         }
-//         _ => Err(rpc_error_unknown_method(method)),
-//     }
-// }
-
-// struct ScopedLog { msg: String }
-// impl ScopedLog {
-//     fn new(msg: impl AsRef<str>) -> Self {
-//         let msg = msg.as_ref();
-//         log::debug!("init: {msg}");
-//         Self { msg: msg.into() }
-//     }
-// }
-// impl Drop for ScopedLog {
-//     fn drop(&mut self) {
-//         log::debug!("drop: {}", self.msg);
-//     }
-// }
-
-// pub(crate) async fn methods_getter(
-//     path: String,
-//     client_cmd_tx: crate::state::ClientCommandSender,
-//     app_state: Option<AppState<crate::state::State>>,
-// ) -> Option<MetaMethods> {
-//     let Ok(node_type) = NodeType::from_path(&path) else {
-//         return None;
-//     };
-//     match node_type {
-//         NodeType::Root => Some(MetaMethods::from(&[])),
-//         NodeType::Event(_) => Some(MetaMethods::from(&[&META_METHOD_NAME])),
-//         NodeType::Sql(event_id, shv_path) => {
-//             let event_mount = "test/hsh2025";
-//             let new_path = shvrpc::util::join_path(event_mount, shv_path);
-//             let log: RpcValue = RpcCall::new(&new_path, METH_DIR)
-//                 // .param(getlog_params.clone())
-//                 // .timeout(std::time::Duration::from_secs(60))
-//                 .exec(&client_cmd_tx)
-//                 .await;
-//             None
-//         }
-//     }
-// }
-
 const DIR_LS_METHODS: &[MetaMethod] = &[META_METHOD_DIR, META_METHOD_LS];
-
-// pub(crate) async fn children_on_path(
-//     path: String,
-//     app_state: AppState,
-// ) -> Vec<String> {
-//     let Ok(node_type) = NodeType::from_path(&path) else {
-//         return vec![];
-//     };
-//     match node_type {
-//         NodeType::Root => list_events(app_state).await,
-//         NodeType::Event(id) => event_ls(id).await,
-//         NodeType::Sql(event_id, shv_path) => {
-//             let event_mount = "test/hsh2025";
-//             let new_path = shvrpc::util::join_path(event_mount, shv_path);
-//             let log: RpcValue = RpcCall::new(&new_path, METH_DIR)
-//                 // .param(getlog_params.clone())
-//                 // .timeout(std::time::Duration::from_secs(60))
-//                 .exec(&client_cmd_tx)
-//                 .await;
-//             None
-//         }
-//     }
-// }
 
 pub(crate) async fn request_handler(
     rq: RpcMessage,
@@ -174,13 +58,15 @@ pub(crate) async fn request_handler(
         return err_unresolved_request();
     }
     let shv_path = rq.shv_path().unwrap_or_default().to_string();
-    // if shv_path.is_empty() {
-    //     return err_unresolved_request();
-    // }
-    let Ok(node_type) = NodeType::from_path(&shv_path) else {
-        warn!("Invalid path: {shv_path}");
-        return err_unresolved_request();
+    // info!("shv_path2: {shv_path}");
+    let node_type = match NodeType::from_path(&shv_path) {
+        Ok(node_type) => node_type,
+        Err(err) => {
+            warn!("Invalid path: {shv_path}, error: {}", err);
+            return err_unresolved_request();
+        }
     };
+    info!("node type: {:?}", node_type);
     if let NodeType::Event(id, path) = node_type {
         let px = EventRpcProxy{ app_state, event_id: id as i64 };
         let mut rq = rq;
@@ -202,12 +88,13 @@ pub(crate) async fn request_handler(
 async fn list_events(app_state: AppState) -> Vec<String> {
     let qxsql = QxAppSql(app_state);
     let fields = Some(vec!["id"]);
-    let result = qxsql.list_records("events", fields, None, None)
+    let mut result: Vec<String> = qxsql.list_records("events", fields, None, None)
         .await
         .unwrap_or(vec![])
         .into_iter()
         .map(|record| format!("{}", record["id"].to_int().unwrap_or_default()))
         .collect();
+    result.push("2025".to_string());
     result
 }
 
