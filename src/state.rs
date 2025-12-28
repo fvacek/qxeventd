@@ -19,7 +19,7 @@ impl State {
         format!("test/hsh{}", event_id)
     }
 
-    pub async fn create_event(&self, owner: String) -> anyhow::Result<EventId> {
+    pub async fn create_event(&self, owner: String) -> anyhow::Result<(EventId, String)> {
         if owner.is_empty() {
             return Err(anyhow::anyhow!("Owner cannot be empty"));
         }
@@ -33,7 +33,7 @@ impl State {
         let rec: Record = shvproto::from_rpcvalue(&RpcValue::from(&event_data))?;
         let qxsql = QxAppSql(self.db_pool.clone());
         let event_id = qxsql.create_record("events", &rec).await?;
-        Ok(event_id)
+        Ok((event_id, event_data.api_token))
     }
 
     pub async fn open_event(&mut self, event_id: EventId) -> anyhow::Result<()> {

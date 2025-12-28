@@ -1,10 +1,10 @@
 use log::{info, warn};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
-use shvproto::RpcValue;
+use shvproto::{RpcValue, make_map};
 use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
-use crate::{AppState, anyhow_to_rpc_error};
+use crate::{AppState, anyhow_to_rpc_error, global_config};
 use crate::eventrpcproxy::EventRpcProxy;
 use crate::qxappsql::QxAppSql;
 use crate::state::{EventId};
@@ -69,7 +69,7 @@ const MM_CREATE_EVENT: MetaMethod = MetaMethod::new_static(
     Flag::None as u32,
     AccessLevel::Write,
     "s", // owner
-    "i", // event_id
+    "[i:event_id,s:api_token]",
     &[],
     "",
 );
@@ -131,9 +131,17 @@ pub(crate) async fn request_handler(
                     match method {
                         METH_CREATE_EVENT => m.resolve(ROOT_METHODS, async move || {
                             let owner = rq.param().unwrap_or_default().as_str().to_owned();
-                            let event_id = app_state.write().await.create_event(owner).await
+                            let (event_id, api_token) = app_state.write().await.create_event(owner).await
                                 .map_err(|e| anyhow_to_rpc_error(e))?;
-                            Ok(RpcValue::from(event_id))
+                            // add api token to broker mounts
+                            let mount_point = format!("{}/{event_id}", global_config().events_mount_point);
+                            let param = make_map!(
+                                "mountPoint".to_string() => RpcValue::from(mount_point),
+                                "apiToken".to_string() => RpcValue::from(&api_token),
+                            );
+                            let _res: RpcValue = client_cmd_tx.call_rpc_method(".broker/access/mounts", "setValue", Some(param.into()), None, None::<fn(f64)>)
+                                .await.map_err(|e| anyhow_to_rpc_error(anyhow!("{e}")))?;
+                            Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(api_token)]))
                         }),
                         METH_OPEN_EVENT => m.resolve(ROOT_METHODS, async move || {
                             let event_id = rq.param().unwrap_or_default().as_i64();

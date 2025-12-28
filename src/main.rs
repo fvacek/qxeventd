@@ -45,6 +45,10 @@ struct Opts {
     #[arg(short, long)]
     mount: Option<String>,
 
+    /// Mount point base of child qxsqld processes, note that broker might not accept any path.
+    #[arg(long)]
+    events_mount: Option<String>,
+
     #[arg(
         short,
         long,
@@ -99,7 +103,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         config.data_dir = data_dir;
     }
     if let Some(mount) = cli_opts.mount {
-        config.client.mount = Some(mount);
+        config.mount_point = mount;
+    }
+    if let Some(mount) = cli_opts.events_mount {
+        config.events_mount_point = mount;
     }
 
     if cli_opts.print_config {
