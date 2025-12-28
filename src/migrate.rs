@@ -1,4 +1,5 @@
 use async_sqlite::{JournalMode, Pool, PoolBuilder};
+use log::info;
 use rusqlite_migration::{Migrations, M};
 use anyhow::Result;
 
@@ -10,19 +11,10 @@ const MIGRATION_ARRAY: &[M] = &[
         r#"
         CREATE TABLE events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            date TEXT,
-            owner TEXT,
-            api_token TEXT
+            data TEXT
         );
         "#,
     ),
-    // This migration can be reverted
-    // M::up("CREATE TABLE animal(name TEXT);").down("DROP TABLE animal;"),
-    // In the future, if the need to change the schema arises, put
-    // migrations here, like so:
-    // M::up("CREATE INDEX UX_friend_email ON friend(email);"),
-    // M::up("CREATE INDEX UX_friend_name ON friend(name);"),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
@@ -35,7 +27,7 @@ pub async fn create_db_connection() -> Result<Pool> {
         const DB_FILE: &str = "qxevent.sqlite";
         (format!("{}/{DB_FILE}", config.data_dir), JournalMode::Wal)
     };
-
+    info!("Opening db {db_file} in journal mode: {journal_mode:?}");
     let pool = PoolBuilder::new()
                     .path(db_file)
                     .journal_mode(journal_mode);

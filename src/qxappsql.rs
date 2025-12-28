@@ -2,9 +2,8 @@ use async_sqlite::rusqlite::types::ValueRef;
 use async_trait::async_trait;
 use qxsql::{sql::{DbField, ExecResult, Record, QueryResult}, DbValue};
 
-use crate::AppState;
 
-pub struct QxAppSql(pub AppState);
+pub struct QxAppSql(pub async_sqlite::Pool);
 
 #[async_trait]
 impl qxsql::sql::QxSqlApi for QxAppSql {
@@ -51,14 +50,13 @@ fn create_param_refs(params: &[(String, async_sqlite::rusqlite::types::Value)]) 
 }
 
 async fn sql_query(
-    app_state: &AppState,
+    db_pool: &async_sqlite::Pool,
     query: &str,
     params: &Record
 ) -> anyhow::Result<QueryResult> {
     let query = query.to_string();
     let params = process_record_params(params)?;
-    let state = app_state.read().await;
-    let table = state.db_pool
+    let table = db_pool
         .conn(move |conn| {
             let param_refs = create_param_refs(&params);
             let mut stmt = conn.prepare(&query)?;
@@ -86,14 +84,13 @@ async fn sql_query(
 }
 
 async fn sql_exec(
-    app_state: &AppState,
+    db_pool: &async_sqlite::Pool,
     query: &str,
     params: &Record
 ) -> anyhow::Result<ExecResult> {
     let query = query.to_string();
     let params = process_record_params(params)?;
-    let state = app_state.read().await;
-    let result = state.db_pool
+    let result = db_pool
         .conn(move |conn| {
             let param_refs = create_param_refs(&params);
             let mut stmt = conn.prepare(&query)?;

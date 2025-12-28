@@ -124,23 +124,23 @@ struct SqlNode {
 shvclient::impl_static_node! {
     SqlNode(&self, request, client_cmd_tx) {
         "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
-            let qxsql = QxAppSql(self.app_state.clone());
+            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
             let result = qxsql.query(query.query(), query.params()).await;
             Some(res_to_rpcvalue(result))
         }
         "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
-            let qxsql = QxAppSql(self.app_state.clone());
+            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
             let result = qxsql.exec(query.query(), query.params()).await;
             Some(res_to_rpcvalue(result))
         }
         "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
-            let qxsql = QxAppSql(self.app_state.clone());
+            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
             let fields = string_list_to_ref_vec(&param.fields);
             let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
             Some(res_to_rpcvalue(result))
         }
         "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
-            let qxsql = QxAppSql(self.app_state.clone());
+            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
             let insert_id = qxsql.create_record(&param.table, &param.record).await;
             if let Ok(insert_id) = insert_id {
                 let recchng = RecChng {table:param.table, id:insert_id, record:Some(param.record), op: RecOp::Insert, issuer:param.issuer };
@@ -151,13 +151,13 @@ shvclient::impl_static_node! {
             Some(res_to_rpcvalue(insert_id))
         }
         "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
-            let qxsql = QxAppSql(self.app_state.clone());
+            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
             let fields = string_list_to_ref_vec(&param.fields);
             let result = qxsql.read_record(&param.table, param.id, fields).await;
             Some(res_to_rpcvalue(result))
         }
         "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
-            let qxsql = QxAppSql(self.app_state.clone());
+            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
             let update_success = qxsql.update_record(&param.table, param.id, &param.record).await;
             if let Ok(update_success) = update_success && update_success {
                 let recchng = RecChng {table:param.table, id:param.id, record:Some(param.record), op: RecOp::Update, issuer:param.issuer };
@@ -168,7 +168,7 @@ shvclient::impl_static_node! {
             Some(res_to_rpcvalue(update_success))
         }
         "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
-            let qxsql = QxAppSql(self.app_state.clone());
+            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
             let was_deleted = qxsql.delete_record(&param.table, param.id).await;
             if let Ok(was_deleted) = was_deleted && was_deleted {
                 let recchng = RecChng {table:param.table, id:param.id, record:None, op: RecOp::Delete, issuer:param.issuer };
@@ -212,4 +212,19 @@ fn res_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<T>) -> Result<RpcVal
             .map_err(|err| anyhow::anyhow!("Serialization error: {}", err))
     })
     .map_err(anyhow_to_rpc_error)
+}
+
+fn generate_api_token() -> String {
+    use rand::Rng;
+    const LEN: usize = 10;
+    const VOWELS: &str = "aeiouy";
+    const CONSONANTS: &str = "bcdfghjklmnpqrstvwxz";
+    let mut rng = rand::thread_rng();
+    (0..LEN)
+        .map(|n| {
+            let charset = if n % 2 == 0 { CONSONANTS } else { VOWELS };
+            let idx = rng.gen_range(0..charset.len());
+            charset.chars().nth(idx).unwrap()
+        })
+        .collect()
 }
