@@ -27,7 +27,6 @@ mod logger;
 mod migrate;
 mod qxappsql;
 mod eventnode;
-mod eventrpcproxy;
 mod eventdb;
 
 #[derive(Parser, Debug)]

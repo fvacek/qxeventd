@@ -5,53 +5,39 @@ use shvproto::{RpcValue, make_map};
 use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use crate::{AppState, anyhow_to_rpc_error, global_config};
-use crate::eventrpcproxy::EventRpcProxy;
-use crate::qxappsql::QxAppSql;
 use crate::state::{EventId};
-use qxsql::{sql::{QxSqlApi}};
 use anyhow::anyhow;
 
 
 #[derive(Debug)]
-enum NodeType<'a> {
+enum NodeType {
     Root,
     Event(EventId),
-    EventDb(EventId, &'a str),
 }
 
-impl<'a> NodeType<'a> {
-    fn from_path(path: &'a str) -> anyhow::Result<Self> {
+impl NodeType {
+    fn from_path(path: &str) -> anyhow::Result<Self> {
         if path.is_empty() {
             return Ok(Self::Root);
         }
-        let (first, rest) = split_first_path_fragment(path);
-        let event_id = first.parse::<i64>()?;
-        if rest.is_empty() {
-            Ok(Self::Event(event_id))
-        } else {
-            let (first, rest) = split_first_path_fragment(rest);
-            if first == "db" {
-                Ok(Self::EventDb(event_id, rest))
-            } else {
-                Err(anyhow::anyhow!("Invalid path: {}", path))
-            }
-        }
+        let event_id = path.parse::<i64>()?;
+        Ok(Self::Event(event_id))
     }
 }
 
-fn split_first_fragment(path: &str, sep: char) -> (&str, &str) {
-    if let Some(ix) = path.find(sep) {
-        let dir = &path[0 .. ix];
-        let rest = &path[ix + 1..];
-        (dir, rest)
-    } else {
-        (path, "")
-    }
-}
+// fn split_first_fragment(path: &str, sep: char) -> (&str, &str) {
+//     if let Some(ix) = path.find(sep) {
+//         let dir = &path[0 .. ix];
+//         let rest = &path[ix + 1..];
+//         (dir, rest)
+//     } else {
+//         (path, "")
+//     }
+// }
 
-fn split_first_path_fragment(path: &str) -> (&str, &str) {
-    split_first_fragment(path, '/')
-}
+// fn split_first_path_fragment(path: &str) -> (&str, &str) {
+//     split_first_fragment(path, '/')
+// }
 
 // fn split_last_fragment(path: &str) -> (&str, &str) {
 //     if let Some(ix) = path.rfind('/') {
@@ -184,23 +170,15 @@ pub(crate) async fn request_handler(
                 }
             }
         }
-        NodeType::EventDb(id, path) => {
-            let px = EventRpcProxy{ app_state, event_id: id as i64 };
-            let mut rq = rq;
-            rq.set_shvpath(path);
-            return px.request_handler(rq, client_cmd_tx).await;
-        }
     }
 }
 
 async fn list_events(app_state: AppState) -> Vec<String> {
-    let qxsql = QxAppSql(app_state.read().await.db_pool.clone());
-    let fields = Some(vec!["id"]);
-    let result: Vec<String> = qxsql.list_records("events", fields, None, None)
-        .await
-        .unwrap_or(vec![])
+    let mut events = app_state.read().await.open_events.keys().cloned().collect::<Vec<_>>();
+    events.sort();
+    let result = events
         .into_iter()
-        .map(|record| format!("{}", record["id"].to_int().unwrap_or_default()))
+        .map(|id| format!("{id}"))
         .collect();
     result
 }

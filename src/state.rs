@@ -15,9 +15,6 @@ pub(crate) struct State {
 }
 
 impl State {
-    pub fn event_mount_point(&self, event_id: EventId) -> String {
-        format!("test/hsh{}", event_id)
-    }
 
     pub async fn create_event(&self, owner: String) -> anyhow::Result<(EventId, String)> {
         if owner.is_empty() {
