@@ -28,6 +28,7 @@ mod migrate;
 mod qxappsql;
 mod eventnode;
 mod eventrpcproxy;
+mod eventdb;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -41,7 +42,7 @@ struct Opts {
     url: Option<String>,
 
     /// Mount point on broker connected to, note that broker might not accept any path.
-    #[arg(short, long, default_value = "test/qx/eventd")]
+    #[arg(short, long)]
     mount: Option<String>,
 
     #[arg(
@@ -63,6 +64,10 @@ struct Opts {
 type AppState = Arc<RwLock<State>>;
 
 static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
+
+fn global_config() -> &'static Config {
+    GLOBAL_CONFIG.get().expect("Global config should be initialized")
+}
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli_opts = Opts::parse();
@@ -183,7 +188,7 @@ shvclient::impl_static_node! {
 
 async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db_pool = create_db_connection().await?;
-    let app_state = AppState::new(RwLock::new(State { db_pool }));
+    let app_state = AppState::new(RwLock::new(State { db_pool, open_events: Default::default() }));
     let config = GLOBAL_CONFIG
         .get()
         .expect("Global config should be initialized");

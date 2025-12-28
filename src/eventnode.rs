@@ -9,6 +9,7 @@ use crate::eventrpcproxy::EventRpcProxy;
 use crate::qxappsql::QxAppSql;
 use crate::state::{EventId};
 use qxsql::{sql::{QxSqlApi}};
+use anyhow::anyhow;
 
 
 #[derive(Debug)]
@@ -72,37 +73,31 @@ const MM_CREATE_EVENT: MetaMethod = MetaMethod::new_static(
     &[],
     "",
 );
+const METH_OPEN_EVENT: &str = "openEvent";
+const MM_OPEN_EVENT: MetaMethod = MetaMethod::new_static(
+    METH_OPEN_EVENT, Flag::None as u32, AccessLevel::Read, "i", "", &[], "",
+);
+
 const ROOT_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
     MM_CREATE_EVENT,
+    MM_OPEN_EVENT,
 ];
 
 const EVENT_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
-    MM_EVENT_DATA,
-    MM_EVENT_OPEN,
+    MM_EVENT_INFO,
+    MM_EVENT_CLOSE,
 ];
-const METH_EVENT_DATA: &str = "data";
-const MM_EVENT_DATA: MetaMethod = MetaMethod::new_static(
-    METH_EVENT_DATA,
-    Flag::None as u32,
-    AccessLevel::Config, // exposes API token
-    "n",
-    "{}",
-    &[],
-    "",
+const METH_EVENT_INFO: &str = "info";
+const MM_EVENT_INFO: MetaMethod = MetaMethod::new_static(
+    METH_EVENT_INFO, Flag::None as u32, AccessLevel::Read, "n", "{}", &[], "",
 );
-const METH_EVENT_OPEN: &str = "open";
-const MM_EVENT_OPEN: MetaMethod = MetaMethod::new_static(
-    METH_EVENT_OPEN,
-    Flag::None as u32,
-    AccessLevel::Write,
-    "",
-    "",
-    &[],
-    "",
+const METH_EVENT_CLOSE: &str = "close";
+const MM_EVENT_CLOSE: MetaMethod = MetaMethod::new_static(
+    METH_EVENT_CLOSE, Flag::None as u32, AccessLevel::Read, "",  "", &[], "",
 );
 
 pub(crate) async fn request_handler(
@@ -140,6 +135,15 @@ pub(crate) async fn request_handler(
                                 .map_err(|e| anyhow_to_rpc_error(e))?;
                             Ok(RpcValue::from(event_id))
                         }),
+                        METH_OPEN_EVENT => m.resolve(ROOT_METHODS, async move || {
+                            let event_id = rq.param().unwrap_or_default().as_i64();
+                            app_state.write().await.open_event(event_id).await
+                                .map_err(|e| anyhow_to_rpc_error(e))?;
+                            let message = RpcMessage::new_signal("event", "lsmod", Some(true.into()));
+                            client_cmd_tx.send_message(message)
+                                .map_err(|e| anyhow_to_rpc_error(anyhow!("Failed to send message {}", e)))?;
+                            Ok(RpcValue::from(()))
+                        }),
                         _ => err_unresolved_request(),
                     }
                 }
@@ -152,12 +156,20 @@ pub(crate) async fn request_handler(
                 Method::Other(m) => {
                     let method = m.method();
                     match method {
-                        METH_EVENT_DATA => m.resolve(EVENT_METHODS, async move || {
-                            let info = app_state.read().await
-                                .event_data(event_id).await
-                                .map_err(|e| anyhow_to_rpc_error(e))?;
-                            let info = RpcValue::from(&info);
+                        METH_EVENT_INFO => m.resolve(EVENT_METHODS, async move || {
+                            let mut event_data = app_state.read().await.open_events.get(&event_id)
+                                .ok_or_else(|| anyhow_to_rpc_error(anyhow!("Event not found")))?.data.clone();
+                            event_data.api_token = "".into(); // hide api token
+                            let info = RpcValue::from(&event_data);
                             Ok(info)
+                        }),
+                        METH_EVENT_CLOSE => m.resolve(EVENT_METHODS, async move || {
+                            app_state.write().await.close_event(event_id).await
+                                .map_err(|e| anyhow_to_rpc_error(e))?;
+                            let message = RpcMessage::new_signal("event", "lsmod", Some(false.into()));
+                            client_cmd_tx.send_message(message)
+                                .map_err(|e| anyhow_to_rpc_error(anyhow!("Failed to send message {}", e)))?;
+                            Ok(RpcValue::from(()))
                         }),
                         _ => err_unresolved_request(),
                     }
