@@ -5,7 +5,6 @@ use shvrpc::client::ClientConfig;
 pub struct Config {
     pub client: ClientConfig,
     pub data_dir: String,
-    pub mount_point: String,
     pub events_mount_point: String,
 }
 impl Default for Config {
@@ -13,7 +12,6 @@ impl Default for Config {
         Self {
             client: ClientConfig::default(),
             data_dir: String::from("/tmp/qxeventd"),
-            mount_point: String::from("test/qx/qxeventd"),
             events_mount_point: String::from("test/qx/event"),
         }
     }

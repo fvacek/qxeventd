@@ -11,7 +11,9 @@ const MIGRATION_ARRAY: &[M] = &[
         r#"
         CREATE TABLE events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            data TEXT
+            api_token TEXT,
+            data TEXT,
+            CONSTRAINT events_unique0 UNIQUE (api_token)
         );
         "#,
     ),

@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 use log::info;
-use qxsql::{Record, sql::{QxSqlApi}};
+use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvproto::{RpcValue};
 use async_process::{Child, Command};
@@ -24,21 +24,22 @@ impl State {
             name: String::new(),
             date: chrono::Utc::now(),
             owner,
-            api_token: generate_api_token(),
-            is_local: false,
+            is_local: true,
         };
-        let rec: Record = shvproto::from_rpcvalue(&RpcValue::from(&event_data))?;
+        let data: String = serde_json::to_string(&event_data)?;
+        let api_token = generate_api_token();
+
+        let rec = record_from_slice(&[("data", data.into()), ("api_token", api_token.clone().into())]);
         let qxsql = QxAppSql(self.db_pool.clone());
         let event_id = qxsql.create_record("events", &rec).await?;
-        Ok((event_id, event_data.api_token))
+        Ok((event_id, api_token))
     }
 
     pub async fn open_event(&mut self, event_id: EventId) -> anyhow::Result<()> {
         if self.open_events.contains_key(&event_id) {
             return Ok(());
         }
-        let event_data = self.event_data_from_sql(event_id).await?;
-        let api_token = event_data.api_token.clone();
+        let (event_data, api_token) = self.event_data_from_sql(event_id).await?;
         let qxsql_process = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
             if !check_file_exists(&db_file) {
@@ -46,8 +47,9 @@ impl State {
             }
             migrate_db(&db_file).await?;
             let child = Command::new("qxsqld")
+                .args(&["--url", "tcp://localhost?user=test&password=test"])
                 .args(&["--device-id", &api_token])
-                .args(&["--database", &db_file])
+                .args(&["--database", &format!("sqlite://{db_file}")])
                 .spawn()?; // Don't await, just start it
             info!("Child process qxsqld started OK");
             Some(child)
@@ -67,8 +69,17 @@ impl State {
         }
         Ok(())
     }
-
-    pub async fn event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<EventData> {
+    pub async fn api_token_to_event_id(&self, api_token: &str) -> anyhow::Result<EventId> {
+        let qxsql = QxAppSql(self.db_pool.clone());
+        let result = qxsql
+            .query("SELECT id FROM events WHERE api_token = :api_token", Some(&record_from_slice(&[("api_token", api_token.into())])))
+            .await?;
+        let event_id = result.rows.get(0)
+            .and_then(|row| row.get(0))
+            .and_then(|cell| cell.to_int());
+        event_id.ok_or_else(|| anyhow::anyhow!("API token not found"))
+    }
+    pub async fn event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<(EventData, String)> {
         let qxsql = QxAppSql(self.db_pool.clone());
         let data = qxsql
             .read_record("events", event_id, None)
@@ -76,7 +87,9 @@ impl State {
         if let Some(rec) = data {
             if let Some(json) = rec.get("data") {
                 let data: EventData = serde_json::from_str(json.as_str().unwrap_or_default())?;
-                return Ok(data)
+                if let Some(api_token) = rec.get("api_token") {
+                    return Ok((data, api_token.as_str().expect("API token should be in DB").to_string()))
+                }
             }
         }
         Err(anyhow::anyhow!("Event id: {} not found", event_id))
@@ -88,7 +101,6 @@ pub(crate) struct EventData {
     pub name: String,
     pub date: chrono::DateTime<chrono::Utc>,
     pub owner: String,
-    pub api_token: String,
     pub is_local: bool,
 }
 

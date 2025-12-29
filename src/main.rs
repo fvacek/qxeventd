@@ -102,11 +102,17 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         config.data_dir = data_dir;
     }
     if let Some(mount) = cli_opts.mount {
-        config.mount_point = mount;
+        config.client.mount = Some(mount);
+    }
+    if config.client.mount.is_none() && config.client.device_id.is_none() {
+        config.client.mount = Some("test/qx/qxevent".to_string());
     }
     if let Some(mount) = cli_opts.events_mount {
         config.events_mount_point = mount;
     }
+
+    info!("qxevent mount point: {:?}", config.client.mount);
+    info!("qxsql events mount point base: {}", config.events_mount_point);
 
     if cli_opts.print_config {
         let yaml = serde_yaml::to_string(&config)?;
@@ -215,6 +221,11 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 fn anyhow_to_rpc_error(err: anyhow::Error) -> RpcError {
     error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
     RpcError::new(RpcErrorCode::MethodCallException, format!("Error: {err}"))
+}
+
+fn string_to_rpc_error(err: String) -> RpcError {
+    error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
+    RpcError::new(RpcErrorCode::MethodCallException, err)
 }
 
 fn res_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<T>) -> Result<RpcValue, RpcError> {
