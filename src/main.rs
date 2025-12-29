@@ -1,16 +1,18 @@
-use std::sync::Arc;
 use std::{backtrace::Backtrace, sync::OnceLock};
 use clap::Parser;
 use log::{error, info};
 use qxsql::{RecChng, RecDeleteParam, RecInsertParam, RecListParam, RecOp, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
 use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
-use shvclient::appnodes::{DotAppNode, DotDeviceNode};
+use shvclient::appnodes::{DotDeviceNode};
 use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
-use smol::lock::RwLock;
+use smol::{lock::RwLock, channel};
+use futures::{select, FutureExt};
 use url::Url;
 
+use crate::appnode::AppNode;
 use crate::eventnode::request_handler;
 use crate::qxappsql::QxAppSql;
+use crate::state::SharedAppState;
 use crate::{
     state::{State},
     config::Config,
@@ -26,6 +28,7 @@ mod events;
 mod logger;
 mod migrate;
 mod qxappsql;
+mod appnode;
 mod eventnode;
 mod eventdb;
 
@@ -63,8 +66,6 @@ struct Opts {
     #[arg(short, long)]
     verbose: Option<String>,
 }
-
-type AppState = Arc<RwLock<State>>;
 
 static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -135,7 +136,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 }
 
 struct SqlNode {
-    app_state: AppState,
+    app_state: SharedAppState,
 }
 
 shvclient::impl_static_node! {
@@ -200,22 +201,36 @@ shvclient::impl_static_node! {
 
 async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db_pool = create_db_connection().await?;
-    let app_state = AppState::new(RwLock::new(State { db_pool, open_events: Default::default() }));
+    let (shutdown_sender, shutdown_receiver) = channel::bounded(1);
+    let app_state = SharedAppState::new(RwLock::new(State {
+        db_pool,
+        open_events: Default::default(),
+        shutdown_sender: Some(shutdown_sender),
+    }));
     let config = GLOBAL_CONFIG
         .get()
         .expect("Global config should be initialized");
 
-    shvclient::Client::new()
-        .app(DotAppNode::new(env!("CARGO_PKG_NAME")))
+    let app_state2 = app_state.clone();
+    let client_future = shvclient::Client::new()
         .device(DotDeviceNode::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), Some("00000".into())))
+        .mount_static(".app", AppNode::new(env!("CARGO_PKG_NAME"), app_state.clone()))
         .mount_static("sql", SqlNode { app_state: app_state.clone() })
         .mount_dynamic("event", move |rq, client_cmd_tx| {
-                        request_handler(rq, client_cmd_tx, app_state.clone())
+                        request_handler(rq, client_cmd_tx, app_state2.clone())
         })
-        // .run_with_init(&client_config, app_tasks)
-        .run(&config.client)
-        .await
-        .map_err(|err| err.to_string().into())
+        .run(&config.client);
+
+    // Select between client running and shutdown signal
+    select! {
+        result = client_future.fuse() => {
+            result.map_err(|err| err.to_string().into())
+        }
+        _ = shutdown_receiver.recv().fuse() => {
+            log::info!("Graceful shutdown");
+            Ok(())
+        }
+    }
 }
 
 fn anyhow_to_rpc_error(err: anyhow::Error) -> RpcError {

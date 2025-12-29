@@ -1,20 +1,40 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
+use anyhow::bail;
+use anyhow::anyhow;
 use log::info;
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
+use shvclient::ClientCommandSender;
 use shvproto::{RpcValue};
 use async_process::{Child, Command};
+use shvrpc::RpcMessage;
+use smol::{lock::RwLock, channel};
 use crate::{eventdb::migrate_db, generate_api_token, global_config, qxappsql::QxAppSql};
 
 pub type EventId = i64;
 
+pub type SharedAppState = Arc<RwLock<State>>;
+
 pub(crate) struct State {
     pub db_pool: async_sqlite::Pool,
     pub open_events: BTreeMap<EventId, OpenEvent>,
+    pub shutdown_sender: Option<channel::Sender<()>>,
 }
 
 impl State {
+    pub async fn quit_app(&mut self, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
+        let event_ids: Vec<_> = self.open_events.keys().copied().collect();
+        for event_id in event_ids {
+            if let Err(e) = self.close_event(event_id, client_command_sender.clone()).await {
+                bail!("Failed to close event {}: {}", event_id, e);
+            }
+        }
+        if let Some(sender) = self.shutdown_sender.take() {
+            let _ = sender.try_send(());
+        }
+        Ok(())
+    }
 
     pub async fn create_event(&self, owner: String) -> anyhow::Result<(EventId, String)> {
         if owner.is_empty() {
@@ -35,11 +55,12 @@ impl State {
         Ok((event_id, api_token))
     }
 
-    pub async fn open_event(&mut self, event_id: EventId) -> anyhow::Result<()> {
+    pub async fn open_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
         if self.open_events.contains_key(&event_id) {
-            return Ok(());
+            return Ok(false);
         }
         let (event_data, api_token) = self.event_data_from_sql(event_id).await?;
+
         let qxsql_process = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
             if !check_file_exists(&db_file) {
@@ -47,35 +68,63 @@ impl State {
             }
             migrate_db(&db_file).await?;
             let child = Command::new("qxsqld")
-                .args(&["--url", "tcp://localhost?user=test&password=test"])
-                .args(&["--device-id", &api_token])
-                .args(&["--database", &format!("sqlite://{db_file}")])
+                .args(["--url", "tcp://localhost?user=test&password=test"])
+                .args(["--device-id", &api_token])
+                .args(["--database", &format!("sqlite://{db_file}")])
                 .spawn()?; // Don't await, just start it
             info!("Child process qxsqld started OK");
             Some(child)
         } else {
             None
         };
+
         self.open_events.insert(event_id, OpenEvent { qxsql_process, data: event_data });
-        Ok(())
+
+        let message = RpcMessage::new_signal("event", "lsmod", Some(true.into()));
+        client_command_sender.send_message(message)
+            .map_err(|e| anyhow!("Failed to send message {}", e))?;
+
+        Ok(true)
     }
-    pub async fn close_event(&mut self, event_id: EventId) -> anyhow::Result<()> {
+
+    pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
         if let Some(event) = self.open_events.remove(&event_id) {
+            let mount_point = event_mount_point(event_id);
+
+            let message = RpcMessage::new_signal("event", "lsmod", Some(false.into()));
+            client_command_sender.send_message(message)
+            .map_err(|e| anyhow!("Failed to send message {}", e))?;
+
+            log::info!("Sending quit RPC message to qxsql of event {event_id} mounted at {mount_point}");
+            let _: () = client_command_sender.call_rpc_method(format!("{mount_point}/.app"), "quit", None, None, None::<fn(_)>).await
+                .map_err(|err| anyhow::anyhow!("Failed to shut down event: {}", err))?;
             if let Some(mut child) = event.qxsql_process {
+                log::info!("Closing event {}", event_id);
                 child.kill()?;
                 let status = child.status().await?;
                 info!("qxsql process killed with status: {:?}", status);
             }
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(())
+    }
+    pub async fn delete_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
+        if self.close_event(event_id, client_command_sender.clone()).await? {
+            let qxsql = QxAppSql(self.db_pool.clone());
+            let was_deleted = qxsql.delete_record("events", event_id).await?;
+            Ok(was_deleted)
+        } else {
+            Ok(false)
+        }
     }
     pub async fn api_token_to_event_id(&self, api_token: &str) -> anyhow::Result<EventId> {
         let qxsql = QxAppSql(self.db_pool.clone());
         let result = qxsql
             .query("SELECT id FROM events WHERE api_token = :api_token", Some(&record_from_slice(&[("api_token", api_token.into())])))
             .await?;
-        let event_id = result.rows.get(0)
-            .and_then(|row| row.get(0))
+        let event_id = result.rows.first()
+            .and_then(|row| row.first())
             .and_then(|cell| cell.to_int());
         event_id.ok_or_else(|| anyhow::anyhow!("API token not found"))
     }
@@ -84,14 +133,13 @@ impl State {
         let data = qxsql
             .read_record("events", event_id, None)
             .await?;
-        if let Some(rec) = data {
-            if let Some(json) = rec.get("data") {
+        if let Some(rec) = data
+            && let Some(json) = rec.get("data") {
                 let data: EventData = serde_json::from_str(json.as_str().unwrap_or_default())?;
                 if let Some(api_token) = rec.get("api_token") {
                     return Ok((data, api_token.as_str().expect("API token should be in DB").to_string()))
                 }
             }
-        }
         Err(anyhow::anyhow!("Event id: {} not found", event_id))
     }
 }
@@ -137,4 +185,8 @@ fn create_file_path(db_file: &str) -> anyhow::Result<()> {
     let dir = Path::new(db_file).parent().unwrap();
     std::fs::create_dir_all(dir)?;
     Ok(())
+}
+
+pub fn event_mount_point(event_id: EventId) -> String {
+    format!("{}/{event_id}", global_config().events_mount_point)
 }
