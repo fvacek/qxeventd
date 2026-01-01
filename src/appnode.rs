@@ -1,6 +1,6 @@
 
 use std::sync::OnceLock;
-
+use anyhow::anyhow;
 use async_trait::async_trait;
 use shvclient::ClientCommandSender;
 use shvclient::appnodes::{DOT_APP_METHODS, DotAppNode};
@@ -9,7 +9,7 @@ use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
 use shvrpc::{RpcMessageMetaTags, RpcMessage, rpcmessage::RpcError};
 use shvproto::RpcValue;
 
-use crate::anyhow_to_rpc_error;
+use crate::{anyhow_to_rpc_error, global_config};
 use crate::state::SharedAppState;
 
 pub struct AppNode {
@@ -36,9 +36,13 @@ fn get_methods() -> &'static [MetaMethod] {
     })
 }
 
+const METH_CONFIG: &str = "config";
 const METH_QUIT: &str = "quit";
 
 pub const APP_METHODS: &[MetaMethod] = &[
+    MetaMethod::new_static(
+        METH_CONFIG, Flag::None as u32, AccessLevel::Read, "", "", &[], "",
+    ),
     MetaMethod::new_static(
         METH_QUIT, Flag::None as u32, AccessLevel::Write, "", "", &[], "",
     ),
@@ -52,6 +56,12 @@ impl StaticNode for AppNode {
 
     async fn process_request(&self, request: RpcMessage, client_command_sender: ClientCommandSender) -> Option<Result<RpcValue, RpcError>> {
         match request.method() {
+            Some(METH_CONFIG) => {
+                match serde_yaml::to_string(global_config()) {
+                    Ok(s) => Some(Ok(shvproto::RpcValue::from(s))),
+                    Err(e) => Some(Err(anyhow_to_rpc_error(anyhow!("Failed to serialize configuration: {}", e)))),
+                }
+            }
             Some(METH_QUIT) => {
                 log::info!("Exit method called, initiating graceful shutdown");
                 match self.app_state.write().await.quit_app(client_command_sender).await {

@@ -128,6 +128,7 @@ impl State {
         let now = chrono::Utc::now();
         for (event_id, expires_at) in event_age_list {
             if expires_at < now {
+                info!("Closing event: {event_id} as expired.");
                 self.close_event(event_id, client_command_sender.clone()).await?;
             }
         }
