@@ -57,7 +57,7 @@ impl State {
     }
 
     pub async fn open_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
-        let new_expires_at = chrono::Utc::now().checked_add_signed(global_config().event_expiration).expect("Add duration error");
+        let new_expires_at = chrono::Utc::now().checked_add_signed(global_config().event_expire_duration).expect("Add duration error");
         if let Some(event) = self.open_events.get_mut(&event_id) {
             event.expires_at = new_expires_at;
             return Ok(false);

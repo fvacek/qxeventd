@@ -11,7 +11,6 @@ use futures::{select, FutureExt};
 use url::Url;
 
 use crate::appnode::AppNode;
-use crate::config::parse_duration;
 use crate::eventnode::request_handler;
 use crate::qxappsql::QxAppSql;
 use crate::state::SharedAppState;
@@ -62,7 +61,7 @@ struct Opts {
 
     /// Duration of event expiration
     #[arg(long)]
-    event_expiration: Option<String>,
+    event_expire_duration: Option<String>,
 
     /// Print effective config
     #[arg(long)]
@@ -117,9 +116,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if let Some(mount) = cli_opts.events_mount {
         config.events_mount_point = mount;
     }
-    if let Some(expiration) = cli_opts.event_expiration {
-        match parse_duration(&expiration) {
-            Ok(duration) => config.event_expiration = duration,
+    if let Some(expiration) = cli_opts.event_expire_duration {
+        match duration_str::parse_chrono(&expiration) {
+            Ok(duration) => config.event_expire_duration = duration,
             Err(err) => error!("Invalid event expiration duration: {}", err),
         }
     }

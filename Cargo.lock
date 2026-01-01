@@ -1503,6 +1503,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "duration-str",
  "flexi_logger",
  "futures",
  "futures-lite 2.6.1",
