@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use anyhow::bail;
 use anyhow::anyhow;
+use chrono::DateTime;
 use log::info;
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
@@ -56,7 +57,9 @@ impl State {
     }
 
     pub async fn open_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
-        if self.open_events.contains_key(&event_id) {
+        let new_expires_at = chrono::Utc::now().checked_add_signed(global_config().event_expiration).expect("Add duration error");
+        if let Some(event) = self.open_events.get_mut(&event_id) {
+            event.expires_at = new_expires_at;
             return Ok(false);
         }
         let (event_data, api_token) = self.event_data_from_sql(event_id).await?;
@@ -78,7 +81,7 @@ impl State {
             None
         };
 
-        self.open_events.insert(event_id, OpenEvent { qxsql_process, data: event_data });
+        self.open_events.insert(event_id, OpenEvent { qxsql_process, data: event_data, expires_at: new_expires_at });
 
         let message = RpcMessage::new_signal("event", "lsmod", Some(true.into()));
         client_command_sender.send_message(message)
@@ -118,6 +121,19 @@ impl State {
             Ok(false)
         }
     }
+
+    pub async fn gc_expired_events(&mut self, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
+        let event_age_list = self.open_events.iter()
+            .map(|(id, event)| (*id, event.expires_at)).collect::<Vec<_>>();
+        let now = chrono::Utc::now();
+        for (event_id, expires_at) in event_age_list {
+            if expires_at < now {
+                self.close_event(event_id, client_command_sender.clone()).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn api_token_to_event_id(&self, api_token: &str) -> anyhow::Result<EventId> {
         let qxsql = QxAppSql(self.db_pool.clone());
         let result = qxsql
@@ -147,7 +163,7 @@ impl State {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventData {
     pub name: String,
-    pub date: chrono::DateTime<chrono::Utc>,
+    pub date: DateTime<chrono::Utc>,
     pub owner: String,
     pub is_local: bool,
 }
@@ -173,6 +189,7 @@ impl From<&RpcValue> for EventData {
 pub(crate) struct OpenEvent {
     pub data: EventData,
     pub qxsql_process: Option<Child>,
+    pub expires_at: DateTime<chrono::Utc>,
 }
 
 impl OpenEvent {

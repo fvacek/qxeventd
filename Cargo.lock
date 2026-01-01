@@ -1506,6 +1506,7 @@ dependencies = [
  "flexi_logger",
  "futures",
  "futures-lite 2.6.1",
+ "futures-time",
  "log",
  "qxsql",
  "rand",
@@ -1894,7 +1895,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shvclient"
-version = "0.21.8"
+version = "0.21.10"
 dependencies = [
  "async-broadcast",
  "async-trait",

@@ -1,8 +1,10 @@
 use std::{backtrace::Backtrace, sync::OnceLock};
+use chrono::Duration;
 use clap::Parser;
-use log::{error, info};
+use log::{error, info, warn};
 use qxsql::{RecChng, RecDeleteParam, RecInsertParam, RecListParam, RecOp, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
 use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
+use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver};
 use shvclient::appnodes::{DotDeviceNode};
 use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 use smol::{lock::RwLock, channel};
@@ -58,6 +60,10 @@ struct Opts {
     )]
     data_dir: Option<String>,
 
+    /// Duration of event expiration
+    #[arg(long)]
+    event_expiration: Option<String>,
+
     /// Print effective config
     #[arg(long)]
     print_config: bool,
@@ -65,6 +71,19 @@ struct Opts {
     /// Verbose mode (module, .)
     #[arg(short, long)]
     verbose: Option<String>,
+}
+
+fn parse_duration(input: &str) -> Option<Duration> {
+    let (num, unit) = input.split_at(input.len() - 1);
+    let value: i64 = num.parse().ok()?;
+
+    match unit {
+        "s" => Some(Duration::seconds(value)),
+        "m" => Some(Duration::minutes(value)),
+        "h" => Some(Duration::hours(value)),
+        "d" => Some(Duration::days(value)),
+        _ => None,
+    }
 }
 
 static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
@@ -110,6 +129,13 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(mount) = cli_opts.events_mount {
         config.events_mount_point = mount;
+    }
+    if let Some(expiration) = cli_opts.event_expiration {
+        if let Some(duration) = parse_duration(&expiration) {
+            config.event_expiration = duration;
+        } else {
+            error!("Invalid event expiration duration: {}", expiration);
+        }
     }
 
     info!("qxevent mount point: {:?}", config.client.mount);
@@ -212,25 +238,69 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .expect("Global config should be initialized");
 
     let app_state2 = app_state.clone();
-    let client_future = shvclient::Client::new()
+    let app_tasks = {
+        let app_state = app_state2.clone();
+        move |client_cmd_tx, client_evt_rx| {
+            smol::spawn(app_task(client_cmd_tx, client_evt_rx, app_state, shutdown_receiver)).detach();
+        }
+    };
+
+    let ret = shvclient::Client::new()
         .device(DotDeviceNode::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), Some("00000".into())))
         .mount_static(".app", AppNode::new(env!("CARGO_PKG_NAME"), app_state.clone()))
         .mount_static("sql", SqlNode { app_state: app_state.clone() })
         .mount_dynamic("event", move |rq, client_cmd_tx| {
                         request_handler(rq, client_cmd_tx, app_state2.clone())
         })
-        .run(&config.client);
+        .run_with_init(&config.client, app_tasks)
+        .await;
 
-    // Select between client running and shutdown signal
-    select! {
-        result = client_future.fuse() => {
-            result.map_err(|err| err.to_string().into())
+    ret.map_err(|e| -> Box<dyn std::error::Error> { e })
+}
+
+async fn app_task(
+    client_cmd_tx: ClientCommandSender,
+    mut client_evt_rx: ClientEventsReceiver,
+    app_state: SharedAppState,
+    shutdown_receiver: channel::Receiver<()>,
+) -> shvrpc::Result<()> {
+    info!("app task started");
+
+    let mut is_connected = false;
+    let client_cmd_tx2 = client_cmd_tx.clone();
+    loop {
+        select! {
+            rx_event = client_evt_rx.recv_event().fuse() => match rx_event {
+                Ok(ClientEvent::ConnectionFailed(_)) => {
+                    warn!("Connection failed");
+                }
+                Ok(ClientEvent::Connected(api)) => {
+                    is_connected = true;
+                    warn!("Device connected to broker API: {:?}", api);
+                },
+                Ok(ClientEvent::Disconnected) => {
+                    is_connected = false;
+                    warn!("Device disconnected");
+                },
+                Err(err) => {
+                    error!("Device event error: {err}");
+                    break;
+                },
+            },
+            _ = shutdown_receiver.recv().fuse() => {
+                info!("Shutdown signal received");
+                client_cmd_tx.terminate_client();
+                break;
+            }
+            _ = futures_time::task::sleep(futures_time::time::Duration::from_secs(60)).fuse() => { }
+
         }
-        _ = shutdown_receiver.recv().fuse() => {
-            log::info!("Graceful shutdown");
-            Ok(())
+        if is_connected {
+            let _ = app_state.write().await.gc_expired_events(client_cmd_tx2.clone()).await;
         }
     }
+    info!("App task finished");
+    Ok(())
 }
 
 fn anyhow_to_rpc_error(err: anyhow::Error) -> RpcError {

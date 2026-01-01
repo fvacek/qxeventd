@@ -6,6 +6,7 @@ pub struct Config {
     pub client: ClientConfig,
     pub data_dir: String,
     pub events_mount_point: String,
+    pub event_expiration: chrono::Duration,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -13,6 +14,7 @@ impl Default for Config {
             client: ClientConfig::default(),
             data_dir: String::from("/tmp/qxeventd"),
             events_mount_point: String::from("test/qx/event"),
+            event_expiration: chrono::Duration::days(2),
         }
     }
 }
