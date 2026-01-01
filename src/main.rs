@@ -1,5 +1,4 @@
 use std::{backtrace::Backtrace, sync::OnceLock};
-use chrono::Duration;
 use clap::Parser;
 use log::{error, info, warn};
 use qxsql::{RecChng, RecDeleteParam, RecInsertParam, RecListParam, RecOp, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
@@ -12,6 +11,7 @@ use futures::{select, FutureExt};
 use url::Url;
 
 use crate::appnode::AppNode;
+use crate::config::parse_duration;
 use crate::eventnode::request_handler;
 use crate::qxappsql::QxAppSql;
 use crate::state::SharedAppState;
@@ -73,19 +73,6 @@ struct Opts {
     verbose: Option<String>,
 }
 
-fn parse_duration(input: &str) -> Option<Duration> {
-    let (num, unit) = input.split_at(input.len() - 1);
-    let value: i64 = num.parse().ok()?;
-
-    match unit {
-        "s" => Some(Duration::seconds(value)),
-        "m" => Some(Duration::minutes(value)),
-        "h" => Some(Duration::hours(value)),
-        "d" => Some(Duration::days(value)),
-        _ => None,
-    }
-}
-
 static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
 
 fn global_config() -> &'static Config {
@@ -131,10 +118,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         config.events_mount_point = mount;
     }
     if let Some(expiration) = cli_opts.event_expiration {
-        if let Some(duration) = parse_duration(&expiration) {
-            config.event_expiration = duration;
-        } else {
-            error!("Invalid event expiration duration: {}", expiration);
+        match parse_duration(&expiration) {
+            Ok(duration) => config.event_expiration = duration,
+            Err(err) => error!("Invalid event expiration duration: {}", err),
         }
     }
 
