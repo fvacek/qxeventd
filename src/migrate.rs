@@ -12,7 +12,10 @@ const MIGRATION_ARRAY: &[M] = &[
         CREATE TABLE events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             api_token TEXT,
-            data TEXT,
+            name TEXT,
+            date TEXT,
+            owner TEXT,
+            is_local BOOLEAN DEFAULT 1,
             CONSTRAINT events_unique0 UNIQUE (api_token)
         );
         "#,

@@ -66,17 +66,17 @@ const ROOT_METHODS: &[MetaMethod] = &[
         METH_OPEN_EVENT_API_KEY, Flag::None as u32, AccessLevel::Read, "s:api_token", "[i:event_id,s:mount_point]", &[], "",
     ),
     MetaMethod::new_static(
-        METH_DELETE_EVENT, Flag::None as u32, AccessLevel::Config, "s:api_token", "", &[], "",
+        METH_DELETE_EVENT, Flag::None as u32, AccessLevel::Config, "s:api_token", "b:was_deleted", &[], "",
     ),
 ];
 
-const METH_EVENT_INFO: &str = "info";
+const METH_EVENT_DATA: &str = "data";
 const METH_EVENT_CLOSE: &str = "close";
 const EVENT_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
     MetaMethod::new_static(
-        METH_EVENT_INFO, Flag::None as u32, AccessLevel::Read, "", "{?}", &[], "",
+        METH_EVENT_DATA, Flag::None as u32, AccessLevel::Read, "", "{?}", &[], "",
     ),
     MetaMethod::new_static(
         METH_EVENT_CLOSE, Flag::None as u32, AccessLevel::Read, "",  "", &[], "",
@@ -143,9 +143,9 @@ pub(crate) async fn request_handler(
                             let api_token = rq.param().unwrap_or_default().as_str();
                             let event_id = app_state.read().await.api_token_to_event_id(api_token).await
                                 .map_err(anyhow_to_rpc_error)?;
-                            app_state.write().await.delete_event(event_id, client_cmd_tx).await
+                            let was_deleted = app_state.write().await.delete_event(event_id, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
-                            Ok(RpcValue::from(()))
+                            Ok(RpcValue::from(was_deleted))
                         }),
                         _ => err_unresolved_request(),
                     }
@@ -159,7 +159,7 @@ pub(crate) async fn request_handler(
                 Method::Other(m) => {
                     let method = m.method();
                     match method {
-                        METH_EVENT_INFO => m.resolve(EVENT_METHODS, async move || {
+                        METH_EVENT_DATA => m.resolve(EVENT_METHODS, async move || {
                             let event_data = app_state.read().await.open_events.get(&event_id)
                                 .ok_or_else(|| anyhow_to_rpc_error(anyhow!("Event not found")))?.data.clone();
                             let info = RpcValue::from(&event_data);
@@ -180,7 +180,7 @@ pub(crate) async fn request_handler(
 async fn list_events(app_state: SharedAppState) -> Vec<String> {
     let mut events = app_state.read().await.open_events.keys().cloned().collect::<Vec<_>>();
     events.sort();
-    
+
     events
         .into_iter()
         .map(|id| format!("{id}"))

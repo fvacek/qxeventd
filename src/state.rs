@@ -4,6 +4,7 @@ use anyhow::bail;
 use anyhow::anyhow;
 use chrono::DateTime;
 use log::info;
+use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
@@ -41,16 +42,16 @@ impl State {
         if owner.is_empty() {
             return Err(anyhow::anyhow!("Owner cannot be empty"));
         }
+        let api_token = generate_api_token();
         let event_data = EventData {
             name: String::new(),
-            date: chrono::Utc::now(),
+            date: chrono::Utc::now().fixed_offset(),
             owner,
             is_local: true,
+            api_token: api_token.clone(),
         };
-        let data: String = serde_json::to_string(&event_data)?;
-        let api_token = generate_api_token();
 
-        let rec = record_from_slice(&[("data", data.into()), ("api_token", api_token.clone().into())]);
+        let rec = event_data.to_record()?;
         let qxsql = QxAppSql(self.db_pool.clone());
         let event_id = qxsql.create_record("events", &rec).await?;
         Ok((event_id, api_token))
@@ -62,7 +63,7 @@ impl State {
             event.expires_at = new_expires_at;
             return Ok(false);
         }
-        let (event_data, api_token) = self.event_data_from_sql(event_id).await?;
+        let event_data = self.event_data_from_sql(event_id).await?;
 
         let qxsql_process = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
@@ -72,7 +73,7 @@ impl State {
             migrate_db(&db_file).await?;
             let child = Command::new("qxsqld")
                 .args(["--url", "tcp://localhost?user=test&password=test"])
-                .args(["--device-id", &api_token])
+                .args(["--device-id", &event_data.api_token])
                 .args(["--database", &format!("sqlite://{db_file}")])
                 .spawn()?; // Don't await, just start it
             info!("Child process qxsqld started OK");
@@ -113,13 +114,11 @@ impl State {
         }
     }
     pub async fn delete_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
-        if self.close_event(event_id, client_command_sender.clone()).await? {
-            let qxsql = QxAppSql(self.db_pool.clone());
-            let was_deleted = qxsql.delete_record("events", event_id).await?;
-            Ok(was_deleted)
-        } else {
-            Ok(false)
-        }
+        self.close_event(event_id, client_command_sender.clone()).await?;
+        log::info!("Deleting event {}", event_id);
+        let qxsql = QxAppSql(self.db_pool.clone());
+        let was_deleted = qxsql.delete_record("events", event_id).await?;
+        Ok(was_deleted)
     }
 
     pub async fn gc_expired_events(&mut self, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
@@ -145,18 +144,15 @@ impl State {
             .and_then(|cell| cell.to_int());
         event_id.ok_or_else(|| anyhow::anyhow!("API token not found"))
     }
-    pub async fn event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<(EventData, String)> {
+    pub async fn event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<EventData> {
         let qxsql = QxAppSql(self.db_pool.clone());
         let data = qxsql
             .read_record("events", event_id, None)
             .await?;
-        if let Some(rec) = data
-            && let Some(json) = rec.get("data") {
-                let data: EventData = serde_json::from_str(json.as_str().unwrap_or_default())?;
-                if let Some(api_token) = rec.get("api_token") {
-                    return Ok((data, api_token.as_str().expect("API token should be in DB").to_string()))
-                }
-            }
+        if let Some(rec) = data {
+            let data = EventData::from_record(&rec)?;
+            return Ok(data)
+        }
         Err(anyhow::anyhow!("Event id: {} not found", event_id))
     }
 }
@@ -164,9 +160,32 @@ impl State {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventData {
     pub name: String,
-    pub date: DateTime<chrono::Utc>,
+    pub date: DateTime<chrono::FixedOffset>,
     pub owner: String,
+    pub api_token: String,
     pub is_local: bool,
+}
+
+impl EventData {
+    fn from_record(record: &Record) -> anyhow::Result<Self> {
+        let get_field = |name| record.get(name).ok_or_else(||anyhow!("Cannot get field '{}'.", name));
+        Ok(Self {
+            name: get_field("name")?.as_str().unwrap_or_default().to_string(),
+            date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Utc::now().fixed_offset()),
+            owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
+            is_local: get_field("is_local")?.to_bool(),
+            api_token: get_field("api_token")?.as_str().unwrap_or_default().to_string(),
+        })
+    }
+    fn to_record(&self) -> anyhow::Result<Record> {
+        let mut record = Record::new();
+        record.insert("name".to_string(), self.name.clone().into());
+        record.insert("date".to_string(), self.date.into());
+        record.insert("owner".to_string(), self.owner.clone().into());
+        record.insert("api_token".to_string(), self.api_token.clone().into());
+        record.insert("is_local".to_string(), self.is_local.into());
+        Ok(record)
+    }
 }
 
 impl From<&EventData> for RpcValue {

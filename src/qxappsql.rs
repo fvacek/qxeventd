@@ -25,6 +25,7 @@ fn convert_dbvalue_to_sql(key: &str, value: &DbValue) -> Result<async_sqlite::ru
         DbValue::DateTime(dt) => Ok(dt.to_rfc3339().into()),
         DbValue::Null => Ok(async_sqlite::rusqlite::types::Value::Null),
         DbValue::Blob(b) => Ok(b.clone().into()),
+        DbValue::Bool(b) => Ok((*b).into()),
         _ => Err(async_sqlite::rusqlite::Error::ToSqlConversionFailure(
             format!("Unsupported value type for field {}", key).into(),
         )),
