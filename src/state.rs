@@ -45,7 +45,7 @@ impl State {
         let api_token = generate_api_token();
         let event_data = EventData {
             name: String::new(),
-            date: chrono::Utc::now().fixed_offset(),
+            date: chrono::Local::now().fixed_offset(),
             owner,
             is_local: true,
             api_token: api_token.clone(),
@@ -70,7 +70,7 @@ impl State {
             if !check_file_exists(&db_file) {
                 create_file_path(&db_file)?;
             }
-            migrate_db(&db_file).await?;
+            migrate_db(&db_file, &event_data).await?;
             let child = Command::new("qxsqld")
                 .args(["--url", "tcp://localhost?user=test&password=test"])
                 .args(["--device-id", &event_data.api_token])
@@ -171,7 +171,7 @@ impl EventData {
         let get_field = |name| record.get(name).ok_or_else(||anyhow!("Cannot get field '{}'.", name));
         Ok(Self {
             name: get_field("name")?.as_str().unwrap_or_default().to_string(),
-            date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Utc::now().fixed_offset()),
+            date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Local::now().fixed_offset()),
             owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
             is_local: get_field("is_local")?.to_bool(),
             api_token: get_field("api_token")?.as_str().unwrap_or_default().to_string(),
