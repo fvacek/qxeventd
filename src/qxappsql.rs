@@ -1,12 +1,19 @@
 use async_sqlite::rusqlite::types::ValueRef;
 use async_trait::async_trait;
-use qxsql::{sql::{DbField, ExecResult, Record, QueryResult}, DbValue};
+use qxsql::{DbValue, sql::{DbField, ExecResult, QueryResult}};
+use qxsql::sql::Record;
+
+pub struct QxAppSql(async_sqlite::Pool);
 
 
-pub struct QxAppSql(pub async_sqlite::Pool);
+impl QxAppSql {
+    pub fn new(pool: async_sqlite::Pool) -> Self {
+        Self(pool)
+    }
+}
 
 #[async_trait]
-impl qxsql::sql::QxSqlApi for QxAppSql {
+impl qxsql::QxSqlApi for QxAppSql {
     async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> { let empty_params = Record::default();
         let params = params.unwrap_or(&empty_params);
         sql_query(&self.0, query, params).await
@@ -17,6 +24,8 @@ impl qxsql::sql::QxSqlApi for QxAppSql {
         sql_exec(&self.0, query, params).await
     }
 }
+
+impl qxsql::QxSqlApiRecChng for QxAppSql {}
 
 fn convert_dbvalue_to_sql(key: &str, value: &DbValue) -> Result<async_sqlite::rusqlite::types::Value, async_sqlite::rusqlite::Error> {
     match value {

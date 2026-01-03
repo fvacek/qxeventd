@@ -4,6 +4,7 @@ use anyhow::bail;
 use anyhow::anyhow;
 use chrono::DateTime;
 use log::info;
+use qxsql::QxSqlApiRecChng;
 use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
@@ -38,7 +39,7 @@ impl State {
         Ok(())
     }
 
-    pub async fn create_event(&self, owner: String) -> anyhow::Result<(EventId, String)> {
+    pub async fn create_event(&self, owner: String, client_cmd_tx: ClientCommandSender) -> anyhow::Result<(EventId, String)> {
         if owner.is_empty() {
             return Err(anyhow::anyhow!("Owner cannot be empty"));
         }
@@ -46,14 +47,14 @@ impl State {
         let event_data = EventData {
             name: String::new(),
             date: chrono::Local::now().fixed_offset(),
-            owner,
-            is_local: true,
+            owner: owner.clone(),
+            is_local: false,
             api_token: api_token.clone(),
         };
-
         let rec = event_data.to_record()?;
-        let qxsql = QxAppSql(self.db_pool.clone());
-        let event_id = qxsql.create_record("events", &rec).await?;
+        let qxsql = QxAppSql::new(self.db_pool.clone());
+        let event_id = qxsql.create_record_with_recchng("events", &rec, client_cmd_tx, Some(owner)).await?;
+        info!("Created event {event_id}");
         Ok((event_id, api_token))
     }
 
@@ -116,8 +117,8 @@ impl State {
     pub async fn delete_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
         self.close_event(event_id, client_command_sender.clone()).await?;
         log::info!("Deleting event {}", event_id);
-        let qxsql = QxAppSql(self.db_pool.clone());
-        let was_deleted = qxsql.delete_record("events", event_id).await?;
+        let qxsql = QxAppSql::new(self.db_pool.clone());
+        let was_deleted = qxsql.delete_record_with_recchng("events", event_id, client_command_sender, None).await?;
         Ok(was_deleted)
     }
 
@@ -135,7 +136,7 @@ impl State {
     }
 
     pub async fn api_token_to_event_id(&self, api_token: &str) -> anyhow::Result<EventId> {
-        let qxsql = QxAppSql(self.db_pool.clone());
+        let qxsql = QxAppSql::new(self.db_pool.clone());
         let result = qxsql
             .query("SELECT id FROM events WHERE api_token = :api_token", Some(&record_from_slice(&[("api_token", api_token.into())])))
             .await?;
@@ -145,7 +146,7 @@ impl State {
         event_id.ok_or_else(|| anyhow::anyhow!("API token not found"))
     }
     pub async fn event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<EventData> {
-        let qxsql = QxAppSql(self.db_pool.clone());
+        let qxsql = QxAppSql::new(self.db_pool.clone());
         let data = qxsql
             .read_record("events", event_id, None)
             .await?;

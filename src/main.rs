@@ -1,10 +1,11 @@
 use std::{backtrace::Backtrace, sync::OnceLock};
 use clap::Parser;
 use log::{error, info, warn};
-use qxsql::{RecChng, RecDeleteParam, RecInsertParam, RecListParam, RecOp, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
+use qxsql::{QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecListParam, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
 use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
 use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver};
 use shvclient::appnodes::{DotDeviceNode};
+use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 use smol::{lock::RwLock, channel};
 use futures::{select, FutureExt};
@@ -153,58 +154,40 @@ struct SqlNode {
 shvclient::impl_static_node! {
     SqlNode(&self, request, client_cmd_tx) {
         "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
-            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
+            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
             let result = qxsql.query(query.query(), query.params()).await;
             Some(res_to_rpcvalue(result))
         }
         "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
-            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
+            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
             let result = qxsql.exec(query.query(), query.params()).await;
             Some(res_to_rpcvalue(result))
         }
         "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
-            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
+            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
             let fields = string_list_to_ref_vec(&param.fields);
             let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
             Some(res_to_rpcvalue(result))
         }
         "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
-            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
-            let insert_id = qxsql.create_record(&param.table, &param.record).await;
-            if let Ok(insert_id) = insert_id {
-                let recchng = RecChng {table:param.table, id:insert_id, record:Some(param.record), op: RecOp::Insert, issuer:param.issuer };
-                let rec = to_rpcvalue(&recchng).expect("serde should work");
-                client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
-                                .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
-            }
+            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let insert_id = qxsql.create_record_with_recchng(&param.table, &param.record, client_cmd_tx, issuer(&request)).await;
             Some(res_to_rpcvalue(insert_id))
         }
         "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
-            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
+            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
             let fields = string_list_to_ref_vec(&param.fields);
             let result = qxsql.read_record(&param.table, param.id, fields).await;
             Some(res_to_rpcvalue(result))
         }
         "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
-            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
-            let update_success = qxsql.update_record(&param.table, param.id, &param.record).await;
-            if let Ok(update_success) = update_success && update_success {
-                let recchng = RecChng {table:param.table, id:param.id, record:Some(param.record), op: RecOp::Update, issuer:param.issuer };
-                let rec = to_rpcvalue(&recchng).expect("serde should work");
-                client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
-                                .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
-            }
+            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let update_success = qxsql.update_record_with_recchng(&param.table, param.id, &param.record, client_cmd_tx.clone(), issuer(&request)).await;
             Some(res_to_rpcvalue(update_success))
         }
         "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
-            let qxsql = QxAppSql(self.app_state.read().await.db_pool.clone());
-            let was_deleted = qxsql.delete_record(&param.table, param.id).await;
-            if let Ok(was_deleted) = was_deleted && was_deleted {
-                let recchng = RecChng {table:param.table, id:param.id, record:None, op: RecOp::Delete, issuer:param.issuer };
-                let rec = to_rpcvalue(&recchng).expect("serde should work");
-                client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal("sql", "recchng", Some(rec)))
-                                .unwrap_or_else(|err| log::error!("Cannot send signal ({err})"));
-            }
+            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let was_deleted = qxsql.delete_record_with_recchng(&param.table, param.id, client_cmd_tx, issuer(&request)).await;
             Some(res_to_rpcvalue(was_deleted))
         }
     }
@@ -261,11 +244,11 @@ async fn app_task(
                 }
                 Ok(ClientEvent::Connected(api)) => {
                     is_connected = true;
-                    warn!("Device connected to broker API: {:?}", api);
+                    info!("Device connected to broker API: {:?}", api);
                 },
                 Ok(ClientEvent::Disconnected) => {
                     is_connected = false;
-                    warn!("Device disconnected");
+                    info!("Device disconnected from shvbroker");
                 },
                 Err(err) => {
                     error!("Device event error: {err}");
@@ -319,4 +302,25 @@ fn generate_api_token() -> String {
             charset.chars().nth(idx).unwrap()
         })
         .collect()
+}
+
+fn issuer(rq: &RpcMessage) -> Option<String> {
+    rq.user_id().and_then(|uid| {
+        let (issuer, _) = split_first_fragment(&uid, ';');
+        if issuer.is_empty() {
+            Some(issuer.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn split_first_fragment(path: &str, sep: char) -> (&str, &str) {
+    if let Some(ix) = path.find(sep) {
+        let dir = &path[0 .. ix];
+        let rest = &path[ix + 1..];
+        (dir, rest)
+    } else {
+        (path, "")
+    }
 }

@@ -113,7 +113,7 @@ pub(crate) async fn request_handler(
                     match method {
                         METH_CREATE_EVENT => m.resolve(ROOT_METHODS, async move || {
                             let owner = rq.param().unwrap_or_default().as_str().to_owned();
-                            let (event_id, api_token) = app_state.write().await.create_event(owner).await
+                            let (event_id, api_token) = app_state.write().await.create_event(owner, client_cmd_tx.clone()).await
                                 .map_err(anyhow_to_rpc_error)?;
                             // add api token to broker mounts
                             let mount_point = event_mount_point(event_id);
