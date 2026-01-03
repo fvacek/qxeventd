@@ -20,7 +20,7 @@ pub async fn migrate_db(db_file: &str, event_data: &EventData) -> anyhow::Result
             Err(e) => panic!("{}", e),
         }
     }).await?;
-    let qxsql = QxAppSql(pool);
+    let qxsql = QxAppSql::new(pool);
     let config_entries = [
         ("event.name", event_data.name.clone()),
         ("event.date", event_data.date.format("%Y-%m-%d").to_string()),
@@ -48,13 +48,13 @@ const MIGRATION_ARRAY: &[M] = &[
 r#"
 CREATE TABLE enumz (
     id integer PRIMARY KEY,
-    groupname character varying,
+    groupName character varying,
     groupId character varying,
     pos integer,
     caption character varying,
     color character varying,
     value character varying,
-    CONSTRAINT enumz_unique0 UNIQUE (groupname, groupid)
+    CONSTRAINT enumz_unique0 UNIQUE (groupName, groupId)
 );
 
 CREATE TABLE config (
@@ -67,10 +67,10 @@ CREATE TABLE config (
 
 CREATE TABLE stages (
     id integer,
-    startdatetime timestamp,
-    useallmaps boolean NOT NULL DEFAULT 0,
-    drawingconfig character varying,
-    qxapitoken character varying,
+    startDateTime timestamp,
+    useAllMaps boolean NOT NULL DEFAULT 0,
+    drawingConfig character varying,
+    qxApiToken character varying,
     CONSTRAINT stages_pkey PRIMARY KEY (id)
 );
 
@@ -80,15 +80,15 @@ CREATE TABLE courses (
     length integer,
     climb integer,
     note character varying,
-    mapcount integer
+    mapCount integer
 );
 CREATE INDEX courses_ix0 ON courses (name);
 
 CREATE TABLE codes (
     id integer PRIMARY KEY,
     code integer,
-    altcode integer,
-    outoforder boolean NOT NULL DEFAULT 0,
+    altCode integer,
+    outOfOrder boolean NOT NULL DEFAULT 0,
     radio boolean NOT NULL DEFAULT 0,
     longitude double precision,
     latitude double precision,
@@ -97,13 +97,13 @@ CREATE TABLE codes (
 
 CREATE TABLE coursecodes (
     id integer PRIMARY KEY,
-    courseid integer,
+    courseId integer,
     position integer,
-    codeid integer,
-    CONSTRAINT coursecodes_foreign0 FOREIGN KEY (courseid) REFERENCES courses (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT coursecodes_foreign1 FOREIGN KEY (codeid) REFERENCES codes (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+    codeId integer,
+    CONSTRAINT coursecodes_foreign0 FOREIGN KEY (courseId) REFERENCES courses (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT coursecodes_foreign1 FOREIGN KEY (codeId) REFERENCES codes (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
-CREATE INDEX coursecodes_ix2 ON coursecodes (courseid, position);
+CREATE INDEX coursecodes_ix2 ON coursecodes (courseId, position);
 
 CREATE TABLE classes (
     id integer PRIMARY KEY,
@@ -113,171 +113,171 @@ CREATE TABLE classes (
 
 CREATE TABLE classdefs (
     id integer PRIMARY KEY,
-    classid integer,
-    stageid integer,
-    courseid integer,
-    startslotindex integer NOT NULL DEFAULT -1,
-    starttimemin integer,
-    startintervalmin integer,
-    vacantsbefore integer,
-    vacantevery integer,
-    vacantsafter integer,
-    mapcount integer,
-    resultscount integer,
-    resultsprintts timestamp,
-    laststarttimemin integer,
-    drawlock boolean NOT NULL DEFAULT 0,
-    relaystartnumber integer,
-    relaylegcount integer,
-    CONSTRAINT classdefs_foreign0 FOREIGN KEY (stageid) REFERENCES stages (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT classdefs_foreign1 FOREIGN KEY (classid) REFERENCES classes (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT classdefs_foreign2 FOREIGN KEY (courseid) REFERENCES courses (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+    classId integer,
+    stageId integer,
+    courseId integer,
+    startSlotIndex integer NOT NULL DEFAULT -1,
+    startTimeMin integer,
+    startIntervalMin integer,
+    vacantsBefore integer,
+    vacantEvery integer,
+    vacantsAfter integer,
+    mapCount integer,
+    resultsCount integer,
+    resultsPrintTS timestamp,
+    lastStartTimeMin integer,
+    drawLock boolean NOT NULL DEFAULT 0,
+    relayStartNumber integer,
+    relayLegCount integer,
+    CONSTRAINT classdefs_foreign0 FOREIGN KEY (stageId) REFERENCES stages (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT classdefs_foreign1 FOREIGN KEY (classId) REFERENCES classes (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT classdefs_foreign2 FOREIGN KEY (courseId) REFERENCES courses (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 
 CREATE TABLE competitors (
     id integer PRIMARY KEY,
-    startnumber integer,
-    classid integer,
-    firstname character varying,
-    lastname character varying,
+    startNumber integer,
+    classId integer,
+    firstName character varying,
+    lastName character varying,
     registration character varying(10),
-    iofid integer,
+    iofId integer,
     licence character varying(1),
     club character varying,
     country character varying,
-    siid integer,
+    siId integer,
     ranking integer,
     note character varying,
-    importid integer,
-    CONSTRAINT competitors_foreign0 FOREIGN KEY (classid) REFERENCES classes (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+    importId integer,
+    CONSTRAINT competitors_foreign0 FOREIGN KEY (classId) REFERENCES classes (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
-CREATE INDEX competitors_ix1 ON competitors (importid);
+CREATE INDEX competitors_ix1 ON competitors (importId);
 
 CREATE TABLE runs (
     id integer PRIMARY KEY,
-    competitorid integer,
-    siid integer,
-    stageid integer NOT NULL DEFAULT 1,
+    competitorId integer,
+    siId integer,
+    stageId integer NOT NULL DEFAULT 1,
     leg integer,
-    relayid integer,
-    corridortime timestamp,
-    checktimems integer,
-    starttimems integer,
-    finishtimems integer,
-    penaltytimems integer,
-    timems integer,
-    isrunning boolean NOT NULL DEFAULT 1,
-    disqualified boolean GENERATED ALWAYS AS (disqualifiedbyorganizer OR  mispunch OR  notstart OR  notfinish OR  badcheck OR  overtime OR notcompeting) STORED,
-    disqualifiedbyorganizer boolean NOT NULL DEFAULT 0,
-    notcompeting boolean NOT NULL DEFAULT 0,
-    mispunch boolean NOT NULL DEFAULT 0,
-    notstart boolean NOT NULL DEFAULT 0,
-    notfinish boolean NOT NULL DEFAULT 0,
-    badcheck boolean NOT NULL DEFAULT 0,
-    overtime boolean NOT NULL DEFAULT 0,
-    cardlent boolean NOT NULL DEFAULT 0,
-    cardreturned boolean NOT NULL DEFAULT 0,
-    importid integer,
-    CONSTRAINT runs_foreign0 FOREIGN KEY (competitorid) REFERENCES competitors (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT runs_foreign1 FOREIGN KEY (stageid) REFERENCES stages (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+    relayId integer,
+    corridorTime timestamp,
+    checkTimeMs integer,
+    startTimeMs integer,
+    finishTimeMs integer,
+    penaltyTimeMs integer,
+    timeMs integer,
+    isRunning boolean NOT NULL DEFAULT 1,
+    disqualified boolean GENERATED ALWAYS AS (disqualifiedByOrganizer OR  misPunch OR  notStart OR  notFinish OR  badCheck OR  overTime OR notCompeting) STORED,
+    disqualifiedByOrganizer boolean NOT NULL DEFAULT 0,
+    notCompeting boolean NOT NULL DEFAULT 0,
+    misPunch boolean NOT NULL DEFAULT 0,
+    notStart boolean NOT NULL DEFAULT 0,
+    notFinish boolean NOT NULL DEFAULT 0,
+    badCheck boolean NOT NULL DEFAULT 0,
+    overTime boolean NOT NULL DEFAULT 0,
+    cardLent boolean NOT NULL DEFAULT 0,
+    cardReturned boolean NOT NULL DEFAULT 0,
+    importId integer,
+    CONSTRAINT runs_foreign0 FOREIGN KEY (competitorId) REFERENCES competitors (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT runs_foreign1 FOREIGN KEY (stageId) REFERENCES stages (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
-CREATE INDEX runs_ix2 ON runs (relayid, leg);
-CREATE INDEX runs_ix3 ON runs (stageid, siid);
+CREATE INDEX runs_ix2 ON runs (relayId, leg);
+CREATE INDEX runs_ix3 ON runs (stageId, siId);
 
 CREATE TABLE relays (
     id integer PRIMARY KEY,
     number integer,
-    classid integer,
+    classId integer,
     club character varying,
     name character varying,
     note character varying,
-    importid integer,
-    isrunning boolean NOT NULL DEFAULT 1,
-    CONSTRAINT relays_foreign0 FOREIGN KEY (classid) REFERENCES classes (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+    importId integer,
+    isRunning boolean NOT NULL DEFAULT 1,
+    CONSTRAINT relays_foreign0 FOREIGN KEY (classId) REFERENCES classes (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 CREATE INDEX relays_ix1 ON relays (club, name);
 CREATE INDEX relays_ix2 ON relays (number);
 
 CREATE TABLE runlaps (
     id integer PRIMARY KEY,
-    runid integer,
+    runId integer,
     position integer,
     code integer,
-    stptimems integer,
-    laptimems integer
+    stpTimeMs integer,
+    lapTimeMs integer
 );
-CREATE INDEX runlaps_ix0 ON runlaps (runid, position);
-CREATE INDEX runlaps_ix1 ON runlaps (position, stptimems);
-CREATE INDEX runlaps_ix2 ON runlaps (position, laptimems);
+CREATE INDEX runlaps_ix0 ON runlaps (runId, position);
+CREATE INDEX runlaps_ix1 ON runlaps (position, stpTimeMs);
+CREATE INDEX runlaps_ix2 ON runlaps (position, lapTimeMs);
 
 CREATE TABLE clubs (
     id integer PRIMARY KEY,
     name character varying,
     abbr character varying,
-    importid integer
+    importId integer
 );
 CREATE INDEX clubs_ix0 ON clubs (abbr);
 
 CREATE TABLE registrations (
     id integer PRIMARY KEY,
-    firstname character varying,
-    lastname character varying,
+    firstName character varying,
+    lastName character varying,
     registration character varying(10),
     licence character varying(1),
-    clubabbr character varying,
+    clubAbbr character varying,
     country character varying,
-    siid integer,
-    importid integer
+    siId integer,
+    importId integer
 );
 CREATE INDEX registrations_ix0 ON registrations (registration);
 
 CREATE TABLE cards (
     id integer PRIMARY KEY,
-    runid integer,
-    runidassignts timestamp,
-    runidassignerror character varying,
-    stageid integer,
-    stationnumber integer DEFAULT 0,
-    siid integer,
-    checktime integer,
-    starttime integer,
-    finishtime integer,
+    runId integer,
+    runIdAssignTS timestamp,
+    runIdAssignError character varying,
+    stageId integer,
+    stationNumber integer DEFAULT 0,
+    siId integer,
+    checkTime integer,
+    startTime integer,
+    finishTime integer,
     punches character varying(65536),
     data character varying,
-    readerconnectionid integer,
-    printerconnectionid integer
+    readerConnectionId integer,
+    printerConnectionId integer
 );
-CREATE INDEX cards_ix0 ON cards (readerconnectionid);
-CREATE INDEX cards_ix1 ON cards (printerconnectionid);
-CREATE INDEX cards_ix2 ON cards (stageid, siid);
-CREATE INDEX cards_ix3 ON cards (runid);
+CREATE INDEX cards_ix0 ON cards (readerConnectionId);
+CREATE INDEX cards_ix1 ON cards (printerConnectionId);
+CREATE INDEX cards_ix2 ON cards (stageId, siId);
+CREATE INDEX cards_ix3 ON cards (runId);
 
 CREATE TABLE punches (
     id integer PRIMARY KEY,
     code integer,
-    siid integer,
+    siId integer,
     time integer,
     msec integer,
-    stageid integer,
-    runid integer,
-    timems integer,
-    runtimems integer
+    stageId integer,
+    runId integer,
+    timeMs integer,
+    runTimeMs integer
 );
-CREATE INDEX punches_ix0 ON punches (stageid, code);
-CREATE INDEX punches_ix1 ON punches (runid);
+CREATE INDEX punches_ix0 ON punches (stageId, code);
+CREATE INDEX punches_ix1 ON punches (runId);
 
 CREATE TABLE stationsbackup (
     id integer PRIMARY KEY,
-    stageid integer,
-    stationnumber integer,
-    siid integer,
-    punchdatetime timestamp,
-    carderr boolean,
-    CONSTRAINT stationsbackup_unique0 UNIQUE (stageid, stationnumber, siid, punchdatetime)
+    stageId integer,
+    stationNumber integer,
+    siId integer,
+    punchDateTime timestamp,
+    cardErr boolean,
+    CONSTRAINT stationsbackup_unique0 UNIQUE (stageId, stationNumber, siId, punchDateTime)
 );
 
 CREATE TABLE lentcards (
-    siid integer PRIMARY KEY,
+    siId integer PRIMARY KEY,
     ignored boolean NOT NULL DEFAULT 0,
     note character varying
 );
