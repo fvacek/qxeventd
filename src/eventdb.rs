@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use async_sqlite::{JournalMode, PoolBuilder};
 use log::info;
 use qxsql::sql::{QxSqlApi, record_from_slice};
@@ -5,8 +7,23 @@ use rusqlite_migration::{M, Migrations};
 
 use crate::{qxappsql::QxAppSql, state::EventData};
 
+fn check_file_exists(path: &str) -> bool {
+    std::fs::metadata(path).is_ok()
+}
+fn create_file_path(db_file: &str) -> anyhow::Result<()> {
+    let dir = Path::new(db_file).parent().unwrap();
+    std::fs::create_dir_all(dir)?;
+    Ok(())
+}
+
 pub async fn migrate_db(db_file: &str, event_data: &EventData) -> anyhow::Result<()> {
+    let db_file_exists = check_file_exists(&db_file);
+    if !db_file_exists {
+        info!("Creating event database file {}", db_file);
+        create_file_path(&db_file)?;
+    }
     info!("Opening db {db_file} in journal mode: Wal");
+
     let pool = PoolBuilder::new()
                     .path(db_file)
                     .journal_mode(JournalMode::Wal);
@@ -21,21 +38,23 @@ pub async fn migrate_db(db_file: &str, event_data: &EventData) -> anyhow::Result
         }
     }).await?;
     let qxsql = QxAppSql::new(pool);
-    let config_entries = [
-        ("event.name", event_data.name.clone()),
-        ("event.date", event_data.date.format("%Y-%m-%d").to_string()),
-        ("event.time", event_data.date.format("%H:%M:%S").to_string()),
-    ];
+    if !db_file_exists {
+        let config_entries = [
+            ("event.name", event_data.name.clone()),
+            ("event.date", event_data.date.format("%Y-%m-%d").to_string()),
+            ("event.time", event_data.date.format("%H:%M:%S").to_string()),
+        ];
 
-    for (key, value) in config_entries {
-        qxsql.exec("INSERT INTO config (ckey, cvalue) VALUES (:ckey, :cvalue)", Some(&record_from_slice(&[
-            ("ckey", key.into()),
-            ("cvalue", value.into()),
-        ]))).await?;
+        for (key, value) in config_entries {
+            qxsql.exec("INSERT INTO config (ckey, cvalue) VALUES (:ckey, :cvalue)", Some(&record_from_slice(&[
+                ("ckey", key.into()),
+                ("cvalue", value.into()),
+            ]))).await?;
+        }
+        qxsql.create_record("stages", &record_from_slice(&[
+            ("startdatetime", event_data.date.clone().into()),
+        ])).await?;
     }
-    qxsql.create_record("stages", &record_from_slice(&[
-        ("startdatetime", event_data.date.clone().into()),
-    ])).await?;
     info!("Migration of: {db_file} OK");
 
     Ok(())

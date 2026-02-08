@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::bail;
 use anyhow::anyhow;
@@ -12,6 +12,7 @@ use shvclient::ClientCommandSender;
 use shvproto::{RpcValue};
 use async_process::{Child, Command};
 use shvrpc::RpcMessage;
+use shvrpc::util::join_path;
 use smol::{lock::RwLock, channel};
 use crate::{eventdb::migrate_db, generate_api_token, global_config, qxappsql::QxAppSql};
 
@@ -68,20 +69,33 @@ impl State {
 
         let qxsql_process = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-            if !check_file_exists(&db_file) {
-                create_file_path(&db_file)?;
-            }
             migrate_db(&db_file, &event_data).await?;
-            let child = Command::new("qxsqld")
+            let mut child = Command::new("qxsqld")
                 .args(["--url", "tcp://localhost?user=test&password=test"])
                 .args(["--device-id", &event_data.api_token])
                 .args(["--database", &format!("sqlite://{db_file}")])
                 .spawn()?; // Don't await, just start it
             info!("Child process qxsqld started OK");
+            smol::Timer::after(std::time::Duration::from_secs(1)).await;
+            // Check if the process is running correctly
+            match child.try_status()? {
+                Some(status) => {
+                    return Err(anyhow!("qxsqld process exited unexpectedly with status: {:?}", status));
+                }
+                None => {
+                    // Process is still running, which is what we want
+                    info!("qxsqld process is running correctly");
+                }
+            }
             Some(child)
         } else {
             None
         };
+
+        // ping child
+        let mount_point = event_mount_point(event_id);
+        let _: () = client_command_sender.call_rpc_method(join_path(mount_point, ".app"), "ping", None, None, None::<fn(_)>).await
+            .map_err(|_| anyhow!("Failed to ping DB service."))?;
 
         self.open_events.insert(event_id, OpenEvent { qxsql_process, data: event_data, expires_at: new_expires_at });
 
@@ -214,15 +228,6 @@ pub(crate) struct OpenEvent {
 }
 
 impl OpenEvent {
-}
-
-fn check_file_exists(path: &str) -> bool {
-    std::fs::metadata(path).is_ok()
-}
-fn create_file_path(db_file: &str) -> anyhow::Result<()> {
-    let dir = Path::new(db_file).parent().unwrap();
-    std::fs::create_dir_all(dir)?;
-    Ok(())
 }
 
 pub fn event_mount_point(event_id: EventId) -> String {

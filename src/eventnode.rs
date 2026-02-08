@@ -2,7 +2,7 @@ use log::warn;
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
 use shvproto::{RpcValue, make_map};
-use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
+use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use crate::{anyhow_to_rpc_error, string_to_rpc_error};
 use crate::state::{EventId, SharedAppState, event_mount_point};
@@ -57,16 +57,16 @@ const ROOT_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
     MetaMethod::new_static(
-        METH_CREATE_EVENT, Flag::None as u32, AccessLevel::Write, "s:owner", "[i:event_id,s:api_token]", &[], "",
+        METH_CREATE_EVENT, Flags::None, AccessLevel::Write, "s:owner", "[i:event_id,s:api_token]", &[], "",
     ),
     MetaMethod::new_static(
-        METH_OPEN_EVENT, Flag::None as u32, AccessLevel::Read, "i:event_id", "s:mount_point", &[], "",
+        METH_OPEN_EVENT, Flags::None, AccessLevel::Read, "i:event_id", "s:mount_point", &[], "",
     ),
     MetaMethod::new_static(
-        METH_OPEN_EVENT_API_KEY, Flag::None as u32, AccessLevel::Read, "s:api_token", "[i:event_id,s:mount_point]", &[], "",
+        METH_OPEN_EVENT_API_KEY, Flags::None, AccessLevel::Read, "s:api_token", "[i:event_id,s:mount_point]", &[], "",
     ),
     MetaMethod::new_static(
-        METH_DELETE_EVENT, Flag::None as u32, AccessLevel::Config, "s:api_token", "b:was_deleted", &[], "",
+        METH_DELETE_EVENT, Flags::None, AccessLevel::Config, "s:api_token", "b:was_deleted", &[], "",
     ),
 ];
 
@@ -76,10 +76,10 @@ const EVENT_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
     MetaMethod::new_static(
-        METH_EVENT_DATA, Flag::None as u32, AccessLevel::Read, "", "{?}", &[], "",
+        METH_EVENT_DATA, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
     ),
     MetaMethod::new_static(
-        METH_EVENT_CLOSE, Flag::None as u32, AccessLevel::Read, "",  "", &[], "",
+        METH_EVENT_CLOSE, Flags::None, AccessLevel::Read, "",  "", &[], "",
     ),
 ];
 

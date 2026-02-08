@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use shvclient::ClientCommandSender;
 use shvclient::appnodes::{DOT_APP_METHODS, DotAppNode};
 use shvclient::clientnode::StaticNode;
-use shvrpc::metamethod::{AccessLevel, Flag, MetaMethod};
+use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessageMetaTags, RpcMessage, rpcmessage::RpcError};
 use shvproto::RpcValue;
 
@@ -41,10 +41,10 @@ const METH_QUIT: &str = "quit";
 
 pub const APP_METHODS: &[MetaMethod] = &[
     MetaMethod::new_static(
-        METH_CONFIG, Flag::None as u32, AccessLevel::Read, "", "", &[], "",
+        METH_CONFIG, Flags::None, AccessLevel::Read, "", "", &[], "",
     ),
     MetaMethod::new_static(
-        METH_QUIT, Flag::None as u32, AccessLevel::Write, "", "", &[], "",
+        METH_QUIT, Flags::None, AccessLevel::Write, "", "", &[], "",
     ),
 ];
 

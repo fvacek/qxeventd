@@ -18,7 +18,6 @@ use crate::state::SharedAppState;
 use crate::{
     state::{State},
     config::Config,
-    logger::setup_logger,
     migrate::create_db_connection,
 };
 use shvproto::{RpcValue, to_rpcvalue};
@@ -27,7 +26,6 @@ use qxsql::{sql::{QxSqlApi, QUERY_PARAMS, QUERY_RESULT, QueryAndParams}};
 mod state;
 mod config;
 mod events;
-mod logger;
 mod migrate;
 mod qxappsql;
 mod appnode;
@@ -82,7 +80,7 @@ fn global_config() -> &'static Config {
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli_opts = Opts::parse();
 
-    setup_logger(&cli_opts)?;
+    qxsql::setup_flexi_logger(cli_opts.verbose.as_ref().map(|x| x.as_str()))?;
 
     log::info!("=====================================================");
     log::info!("{} starting", env!("CARGO_PKG_NAME"));
