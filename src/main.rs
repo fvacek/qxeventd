@@ -80,7 +80,7 @@ fn global_config() -> &'static Config {
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cli_opts = Opts::parse();
 
-    qxsql::setup_flexi_logger(cli_opts.verbose.as_ref().map(|x| x.as_str()))?;
+    qxsql::setup_flexi_logger(cli_opts.verbose.as_deref())?;
 
     log::info!("=====================================================");
     log::info!("{} starting", env!("CARGO_PKG_NAME"));
@@ -304,7 +304,7 @@ fn generate_api_token() -> String {
 
 fn issuer(rq: &RpcMessage) -> Option<String> {
     rq.user_id().and_then(|uid| {
-        let (issuer, _) = split_first_fragment(&uid, ';');
+        let (issuer, _) = split_first_fragment(uid, ';');
         if issuer.is_empty() {
             Some(issuer.to_string())
         } else {

@@ -17,10 +17,10 @@ fn create_file_path(db_file: &str) -> anyhow::Result<()> {
 }
 
 pub async fn migrate_db(db_file: &str, event_data: &EventData) -> anyhow::Result<()> {
-    let db_file_exists = check_file_exists(&db_file);
+    let db_file_exists = check_file_exists(db_file);
     if !db_file_exists {
         info!("Creating event database file {}", db_file);
-        create_file_path(&db_file)?;
+        create_file_path(db_file)?;
     }
     info!("Opening db {db_file} in journal mode: Wal");
 
@@ -52,7 +52,7 @@ pub async fn migrate_db(db_file: &str, event_data: &EventData) -> anyhow::Result
             ]))).await?;
         }
         qxsql.create_record("stages", &record_from_slice(&[
-            ("startdatetime", event_data.date.clone().into()),
+            ("startdatetime", event_data.date.into()),
         ])).await?;
     }
     info!("Migration of: {db_file} OK");

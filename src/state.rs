@@ -65,7 +65,7 @@ impl State {
             event.expires_at = new_expires_at;
             return Ok(false);
         }
-        let event_data = self.event_data_from_sql(event_id).await?;
+        let event_data = self.load_event_data_from_sql(event_id).await?;
 
         let qxsql_process = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
@@ -159,7 +159,7 @@ impl State {
             .and_then(|cell| cell.to_int());
         event_id.ok_or_else(|| anyhow::anyhow!("API token not found"))
     }
-    pub async fn event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<EventData> {
+    pub async fn load_event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<EventData> {
         let qxsql = QxAppSql::new(self.db_pool.clone());
         let data = qxsql
             .read_record("events", event_id, None)
@@ -170,6 +170,13 @@ impl State {
         }
         Err(anyhow::anyhow!("Event id: {} not found", event_id))
     }
+    // pub async fn update_event_data_in_sql(&self, event_id: EventId, event_record: &Record, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
+    //     let qxsql = QxAppSql::new(self.db_pool.clone());
+    //     let updated = qxsql
+    //         .update_record_with_recchng("events", event_id, event_record, client_command_sender, None)
+    //         .await?;
+    //     Ok(updated)
+    // }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

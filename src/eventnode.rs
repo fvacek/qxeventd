@@ -53,7 +53,8 @@ const METH_CREATE_EVENT: &str = "createEvent";
 const METH_OPEN_EVENT: &str = "openEvent";
 const METH_OPEN_EVENT_API_KEY: &str = "openEventApiKey";
 const METH_DELETE_EVENT: &str = "deleteEvent";
-const ROOT_METHODS: &[MetaMethod] = &[
+
+const EVENT_DIR_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
     MetaMethod::new_static(
@@ -71,13 +72,17 @@ const ROOT_METHODS: &[MetaMethod] = &[
 ];
 
 const METH_EVENT_DATA: &str = "data";
+// const METH_UPDATE_EVENT_DATA: &str = "updateData";
 const METH_EVENT_CLOSE: &str = "close";
-const EVENT_METHODS: &[MetaMethod] = &[
+const EVENT_NODE_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
     MetaMethod::new_static(
         METH_EVENT_DATA, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
     ),
+    // MetaMethod::new_static(
+    //     METH_UPDATE_EVENT_DATA, Flags::None, AccessLevel::Read, "[s:api_token,{?}:record]", "b", &[], "",
+    // ),
     MetaMethod::new_static(
         METH_EVENT_CLOSE, Flags::None, AccessLevel::Read, "",  "", &[], "",
     ),
@@ -104,14 +109,14 @@ pub(crate) async fn request_handler(
     match node_type {
         NodeType::Root => {
             match Method::from_request(&rq) {
-                Method::Dir(dir) => dir.resolve(ROOT_METHODS),
-                Method::Ls(ls) => ls.resolve(ROOT_METHODS, async move || {
+                Method::Dir(dir) => dir.resolve(EVENT_DIR_METHODS),
+                Method::Ls(ls) => ls.resolve(EVENT_DIR_METHODS, async move || {
                     Ok(list_events(app_state).await)
                 }),
                 Method::Other(m) => {
                     let method = m.method();
                     match method {
-                        METH_CREATE_EVENT => m.resolve(ROOT_METHODS, async move || {
+                        METH_CREATE_EVENT => m.resolve(EVENT_DIR_METHODS, async move || {
                             let owner = rq.param().unwrap_or_default().as_str().to_owned();
                             let (event_id, api_token) = app_state.write().await.create_event(owner, client_cmd_tx.clone()).await
                                 .map_err(anyhow_to_rpc_error)?;
@@ -125,13 +130,13 @@ pub(crate) async fn request_handler(
                                 .await.map_err(|e| string_to_rpc_error(format!("{e}")))?;
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(api_token)]))
                         }),
-                        METH_OPEN_EVENT => m.resolve(ROOT_METHODS, async move || {
+                        METH_OPEN_EVENT => m.resolve(EVENT_DIR_METHODS, async move || {
                             let event_id = rq.param().unwrap_or_default().as_i64();
                             app_state.write().await.open_event(event_id, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::from(event_mount_point(event_id)))
                         }),
-                        METH_OPEN_EVENT_API_KEY => m.resolve(ROOT_METHODS, async move || {
+                        METH_OPEN_EVENT_API_KEY => m.resolve(EVENT_DIR_METHODS, async move || {
                             let api_token = rq.param().unwrap_or_default().as_str();
                             let event_id = app_state.read().await.api_token_to_event_id(api_token).await
                                 .map_err(anyhow_to_rpc_error)?;
@@ -139,7 +144,7 @@ pub(crate) async fn request_handler(
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_mount_point(event_id))]))
                         }),
-                        METH_DELETE_EVENT => m.resolve(ROOT_METHODS, async move || {
+                        METH_DELETE_EVENT => m.resolve(EVENT_DIR_METHODS, async move || {
                             let api_token = rq.param().unwrap_or_default().as_str();
                             let event_id = app_state.read().await.api_token_to_event_id(api_token).await
                                 .map_err(anyhow_to_rpc_error)?;
@@ -154,18 +159,42 @@ pub(crate) async fn request_handler(
         }
         NodeType::Event(event_id) => {
             match Method::from_request(&rq) {
-                Method::Dir(dir) => dir.resolve(EVENT_METHODS),
-                Method::Ls(ls) => ls.resolve(EVENT_METHODS, async move || { Ok(vec![]) }),
+                Method::Dir(dir) => dir.resolve(EVENT_NODE_METHODS),
+                Method::Ls(ls) => ls.resolve(EVENT_NODE_METHODS, async move || { Ok(vec![]) }),
                 Method::Other(m) => {
                     let method = m.method();
                     match method {
-                        METH_EVENT_DATA => m.resolve(EVENT_METHODS, async move || {
+                        METH_EVENT_DATA => m.resolve(EVENT_NODE_METHODS, async move || {
                             let event_data = app_state.read().await.open_events.get(&event_id)
                                 .ok_or_else(|| anyhow_to_rpc_error(anyhow!("Event not found")))?.data.clone();
                             let info = RpcValue::from(&event_data);
                             Ok(info)
                         }),
-                        METH_EVENT_CLOSE => m.resolve(EVENT_METHODS, async move || {
+                        // METH_UPDATE_EVENT_DATA => m.resolve(EVENT_NODE_METHODS, async move || {
+                        //     let Some(params) = rq.param().map(|p| p.as_list()) else {
+                        //         return Err(anyhow_to_rpc_error(anyhow!("Invalid parameters")));
+                        //     };
+                        //     let mut iter = params.iter();
+                        //     let Some(api_token) = iter.next().map(|v| v.as_str()) else {
+                        //         return Err(anyhow_to_rpc_error(anyhow!("Missing api_token")));
+                        //     };
+                        //     let Some(record) = iter.next() else {
+                        //         return Err(anyhow_to_rpc_error(anyhow!("Missing record")));
+                        //     };
+                        //     let record = from_rpcvalue::<qxsql::Record>(record)
+                        //         .map_err(|_| anyhow_to_rpc_error(anyhow!("Chainpack parse error")))?;
+
+                        //     let api_token_event_id = app_state.read().await.api_token_to_event_id(api_token).await
+                        //         .map_err(anyhow_to_rpc_error)?;
+                        //     if api_token_event_id != event_id {
+                        //         return Err(anyhow_to_rpc_error(anyhow!("Invalid api_token")));
+                        //     }
+
+                        //     let updated = app_state.write().await.update_event_data_in_sql(event_id, &record, client_cmd_tx).await
+                        //         .map_err(anyhow_to_rpc_error)?;
+                        //     Ok(updated)
+                        // }),
+                        METH_EVENT_CLOSE => m.resolve(EVENT_NODE_METHODS, async move || {
                             let res = app_state.write().await.close_event(event_id, client_cmd_tx.clone()).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),
