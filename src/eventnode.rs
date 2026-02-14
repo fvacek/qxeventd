@@ -67,7 +67,7 @@ const EVENT_DIR_METHODS: &[MetaMethod] = &[
         METH_OPEN_EVENT_API_KEY, Flags::None, AccessLevel::Read, "s:api_token", "[i:event_id,s:mount_point]", &[], "",
     ),
     MetaMethod::new_static(
-        METH_DELETE_EVENT, Flags::None, AccessLevel::Config, "s:api_token", "b:was_deleted", &[], "",
+        METH_DELETE_EVENT, Flags::None, AccessLevel::Write, "s:api_token", "b:was_deleted", &[], "",
     ),
 ];
 

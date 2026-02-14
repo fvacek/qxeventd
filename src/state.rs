@@ -99,7 +99,7 @@ impl State {
 
         self.open_events.insert(event_id, OpenEvent { qxsql_process, data: event_data, expires_at: new_expires_at });
 
-        let message = RpcMessage::new_signal("event", "lsmod", Some(true.into()));
+        let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
         client_command_sender.send_message(message)
             .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
@@ -110,7 +110,7 @@ impl State {
         if let Some(event) = self.open_events.remove(&event_id) {
             let mount_point = event_mount_point(event_id);
 
-            let message = RpcMessage::new_signal("event", "lsmod", Some(false.into()));
+            let message = RpcMessage::new_signal("event", "lsmod").with_param(false);
             client_command_sender.send_message(message)
             .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
