@@ -1,27 +1,27 @@
 use log::warn;
+use qxsql::Record;
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
-use shvproto::{RpcValue, make_map};
+use shvproto::{RpcValue, from_rpcvalue, make_map};
 use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
-use crate::{anyhow_to_rpc_error, string_to_rpc_error};
+use crate::{anyhow_to_rpc_error, str_to_rpc_error, string_to_rpc_error};
 use crate::state::{EventId, SharedAppState, event_mount_point};
-use anyhow::anyhow;
 
 
 #[derive(Debug)]
 enum NodeType {
-    Root,
-    Event(EventId),
+    EventCtlDir,
+    EventCtlNode(EventId),
 }
 
 impl NodeType {
     fn from_path(path: &str) -> anyhow::Result<Self> {
         if path.is_empty() {
-            return Ok(Self::Root);
+            return Ok(Self::EventCtlDir);
         }
         let event_id = path.parse::<i64>()?;
-        Ok(Self::Event(event_id))
+        Ok(Self::EventCtlNode(event_id))
     }
 }
 
@@ -54,7 +54,7 @@ const METH_OPEN_EVENT: &str = "openEvent";
 const METH_OPEN_EVENT_API_KEY: &str = "openEventApiKey";
 const METH_DELETE_EVENT: &str = "deleteEvent";
 
-const EVENT_DIR_METHODS: &[MetaMethod] = &[
+const EVENTCTL_DIR_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
     MetaMethod::new_static(
@@ -71,15 +71,19 @@ const EVENT_DIR_METHODS: &[MetaMethod] = &[
     ),
 ];
 
-const METH_EVENT_DATA: &str = "data";
+// const METH_EVENT_DATA: &str = "data";
 // const METH_UPDATE_EVENT_DATA: &str = "updateData";
+const METH_EVENT_ADD_ENTRY: &str = "addEntry";
 const METH_EVENT_CLOSE: &str = "close";
-const EVENT_NODE_METHODS: &[MetaMethod] = &[
+const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
     MetaMethod::new_static(
-        METH_EVENT_DATA, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
+        METH_EVENT_ADD_ENTRY, Flags::None, AccessLevel::Write, "{?}", "i", &[], "",
     ),
+    // MetaMethod::new_static(
+    //     METH_EVENT_DATA, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
+    // ),
     // MetaMethod::new_static(
     //     METH_UPDATE_EVENT_DATA, Flags::None, AccessLevel::Read, "[s:api_token,{?}:record]", "b", &[], "",
     // ),
@@ -107,16 +111,16 @@ pub(crate) async fn request_handler(
         }
     };
     match node_type {
-        NodeType::Root => {
+        NodeType::EventCtlDir => {
             match Method::from_request(&rq) {
-                Method::Dir(dir) => dir.resolve(EVENT_DIR_METHODS),
-                Method::Ls(ls) => ls.resolve(EVENT_DIR_METHODS, async move || {
+                Method::Dir(dir) => dir.resolve(EVENTCTL_DIR_METHODS),
+                Method::Ls(ls) => ls.resolve(EVENTCTL_DIR_METHODS, async move || {
                     Ok(list_events(app_state).await)
                 }),
                 Method::Other(m) => {
                     let method = m.method();
                     match method {
-                        METH_CREATE_EVENT => m.resolve(EVENT_DIR_METHODS, async move || {
+                        METH_CREATE_EVENT => m.resolve(EVENTCTL_DIR_METHODS, async move || {
                             let owner = rq.param().unwrap_or_default().as_str().to_owned();
                             let (event_id, api_token) = app_state.write().await.create_event(owner, client_cmd_tx.clone()).await
                                 .map_err(anyhow_to_rpc_error)?;
@@ -130,13 +134,13 @@ pub(crate) async fn request_handler(
                                 .await.map_err(|e| string_to_rpc_error(format!("{e}")))?;
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(api_token)]))
                         }),
-                        METH_OPEN_EVENT => m.resolve(EVENT_DIR_METHODS, async move || {
+                        METH_OPEN_EVENT => m.resolve(EVENTCTL_DIR_METHODS, async move || {
                             let event_id = rq.param().unwrap_or_default().as_i64();
                             app_state.write().await.open_event(event_id, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::from(event_mount_point(event_id)))
                         }),
-                        METH_OPEN_EVENT_API_KEY => m.resolve(EVENT_DIR_METHODS, async move || {
+                        METH_OPEN_EVENT_API_KEY => m.resolve(EVENTCTL_DIR_METHODS, async move || {
                             let api_token = rq.param().unwrap_or_default().as_str();
                             let event_id = app_state.read().await.api_token_to_event_id(api_token).await
                                 .map_err(anyhow_to_rpc_error)?;
@@ -144,7 +148,7 @@ pub(crate) async fn request_handler(
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_mount_point(event_id))]))
                         }),
-                        METH_DELETE_EVENT => m.resolve(EVENT_DIR_METHODS, async move || {
+                        METH_DELETE_EVENT => m.resolve(EVENTCTL_DIR_METHODS, async move || {
                             let api_token = rq.param().unwrap_or_default().as_str();
                             let event_id = app_state.read().await.api_token_to_event_id(api_token).await
                                 .map_err(anyhow_to_rpc_error)?;
@@ -157,18 +161,20 @@ pub(crate) async fn request_handler(
                 }
             }
         }
-        NodeType::Event(event_id) => {
+        NodeType::EventCtlNode(event_id) => {
             match Method::from_request(&rq) {
-                Method::Dir(dir) => dir.resolve(EVENT_NODE_METHODS),
-                Method::Ls(ls) => ls.resolve(EVENT_NODE_METHODS, async move || { Ok(vec![]) }),
+                Method::Dir(dir) => dir.resolve(EVENTCTL_NODE_METHODS),
+                Method::Ls(ls) => ls.resolve(EVENTCTL_NODE_METHODS, async move || { Ok(vec![]) }),
                 Method::Other(m) => {
                     let method = m.method();
                     match method {
-                        METH_EVENT_DATA => m.resolve(EVENT_NODE_METHODS, async move || {
-                            let event_data = app_state.read().await.open_events.get(&event_id)
-                                .ok_or_else(|| anyhow_to_rpc_error(anyhow!("Event not found")))?.data.clone();
-                            let info = RpcValue::from(&event_data);
-                            Ok(info)
+                        METH_EVENT_ADD_ENTRY => m.resolve(EVENTCTL_NODE_METHODS, async move || {
+                            let Some(param) = rq.param() else {
+                                return Err(str_to_rpc_error("Invalid parameters"));
+                            };
+                            let record: Record = from_rpcvalue(param).map_err(|e| string_to_rpc_error(e.to_string()))?;
+                            let res = app_state.write().await.add_late_entry(event_id, &record, client_cmd_tx.clone()).await;
+                            res.map_err(anyhow_to_rpc_error)
                         }),
                         // METH_UPDATE_EVENT_DATA => m.resolve(EVENT_NODE_METHODS, async move || {
                         //     let Some(params) = rq.param().map(|p| p.as_list()) else {
@@ -194,7 +200,7 @@ pub(crate) async fn request_handler(
                         //         .map_err(anyhow_to_rpc_error)?;
                         //     Ok(updated)
                         // }),
-                        METH_EVENT_CLOSE => m.resolve(EVENT_NODE_METHODS, async move || {
+                        METH_EVENT_CLOSE => m.resolve(EVENTCTL_NODE_METHODS, async move || {
                             let res = app_state.write().await.close_event(event_id, client_cmd_tx.clone()).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),

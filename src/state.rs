@@ -9,11 +9,14 @@ use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
+use shvproto::make_list;
+use shvproto::to_rpcvalue;
 use shvproto::{RpcValue};
 use async_process::{Child, Command};
 use shvrpc::RpcMessage;
 use shvrpc::util::join_path;
 use smol::{lock::RwLock, channel};
+use crate::call_rpc_error_to_anyhow;
 use crate::{eventdb::migrate_db, generate_api_token, global_config, qxappsql::QxAppSql};
 
 pub type EventId = i64;
@@ -22,7 +25,7 @@ pub type SharedAppState = Arc<RwLock<State>>;
 
 pub(crate) struct State {
     pub db_pool: async_sqlite::Pool,
-    pub open_events: BTreeMap<EventId, OpenEvent>,
+    pub open_events: BTreeMap<EventId, OpenEventCtl>,
     pub shutdown_sender: Option<channel::Sender<()>>,
 }
 
@@ -97,7 +100,7 @@ impl State {
         let _: () = client_command_sender.call_rpc_method(join_path(mount_point, ".app"), "ping", None, None, None::<fn(_)>).await
             .map_err(|_| anyhow!("Failed to ping DB service."))?;
 
-        self.open_events.insert(event_id, OpenEvent { qxsql_process, data: event_data, expires_at: new_expires_at });
+        self.open_events.insert(event_id, OpenEventCtl { qxsql_process, expires_at: new_expires_at });
 
         let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
         client_command_sender.send_message(message)
@@ -159,6 +162,7 @@ impl State {
             .and_then(|cell| cell.to_int());
         event_id.ok_or_else(|| anyhow::anyhow!("API token not found"))
     }
+
     pub async fn load_event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<EventData> {
         let qxsql = QxAppSql::new(self.db_pool.clone());
         let data = qxsql
@@ -170,13 +174,13 @@ impl State {
         }
         Err(anyhow::anyhow!("Event id: {} not found", event_id))
     }
-    // pub async fn update_event_data_in_sql(&self, event_id: EventId, event_record: &Record, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
-    //     let qxsql = QxAppSql::new(self.db_pool.clone());
-    //     let updated = qxsql
-    //         .update_record_with_recchng("events", event_id, event_record, client_command_sender, None)
-    //         .await?;
-    //     Ok(updated)
-    // }
+
+    pub async fn add_late_entry(&self, event_id: EventId, late_entry: &Record, client_command_sender: ClientCommandSender) -> anyhow::Result<i64> {
+        let record = to_rpcvalue(late_entry)?;
+        let id: i64 = client_command_sender.call_rpc_method(event_mount_point(event_id), "create", Some(make_list!["late_entries", record].into()), None, None::<fn(f64)>).await
+            .map_err(call_rpc_error_to_anyhow)?;
+        Ok(id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,13 +232,13 @@ impl From<&RpcValue> for EventData {
 //     }
 // }
 
-pub(crate) struct OpenEvent {
-    pub data: EventData,
+pub(crate) struct OpenEventCtl {
+    // pub data: EventData,
     pub qxsql_process: Option<Child>,
     pub expires_at: DateTime<chrono::Utc>,
 }
 
-impl OpenEvent {
+impl OpenEventCtl {
 }
 
 pub fn event_mount_point(event_id: EventId) -> String {

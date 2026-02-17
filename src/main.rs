@@ -3,6 +3,7 @@ use clap::Parser;
 use log::{error, info, warn};
 use qxsql::{QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecListParam, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
 use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
+use shvclient::clientapi::CallRpcMethodError;
 use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver};
 use shvclient::appnodes::{DotDeviceNode};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
@@ -269,6 +270,10 @@ async fn app_task(
     Ok(())
 }
 
+fn call_rpc_error_to_anyhow(err: CallRpcMethodError) -> anyhow::Error {
+    anyhow::anyhow!("{}", err)
+}
+
 fn anyhow_to_rpc_error(err: anyhow::Error) -> RpcError {
     error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
     RpcError::new(RpcErrorCode::MethodCallException, format!("Error: {err}"))
@@ -277,6 +282,11 @@ fn anyhow_to_rpc_error(err: anyhow::Error) -> RpcError {
 fn string_to_rpc_error(err: String) -> RpcError {
     error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
     RpcError::new(RpcErrorCode::MethodCallException, err)
+}
+
+fn str_to_rpc_error(err: &str) -> RpcError {
+    error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
+    RpcError::new(RpcErrorCode::MethodCallException, err.to_string())
 }
 
 fn res_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<T>) -> Result<RpcValue, RpcError> {
