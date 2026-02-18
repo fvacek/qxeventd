@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::appnode::AppNode;
 use crate::eventnode::request_handler;
-use crate::qxappsql::QxAppSql;
+use crate::appsqlapi::AppSqlApi;
 use crate::state::SharedAppState;
 use crate::{
     state::{State},
@@ -28,7 +28,8 @@ mod state;
 mod config;
 mod events;
 mod migrate;
-mod qxappsql;
+mod appsqlapi;
+mod eventsqlapi;
 mod appnode;
 mod eventnode;
 mod eventdb;
@@ -153,39 +154,39 @@ struct SqlNode {
 shvclient::impl_static_node! {
     SqlNode(&self, request, client_cmd_tx) {
         "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
-            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
             let result = qxsql.query(query.query(), query.params()).await;
             Some(res_to_rpcvalue(result))
         }
         "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
-            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
             let result = qxsql.exec(query.query(), query.params()).await;
             Some(res_to_rpcvalue(result))
         }
         "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
-            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
             let fields = string_list_to_ref_vec(&param.fields);
             let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
             Some(res_to_rpcvalue(result))
         }
         "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
-            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
             let insert_id = qxsql.create_record_with_recchng(&param.table, &param.record, client_cmd_tx, issuer(&request)).await;
             Some(res_to_rpcvalue(insert_id))
         }
         "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
-            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
             let fields = string_list_to_ref_vec(&param.fields);
             let result = qxsql.read_record(&param.table, param.id, fields).await;
             Some(res_to_rpcvalue(result))
         }
         "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
-            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
             let update_success = qxsql.update_record_with_recchng(&param.table, param.id, &param.record, client_cmd_tx.clone(), issuer(&request)).await;
             Some(res_to_rpcvalue(update_success))
         }
         "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
-            let qxsql = QxAppSql::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
             let was_deleted = qxsql.delete_record_with_recchng(&param.table, param.id, client_cmd_tx, issuer(&request)).await;
             Some(res_to_rpcvalue(was_deleted))
         }
@@ -216,7 +217,7 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .device(DotDeviceNode::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), Some("00000".into())))
         .mount_static(".app", AppNode::new(env!("CARGO_PKG_NAME"), app_state.clone()))
         .mount_static("sql", SqlNode { app_state: app_state.clone() })
-        .mount_dynamic("event", move |rq, client_cmd_tx| {
+        .mount_dynamic("eventctl", move |rq, client_cmd_tx| {
                         request_handler(rq, client_cmd_tx, app_state2.clone())
         })
         .run_with_init(&config.client, app_tasks)

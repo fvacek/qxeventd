@@ -3,17 +3,16 @@ use async_trait::async_trait;
 use qxsql::{DbValue, sql::{DbField, ExecResult, QueryResult}};
 use qxsql::sql::Record;
 
-pub struct QxAppSql(async_sqlite::Pool);
+pub struct AppSqlApi(async_sqlite::Pool);
 
-
-impl QxAppSql {
+impl AppSqlApi {
     pub fn new(pool: async_sqlite::Pool) -> Self {
         Self(pool)
     }
 }
 
 #[async_trait]
-impl qxsql::QxSqlApi for QxAppSql {
+impl qxsql::QxSqlApi for AppSqlApi {
     async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> { let empty_params = Record::default();
         let params = params.unwrap_or(&empty_params);
         sql_query(&self.0, query, params).await
@@ -25,7 +24,7 @@ impl qxsql::QxSqlApi for QxAppSql {
     }
 }
 
-impl qxsql::QxSqlApiRecChng for QxAppSql {}
+impl qxsql::QxSqlApiRecChng for AppSqlApi {}
 
 fn convert_dbvalue_to_sql(key: &str, value: &DbValue) -> Result<async_sqlite::rusqlite::types::Value, async_sqlite::rusqlite::Error> {
     match value {
@@ -41,7 +40,7 @@ fn convert_dbvalue_to_sql(key: &str, value: &DbValue) -> Result<async_sqlite::ru
     }
 }
 
-fn process_record_params(record: &Record) -> Result<Vec<(String, async_sqlite::rusqlite::types::Value)>, async_sqlite::rusqlite::Error> {
+pub(crate) fn process_record_params(record: &Record) -> Result<Vec<(String, async_sqlite::rusqlite::types::Value)>, async_sqlite::rusqlite::Error> {
     let mut params: Vec<(String, async_sqlite::rusqlite::types::Value)> = Vec::new();
 
     for (key, value) in record.iter() {
@@ -52,7 +51,7 @@ fn process_record_params(record: &Record) -> Result<Vec<(String, async_sqlite::r
     Ok(params)
 }
 
-fn create_param_refs(params: &[(String, async_sqlite::rusqlite::types::Value)]) -> Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> {
+pub(crate) fn create_param_refs(params: &[(String, async_sqlite::rusqlite::types::Value)]) -> Vec<(&str, &dyn async_sqlite::rusqlite::ToSql)> {
     params
         .iter()
         .map(|(name, val)| (name.as_str(), val as &dyn async_sqlite::rusqlite::ToSql))

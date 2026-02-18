@@ -9,15 +9,16 @@ use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
-use shvproto::make_list;
-use shvproto::to_rpcvalue;
-use shvproto::{RpcValue};
 use async_process::{Child, Command};
+use shvproto::RpcValue;
 use shvrpc::RpcMessage;
 use shvrpc::util::join_path;
 use smol::{lock::RwLock, channel};
-use crate::call_rpc_error_to_anyhow;
-use crate::{eventdb::migrate_db, generate_api_token, global_config, qxappsql::QxAppSql};
+
+use crate::appsqlapi::AppSqlApi;
+use crate::eventdb::migrate_db;
+use crate::generate_api_token;
+use crate::global_config;
 
 pub type EventId = i64;
 
@@ -43,6 +44,12 @@ impl State {
         Ok(())
     }
 
+    pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
+        let qxsql = AppSqlApi::new(self.db_pool.clone());
+        let records = qxsql.list_records("events", Some(vec!["id", "name", "date", "owner"]), None, None).await?;
+        Ok(records)
+    }
+
     pub async fn create_event(&self, owner: String, client_cmd_tx: ClientCommandSender) -> anyhow::Result<(EventId, String)> {
         if owner.is_empty() {
             return Err(anyhow::anyhow!("Owner cannot be empty"));
@@ -56,7 +63,7 @@ impl State {
             api_token: api_token.clone(),
         };
         let rec = event_data.to_record()?;
-        let qxsql = QxAppSql::new(self.db_pool.clone());
+        let qxsql = AppSqlApi::new(self.db_pool.clone());
         let event_id = qxsql.create_record_with_recchng("events", &rec, client_cmd_tx, Some(owner)).await?;
         info!("Created event {event_id}");
         Ok((event_id, api_token))
@@ -100,7 +107,7 @@ impl State {
         let _: () = client_command_sender.call_rpc_method(join_path(mount_point, ".app"), "ping", None, None, None::<fn(_)>).await
             .map_err(|_| anyhow!("Failed to ping DB service."))?;
 
-        self.open_events.insert(event_id, OpenEventCtl { qxsql_process, expires_at: new_expires_at });
+        self.open_events.insert(event_id, OpenEventCtl { data: event_data, qxsql_process, expires_at: new_expires_at });
 
         let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
         client_command_sender.send_message(message)
@@ -134,7 +141,7 @@ impl State {
     pub async fn delete_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
         self.close_event(event_id, client_command_sender.clone()).await?;
         log::info!("Deleting event {}", event_id);
-        let qxsql = QxAppSql::new(self.db_pool.clone());
+        let qxsql = AppSqlApi::new(self.db_pool.clone());
         let was_deleted = qxsql.delete_record_with_recchng("events", event_id, client_command_sender, None).await?;
         Ok(was_deleted)
     }
@@ -153,7 +160,7 @@ impl State {
     }
 
     pub async fn api_token_to_event_id(&self, api_token: &str) -> anyhow::Result<EventId> {
-        let qxsql = QxAppSql::new(self.db_pool.clone());
+        let qxsql = AppSqlApi::new(self.db_pool.clone());
         let result = qxsql
             .query("SELECT id FROM events WHERE api_token = :api_token", Some(&record_from_slice(&[("api_token", api_token.into())])))
             .await?;
@@ -164,7 +171,7 @@ impl State {
     }
 
     pub async fn load_event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<EventData> {
-        let qxsql = QxAppSql::new(self.db_pool.clone());
+        let qxsql = AppSqlApi::new(self.db_pool.clone());
         let data = qxsql
             .read_record("events", event_id, None)
             .await?;
@@ -175,12 +182,6 @@ impl State {
         Err(anyhow::anyhow!("Event id: {} not found", event_id))
     }
 
-    pub async fn add_late_entry(&self, event_id: EventId, late_entry: &Record, client_command_sender: ClientCommandSender) -> anyhow::Result<i64> {
-        let record = to_rpcvalue(late_entry)?;
-        let id: i64 = client_command_sender.call_rpc_method(event_mount_point(event_id), "create", Some(make_list!["late_entries", record].into()), None, None::<fn(f64)>).await
-            .map_err(call_rpc_error_to_anyhow)?;
-        Ok(id)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,7 +234,7 @@ impl From<&RpcValue> for EventData {
 // }
 
 pub(crate) struct OpenEventCtl {
-    // pub data: EventData,
+    pub data: EventData,
     pub qxsql_process: Option<Child>,
     pub expires_at: DateTime<chrono::Utc>,
 }

@@ -1,10 +1,11 @@
 use log::warn;
-use qxsql::Record;
+use qxsql::{QxSqlApiRecChng, Record};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
-use shvproto::{RpcValue, from_rpcvalue, make_map};
+use shvproto::{RpcValue, from_rpcvalue, make_map, to_rpcvalue};
 use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
+use crate::eventsqlapi::EventSqlApi;
 use crate::{anyhow_to_rpc_error, str_to_rpc_error, string_to_rpc_error};
 use crate::state::{EventId, SharedAppState, event_mount_point};
 
@@ -53,6 +54,7 @@ const METH_CREATE_EVENT: &str = "createEvent";
 const METH_OPEN_EVENT: &str = "openEvent";
 const METH_OPEN_EVENT_API_KEY: &str = "openEventApiKey";
 const METH_DELETE_EVENT: &str = "deleteEvent";
+const METH_LIST_EVENTS: &str = "listEvents";
 
 const EVENTCTL_DIR_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
@@ -68,6 +70,9 @@ const EVENTCTL_DIR_METHODS: &[MetaMethod] = &[
     ),
     MetaMethod::new_static(
         METH_DELETE_EVENT, Flags::None, AccessLevel::Write, "s:api_token", "b:was_deleted", &[], "",
+    ),
+    MetaMethod::new_static(
+        METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", "[{?}]", &[], "",
     ),
 ];
 
@@ -156,6 +161,11 @@ pub(crate) async fn request_handler(
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::from(was_deleted))
                         }),
+                        METH_LIST_EVENTS => m.resolve(EVENTCTL_DIR_METHODS, async move || {
+                            let events = app_state.write().await.list_events().await
+                                .map_err(anyhow_to_rpc_error)?;
+                            to_rpcvalue(&events).map_err(|e| string_to_rpc_error(e.to_string()))
+                        }),
                         _ => err_unresolved_request(),
                     }
                 }
@@ -173,8 +183,9 @@ pub(crate) async fn request_handler(
                                 return Err(str_to_rpc_error("Invalid parameters"));
                             };
                             let record: Record = from_rpcvalue(param).map_err(|e| string_to_rpc_error(e.to_string()))?;
-                            let res = app_state.write().await.add_late_entry(event_id, &record, client_cmd_tx.clone()).await;
-                            res.map_err(anyhow_to_rpc_error)
+                            let qxsql = EventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
+                            let id = qxsql.create_record_with_recchng("late_entries", &record, client_cmd_tx.clone(), None).await.map_err(anyhow_to_rpc_error)?;
+                            Ok(id)
                         }),
                         // METH_UPDATE_EVENT_DATA => m.resolve(EVENT_NODE_METHODS, async move || {
                         //     let Some(params) = rq.param().map(|p| p.as_list()) else {

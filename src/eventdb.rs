@@ -5,7 +5,7 @@ use log::info;
 use qxsql::sql::{QxSqlApi, record_from_slice};
 use rusqlite_migration::{M, Migrations};
 
-use crate::{qxappsql::QxAppSql, state::EventData};
+use crate::{appsqlapi::AppSqlApi, state::EventData};
 
 fn check_file_exists(path: &str) -> bool {
     std::fs::metadata(path).is_ok()
@@ -37,7 +37,7 @@ pub async fn migrate_db(db_file: &str, event_data: &EventData) -> anyhow::Result
             Err(e) => panic!("{}", e),
         }
     }).await?;
-    let qxsql = QxAppSql::new(pool);
+    let qxsql = AppSqlApi::new(pool);
     if !db_file_exists {
         let config_entries = [
             ("event.name", event_data.name.clone()),
