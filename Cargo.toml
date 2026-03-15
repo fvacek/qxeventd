@@ -12,7 +12,6 @@ qxsql = { git = "https://github.com/fvacek/qxsql.git", branch = "master", defaul
 smol = "2"
 futures = "0.3"
 futures-time = "3.0"
-async-process = "2.5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 duration-str = "0.18"

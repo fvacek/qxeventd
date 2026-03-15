@@ -8,17 +8,7 @@ use crate::GLOBAL_CONFIG;
 // Define migrations. These are applied atomically.
 const MIGRATION_ARRAY: &[M] = &[
     M::up(
-        r#"
-        CREATE TABLE events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            api_token TEXT NOT NULL,
-            name TEXT,
-            date TEXT,
-            owner TEXT NOT NULL,
-            is_local BOOLEAN DEFAULT 1,
-            CONSTRAINT events_unique0 UNIQUE (api_token)
-        );
-        "#,
+        include_str!("create_app_db.sql"),
     ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);

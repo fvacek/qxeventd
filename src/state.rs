@@ -9,7 +9,6 @@ use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
-use async_process::{Child, Command};
 use shvproto::RpcValue;
 use shvrpc::RpcMessage;
 use shvrpc::util::join_path;
@@ -69,35 +68,17 @@ impl State {
         Ok((event_id, api_token))
     }
 
-    pub async fn open_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
-        let new_expires_at = chrono::Utc::now().checked_add_signed(global_config().event_expire_duration).expect("Add duration error");
+    pub async fn open_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
         if let Some(event) = self.open_events.get_mut(&event_id) {
-            event.expires_at = new_expires_at;
-            return Ok(false);
+            event.touched_at = chrono::Utc::now();
+            return Ok(());
         }
         let event_data = self.load_event_data_from_sql(event_id).await?;
 
-        let qxsql_process = if event_data.is_local {
+        let local_db = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-            migrate_db(&db_file, &event_data).await?;
-            let mut child = Command::new("qxsqld")
-                .args(["--url", "tcp://localhost?user=test&password=test"])
-                .args(["--device-id", &event_data.api_token])
-                .args(["--database", &format!("sqlite://{db_file}")])
-                .spawn()?; // Don't await, just start it
-            info!("Child process qxsqld started OK");
-            smol::Timer::after(std::time::Duration::from_secs(1)).await;
-            // Check if the process is running correctly
-            match child.try_status()? {
-                Some(status) => {
-                    return Err(anyhow!("qxsqld process exited unexpectedly with status: {:?}", status));
-                }
-                None => {
-                    // Process is still running, which is what we want
-                    info!("qxsqld process is running correctly");
-                }
-            }
-            Some(child)
+            let pool = migrate_db(&db_file, &event_data).await?;
+            Some(pool)
         } else {
             None
         };
@@ -107,32 +88,27 @@ impl State {
         let _: () = client_command_sender.call_rpc_method(join_path(mount_point, ".app"), "ping", None, None, None::<fn(_)>).await
             .map_err(|_| anyhow!("Failed to ping DB service."))?;
 
-        self.open_events.insert(event_id, OpenEventCtl { data: event_data, qxsql_process, expires_at: new_expires_at });
+        let now = chrono::Utc::now();
+        self.open_events.insert(event_id, OpenEventCtl { data: event_data, local_db, open_at: now, touched_at: now });
 
         let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
         client_command_sender.send_message(message)
             .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
-        Ok(true)
+        Ok(())
     }
 
     pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
-        if let Some(event) = self.open_events.remove(&event_id) {
-            let mount_point = event_mount_point(event_id);
+        if let Some(_event) = self.open_events.remove(&event_id) {
+            // let mount_point = event_mount_point(event_id);
 
             let message = RpcMessage::new_signal("event", "lsmod").with_param(false);
             client_command_sender.send_message(message)
             .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
-            log::info!("Sending quit RPC message to qxsql of event {event_id} mounted at {mount_point}");
-            let _: () = client_command_sender.call_rpc_method(format!("{mount_point}/.app"), "quit", None, None, None::<fn(_)>).await
-                .map_err(|err| anyhow::anyhow!("Failed to shut down event: {}", err))?;
-            if let Some(mut child) = event.qxsql_process {
-                log::info!("Closing event {}", event_id);
-                child.kill()?;
-                let status = child.status().await?;
-                info!("qxsql process killed with status: {:?}", status);
-            }
+            // log::info!("Sending quit RPC message to qxsql of event {event_id} mounted at {mount_point}");
+            // let _: () = client_command_sender.call_rpc_method(format!("{mount_point}/.app"), "quit", None, None, None::<fn(_)>).await
+            //     .map_err(|err| anyhow::anyhow!("Failed to shut down event: {}", err))?;
             Ok(true)
         } else {
             Ok(false)
@@ -148,9 +124,10 @@ impl State {
 
     pub async fn gc_expired_events(&mut self, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
         let event_age_list = self.open_events.iter()
-            .map(|(id, event)| (*id, event.expires_at)).collect::<Vec<_>>();
+            .map(|(id, event)| (*id, event.touched_at)).collect::<Vec<_>>();
         let now = chrono::Utc::now();
-        for (event_id, expires_at) in event_age_list {
+        for (event_id, touched_at) in event_age_list {
+            let expires_at = touched_at.checked_add_signed(global_config().event_expire_duration).expect("Add duration error");
             if expires_at < now {
                 info!("Closing event: {event_id} as expired.");
                 self.close_event(event_id, client_command_sender.clone()).await?;
@@ -235,8 +212,9 @@ impl From<&RpcValue> for EventData {
 
 pub(crate) struct OpenEventCtl {
     pub data: EventData,
-    pub qxsql_process: Option<Child>,
-    pub expires_at: DateTime<chrono::Utc>,
+    pub local_db: Option<async_sqlite::Pool>,
+    pub open_at: DateTime<chrono::Utc>,
+    pub touched_at: DateTime<chrono::Utc>,
 }
 
 impl OpenEventCtl {

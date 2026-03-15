@@ -1577,7 +1577,6 @@ name = "qxeventd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-process",
  "async-sqlite",
  "async-trait",
  "chrono",

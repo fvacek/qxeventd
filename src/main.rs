@@ -13,7 +13,6 @@ use futures::{select, FutureExt};
 use url::Url;
 
 use crate::appnode::AppNode;
-use crate::eventnode::request_handler;
 use crate::appsqlapi::AppSqlApi;
 use crate::state::SharedAppState;
 use crate::{
@@ -31,7 +30,7 @@ mod migrate;
 mod appsqlapi;
 mod eventsqlapi;
 mod appnode;
-mod eventnode;
+mod eventctlnode;
 mod eventdb;
 
 #[derive(Parser, Debug)]
@@ -218,7 +217,7 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .mount_static(".app", AppNode::new(env!("CARGO_PKG_NAME"), app_state.clone()))
         .mount_static("sql", SqlNode { app_state: app_state.clone() })
         .mount_dynamic("eventctl", move |rq, client_cmd_tx| {
-                        request_handler(rq, client_cmd_tx, app_state2.clone())
+                        eventctlnode::request_handler(rq, client_cmd_tx, app_state2.clone())
         })
         .run_with_init(&config.client, app_tasks)
         .await;

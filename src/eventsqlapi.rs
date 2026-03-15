@@ -1,10 +1,12 @@
 use anyhow::anyhow;
+use async_sqlite::Pool;
 use async_trait::async_trait;
 use qxsql::sql::{ExecResult, QueryResult};
 use qxsql::sql::Record;
 use shvclient::ClientCommandSender;
 use shvproto::{make_list, to_rpcvalue, from_rpcvalue};
 
+use crate::appsqlapi::AppSqlApi;
 use crate::{call_rpc_error_to_anyhow, state::{EventId, SharedAppState, event_mount_point}};
 
 pub struct EventSqlApi {
@@ -21,9 +23,9 @@ impl EventSqlApi {
             rpc_client,
         }
     }
-    async fn is_local_event(&self) -> anyhow::Result<bool> {
+    async fn local_event_db(&self) -> anyhow::Result<Option<Pool>> {
         self.app_state.read().await.open_events.get(&self.event_id)
-            .map(|e| e.data.is_local)
+            .map(|e| e.local_db.clone())
             .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
     }
     fn event_sql_path(&self) -> String {
@@ -34,28 +36,29 @@ impl EventSqlApi {
 #[async_trait]
 impl qxsql::QxSqlApi for EventSqlApi {
     async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> {
-        if self.is_local_event().await? {
-            return Err(anyhow!("Local event database is not implemented yet."));
+        if let Some(db) = self.local_event_db().await? {
+            let qxsql = AppSqlApi::new(db);
+            qxsql.query(query, params).await
+        } else {
+            let params = to_rpcvalue(&params)?;
+            let rpc_value = self.rpc_client.call_rpc_method(self.event_sql_path(), "query", Some(make_list![query, params].into()), None, None::<fn(f64)>).await
+                .map_err(call_rpc_error_to_anyhow)?;
+            let res: QueryResult = from_rpcvalue(&rpc_value)?;
+            Ok(res)
         }
-        let params = to_rpcvalue(&params)?;
-        let rpc_value = self.rpc_client.call_rpc_method(self.event_sql_path(), "query", Some(make_list![query, params].into()), None, None::<fn(f64)>).await
-            .map_err(call_rpc_error_to_anyhow)?;
-        let res: QueryResult = from_rpcvalue(&rpc_value)?;
-        Ok(res)
     }
 
     async fn exec(&self, query: &str, params: Option<&Record>) -> anyhow::Result<ExecResult> {
-        if self.is_local_event().await? {
-            return Err(anyhow!("Local event database is not implemented yet."));
-            // let empty_params = Record::default();
-            // let params = params.unwrap_or(&empty_params);
-            // sql_exec(&self.0, query, params).await
+        if let Some(db) = self.local_event_db().await? {
+            let qxsql = AppSqlApi::new(db);
+            qxsql.exec(query, params).await
+        } else {
+            let params = to_rpcvalue(&params)?;
+            let rpc_value = self.rpc_client.call_rpc_method(self.event_sql_path(), "exec", Some(make_list![query, params].into()), None, None::<fn(f64)>).await
+                .map_err(call_rpc_error_to_anyhow)?;
+            let res: ExecResult = from_rpcvalue(&rpc_value)?;
+            Ok(res)
         }
-        let params = to_rpcvalue(&params)?;
-        let rpc_value = self.rpc_client.call_rpc_method(self.event_sql_path(), "exec", Some(make_list![query, params].into()), None, None::<fn(f64)>).await
-            .map_err(call_rpc_error_to_anyhow)?;
-        let res: ExecResult = from_rpcvalue(&rpc_value)?;
-        Ok(res)
     }
 }
 
