@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use anyhow::bail;
 use anyhow::anyhow;
 use chrono::DateTime;
+use chrono::Local;
 use log::info;
 use qxsql::QxSqlApiRecChng;
 use qxsql::{Record};
@@ -97,7 +98,16 @@ impl State {
 
         Ok(())
     }
-
+    pub async fn event_status(&mut self, event_id: EventId) -> anyhow::Result<EventStatus> {
+        self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
+            .map(|ectl| {
+                EventStatus {
+                    is_local: ectl.local_db.is_some(),
+                    open_at: ectl.open_at.with_timezone(&Local).fixed_offset(),
+                    expires_at: ectl.expires_at().with_timezone(&Local).fixed_offset()
+                }
+            })
+    }
     pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
         if let Some(_event) = self.open_events.remove(&event_id) {
             // let mount_point = event_mount_point(event_id);
@@ -124,10 +134,9 @@ impl State {
 
     pub async fn gc_expired_events(&mut self, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
         let event_age_list = self.open_events.iter()
-            .map(|(id, event)| (*id, event.touched_at)).collect::<Vec<_>>();
+            .map(|(id, event)| (*id, event.expires_at())).collect::<Vec<_>>();
         let now = chrono::Utc::now();
-        for (event_id, touched_at) in event_age_list {
-            let expires_at = touched_at.checked_add_signed(global_config().event_expire_duration).expect("Add duration error");
+        for (event_id, expires_at) in event_age_list {
             if expires_at < now {
                 info!("Closing event: {event_id} as expired.");
                 self.close_event(event_id, client_command_sender.clone()).await?;
@@ -162,6 +171,13 @@ impl State {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EventStatus {
+    pub is_local: bool,
+    pub open_at: DateTime<chrono::FixedOffset>,
+    pub expires_at: DateTime<chrono::FixedOffset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventData {
     pub name: String,
     pub date: DateTime<chrono::FixedOffset>,
@@ -192,6 +208,18 @@ impl EventData {
     }
 }
 
+impl From<&EventStatus> for RpcValue {
+    fn from(value: &EventStatus) -> Self {
+        shvproto::to_rpcvalue(value).expect("Failed to convert EventStatus to RpcValue")
+    }
+}
+
+impl From<EventStatus> for RpcValue {
+    fn from(value: EventStatus) -> Self {
+        shvproto::to_rpcvalue(&value).expect("Failed to convert EventStatus to RpcValue")
+    }
+}
+
 impl From<&EventData> for RpcValue {
     fn from(value: &EventData) -> Self {
         shvproto::to_rpcvalue(value).expect("Failed to convert EventData to RpcValue")
@@ -203,13 +231,6 @@ impl From<&RpcValue> for EventData {
     }
 }
 
-// impl From<&EventData> for Record {
-//     fn from(value: &EventData) -> Self {
-//         let v = to_rpcvalue(value).expect("Failed to convert EventData to RpcValue");
-//         record_from_rpcvalue(&v).expect("Failed to convert RpcValue to qxsql::Record")
-//     }
-// }
-
 pub(crate) struct OpenEventCtl {
     pub data: EventData,
     pub local_db: Option<async_sqlite::Pool>,
@@ -218,6 +239,9 @@ pub(crate) struct OpenEventCtl {
 }
 
 impl OpenEventCtl {
+    pub fn expires_at(&self) -> DateTime<chrono::Utc> {
+        self.open_at + global_config().event_expire_duration
+    }
 }
 
 pub fn event_mount_point(event_id: EventId) -> String {

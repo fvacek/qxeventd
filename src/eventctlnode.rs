@@ -76,6 +76,7 @@ const EVENTCTL_DIR_METHODS: &[MetaMethod] = &[
     ),
 ];
 
+const METH_EVENT_STATUS: &str = "status";
 // const METH_EVENT_DATA: &str = "data";
 // const METH_UPDATE_EVENT_DATA: &str = "updateData";
 const METH_EVENT_ADD_ENTRY: &str = "addEntry";
@@ -85,6 +86,9 @@ const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
     META_METHOD_LS,
     MetaMethod::new_static(
         METH_EVENT_ADD_ENTRY, Flags::None, AccessLevel::Write, "{?}", "i", &[], "",
+    ),
+    MetaMethod::new_static(
+        METH_EVENT_STATUS, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
     ),
     // MetaMethod::new_static(
     //     METH_EVENT_DATA, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
@@ -178,6 +182,10 @@ pub(crate) async fn request_handler(
                 Method::Other(m) => {
                     let method = m.method();
                     match method {
+                        METH_EVENT_STATUS => m.resolve(EVENTCTL_NODE_METHODS, async move || {
+                            let res = app_state.write().await.event_status(event_id).await;
+                            res.map_err(anyhow_to_rpc_error)
+                        }),
                         METH_EVENT_ADD_ENTRY => m.resolve(EVENTCTL_NODE_METHODS, async move || {
                             let Some(param) = rq.param() else {
                                 return Err(str_to_rpc_error("Invalid parameters"));
