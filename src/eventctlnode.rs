@@ -77,7 +77,7 @@ const EVENTCTL_DIR_METHODS: &[MetaMethod] = &[
 ];
 
 const METH_EVENT_STATUS: &str = "status";
-// const METH_EVENT_DATA: &str = "data";
+const METH_EVENT_DATA: &str = "data";
 // const METH_UPDATE_EVENT_DATA: &str = "updateData";
 const METH_EVENT_ADD_ENTRY: &str = "addEntry";
 const METH_EVENT_CLOSE: &str = "close";
@@ -90,9 +90,9 @@ const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
     MetaMethod::new_static(
         METH_EVENT_STATUS, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
     ),
-    // MetaMethod::new_static(
-    //     METH_EVENT_DATA, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
-    // ),
+    MetaMethod::new_static(
+        METH_EVENT_DATA, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
+    ),
     // MetaMethod::new_static(
     //     METH_UPDATE_EVENT_DATA, Flags::None, AccessLevel::Read, "[s:api_token,{?}:record]", "b", &[], "",
     // ),
@@ -184,6 +184,10 @@ pub(crate) async fn request_handler(
                     match method {
                         METH_EVENT_STATUS => m.resolve(EVENTCTL_NODE_METHODS, async move || {
                             let res = app_state.write().await.event_status(event_id).await;
+                            res.map_err(anyhow_to_rpc_error)
+                        }),
+                        METH_EVENT_DATA => m.resolve(EVENTCTL_NODE_METHODS, async move || {
+                            let res = app_state.write().await.event_data(event_id, false).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),
                         METH_EVENT_ADD_ENTRY => m.resolve(EVENTCTL_NODE_METHODS, async move || {

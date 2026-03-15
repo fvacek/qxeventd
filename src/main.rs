@@ -23,6 +23,8 @@ use crate::{
 use shvproto::{RpcValue, to_rpcvalue};
 use qxsql::{sql::{QxSqlApi, QUERY_PARAMS, QUERY_RESULT, QueryAndParams}};
 
+#[macro_use]
+mod macros;
 mod state;
 mod config;
 mod events;

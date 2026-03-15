@@ -10,7 +10,6 @@ use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
-use shvproto::RpcValue;
 use shvrpc::RpcMessage;
 use shvrpc::util::join_path;
 use smol::{lock::RwLock, channel};
@@ -98,6 +97,7 @@ impl State {
 
         Ok(())
     }
+
     pub async fn event_status(&mut self, event_id: EventId) -> anyhow::Result<EventStatus> {
         self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
             .map(|ectl| {
@@ -108,6 +108,18 @@ impl State {
                 }
             })
     }
+
+    pub async fn event_data(&mut self, event_id: EventId, include_api_token: bool) -> anyhow::Result<EventData> {
+        self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
+            .map(|ectl| {
+                let mut data = ectl.data.clone();
+                if !include_api_token {
+                    data.api_token = Default::default();
+                }
+                data
+            })
+    }
+
     pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
         if let Some(_event) = self.open_events.remove(&event_id) {
             // let mount_point = event_mount_point(event_id);
@@ -208,28 +220,8 @@ impl EventData {
     }
 }
 
-impl From<&EventStatus> for RpcValue {
-    fn from(value: &EventStatus) -> Self {
-        shvproto::to_rpcvalue(value).expect("Failed to convert EventStatus to RpcValue")
-    }
-}
-
-impl From<EventStatus> for RpcValue {
-    fn from(value: EventStatus) -> Self {
-        shvproto::to_rpcvalue(&value).expect("Failed to convert EventStatus to RpcValue")
-    }
-}
-
-impl From<&EventData> for RpcValue {
-    fn from(value: &EventData) -> Self {
-        shvproto::to_rpcvalue(value).expect("Failed to convert EventData to RpcValue")
-    }
-}
-impl From<&RpcValue> for EventData {
-    fn from(value: &RpcValue) -> Self {
-        shvproto::from_rpcvalue(value).expect("Failed to convert RpcValue to EventData")
-    }
-}
+impl_rpcvalue_conversions!(EventStatus);
+impl_rpcvalue_conversions!(EventData);
 
 pub(crate) struct OpenEventCtl {
     pub data: EventData,
