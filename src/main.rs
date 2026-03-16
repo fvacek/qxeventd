@@ -59,7 +59,7 @@ struct Opts {
         long,
         help = "Data directory, database file will be stored here."
     )]
-    data_dir: Option<String>,
+    data_directory: Option<String>,
 
     /// Duration of event expiration
     #[arg(long)]
@@ -106,7 +106,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if let Some(url) = cli_opts.url {
         config.client.url = Url::parse(&url)?;
     }
-    if let Some(data_dir) = cli_opts.data_dir {
+    if let Some(data_dir) = cli_opts.data_directory {
         config.data_dir = data_dir;
     }
     if let Some(mount) = cli_opts.mount {

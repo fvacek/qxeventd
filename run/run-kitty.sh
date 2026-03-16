@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 
-# export SRC_DIR="${SRC_DIR:-"$HOME/p"}"
-# export BUILD_DIR="${BUILD_DIR:-"$HOME/b"}"
-SHVBROKER_BIN="${SHVBROKER_BIN:-"$HOME/p/shvbroker-rs/target/debug/shvbroker"}"
-QXEVENTD_BIN="${QXEVENTD_BIN:-"$HOME/p/qxeventd/target/debug/qxeventd"}"
-QXEVENTD_DIR="${QXEVENTD_DIR:-"$HOME/t/qxeventd"}"
+echo "Starting QX"
 
-#!/usr/bin/env bash
+SHVBROKER_BIN="${SHVBROKER_BIN:-"$HOME/p/shvbroker-rs/target/debug/shvbroker"}"
+echo "SHVBROKER_BIN" $SHVBROKER_BIN
+QXEVENTD_DIR="${QXEVENTD_DIR:-"$HOME/p/qxeventd"}"
+QXEVENTD_BIN="${QXEVENTD_BIN:-"$QXEVENTD_DIR/target/debug/qxeventd"}"
+echo "QXEVENTD_BIN " $QXEVENTD_BIN
+QX_DATA_DIR="${QX_DATA_DIR:-"$HOME/t/qx"}"
+echo "QX_DATA_DIR  " $QX_DATA_DIR
 
 check_path_exists() {
 	local var_name="$1"
@@ -17,7 +19,7 @@ check_path_exists() {
 	fi
 }
 
-for var_name in SHVBROKER_BIN QXEVENTD_BIN SHVBROKER_CONFIG; do
+for var_name in SHVBROKER_BIN QXEVENTD_BIN QX_DATA_DIR; do
 	check_path_exists "$var_name"
 done
 
@@ -32,8 +34,11 @@ open_in_kitty() {
 	kitty @ --to "$TUNNEL" send-text --match "title:$1" "$2"
 }
 
-open_in_kitty shvbroker "${SHVBROKER_BIN} --config $QXEVENTD_DIR/config.yaml\n"
+echo "Starting shvbroker"
+open_in_kitty shvbroker "${SHVBROKER_BIN} --config $QXEVENTD_DIR/run/etc/shvbroker/config.yaml --data-directory $QX_DATA_DIR/shvbroker \n"
 sleep 1
-open_in_kitty qxeventd "${QXEVENTD_BIN} --url 'tcp://localhost?user=test&password=test' -d $QXEVENTD_DIR -m test/qxevent -v RpcMsg\n"
+
+echo "Starting qxeventd"
+open_in_kitty qxeventd "${QXEVENTD_BIN} --config $QXEVENTD_DIR/run/etc/qxeventd/config.yaml --data-directory $QX_DATA_DIR/event\n"
 
 kitty @ --to "$TUNNEL" close-window --match id:1

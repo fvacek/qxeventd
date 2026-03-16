@@ -1,0 +1,93 @@
+name: foo
+listen:
+- url: tcp://0.0.0.0:3755
+- url: ws://localhost:3777
+use_access_db: true
+shv2_compatibility: false
+data_directory: /tmp/qx/shvbroker
+access:
+  users:
+    admin:
+      password: !Plain admin
+      roles:
+      - su
+    test:
+      password: !Plain test
+      roles:
+      - test
+    qxeventd:
+      password: !Plain test
+      roles:
+      - qxeventd
+    qxanonymous:
+      password: !Plain 2ddf6394ea6
+      roles:
+      - qxanonymous
+  roles:
+    browse:
+      roles: []
+      access:
+      - shvRI: '**:*'
+        grant: bws
+    client:
+      roles:
+      - ping
+      - subscribe
+      - browse
+      access: []
+    device:
+      roles:
+      - client
+      access: []
+    ping:
+      roles: []
+      access:
+      - shvRI: .app:ping
+        grant: wr
+    su:
+      roles: []
+      access:
+      - shvRI: '**:*'
+        grant: su,dot-local
+    subscribe:
+      roles: []
+      access:
+      - shvRI: .broker/currentClient:subscribe
+        grant: wr
+      - shvRI: .broker/currentClient:unsubscribe
+        grant: wr
+    test:
+      roles:
+      - client
+      access:
+      - shvRI: test/**:*
+        grant: cfg
+    qxeventd:
+      roles:
+      - device
+      access:
+      - shvRI: .broker/access/mounts:setValue
+        grant: su
+      - shvRI: test/qx/**:*
+        grant: cfg
+    qxanonymous:
+      roles:
+      - client
+      access:
+      - shvRI: test/qx/qxeventd/eventctl/**:*
+        grant: rd
+    qxauthorized:
+      roles:
+      - qxanonymous
+      access:
+      - shvRI: test/qx/qxeventd/eventctl/**:*
+        grant: wr
+  mounts:
+tunnelling:
+  enabled: false
+azure: null
+google_auth:
+  client_id: 921803215801-igjbc90peabavthblhsmo1da37bo9r4l.apps.googleusercontent.com
+  user_mapping:
+    "*":
+      - qxauthorized

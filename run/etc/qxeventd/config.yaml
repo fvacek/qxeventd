@@ -1,0 +1,9 @@
+client:
+  url: tcp://localhost?user=qxeventd&password=test
+  device_id: null
+  mount: test/qx/qxeventd
+  heartbeat_interval: 1min
+  reconnect_interval: null
+data_dir: /tmp/qx/qxeventd/db
+events_mount_point: test/qx/eventdb
+event_expire_duration: 2d

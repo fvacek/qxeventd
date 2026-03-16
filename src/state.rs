@@ -5,6 +5,7 @@ use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Local;
 use log::info;
+use qxsql::DbValue;
 use qxsql::QxSqlApiRecChng;
 use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
@@ -45,7 +46,12 @@ impl State {
 
     pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
         let qxsql = AppSqlApi::new(self.db_pool.clone());
-        let records = qxsql.list_records("events", Some(vec!["id", "name", "date", "owner"]), None, None).await?;
+        let records = qxsql.list_records("events", None, None, None).await?;
+        let records = records.into_iter().map(|record| {
+            let mut record = record;
+            record.insert("api_token".to_string(), DbValue::Null);
+            record
+        }).collect();
         Ok(records)
     }
 
@@ -73,20 +79,18 @@ impl State {
             event.touched_at = chrono::Utc::now();
             return Ok(());
         }
+        let mount_point = event_mount_point(event_id);
         let event_data = self.load_event_data_from_sql(event_id).await?;
-
         let local_db = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
             let pool = migrate_db(&db_file, &event_data).await?;
             Some(pool)
         } else {
+            // ping child
+            let _: () = client_command_sender.call_rpc_method(join_path(mount_point, ".app"), "ping", None, None, None::<fn(_)>).await
+                .map_err(|_| anyhow!("Failed to ping DB service."))?;
             None
         };
-
-        // ping child
-        let mount_point = event_mount_point(event_id);
-        let _: () = client_command_sender.call_rpc_method(join_path(mount_point, ".app"), "ping", None, None, None::<fn(_)>).await
-            .map_err(|_| anyhow!("Failed to ping DB service."))?;
 
         let now = chrono::Utc::now();
         self.open_events.insert(event_id, OpenEventCtl { data: event_data, local_db, open_at: now, touched_at: now });
