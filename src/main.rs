@@ -125,6 +125,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    info!("local events data directory: {:?}", config.data_dir);
     info!("qxevent mount point: {:?}", config.client.mount);
     info!("qxsql events mount point base: {}", config.events_mount_point);
 

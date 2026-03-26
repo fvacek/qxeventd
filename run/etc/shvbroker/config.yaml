@@ -79,9 +79,9 @@ access:
     qxauthorized:
       roles:
       - qxanonymous
-      access:
-      - shvRI: test/qx/qxeventd/eventctl/**:*
-        grant: wr
+      # access:
+      # - shvRI: test/qx/qxeventd/eventctl/**:*
+      #   grant: wr
   mounts:
 tunnelling:
   enabled: false

@@ -5,7 +5,6 @@ use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Local;
 use log::info;
-use qxsql::DbValue;
 use qxsql::QxSqlApiRecChng;
 use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
@@ -46,12 +45,7 @@ impl State {
 
     pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
         let qxsql = AppSqlApi::new(self.db_pool.clone());
-        let records = qxsql.list_records("events", None, None, None).await?;
-        let records = records.into_iter().map(|record| {
-            let mut record = record;
-            record.insert("api_token".to_string(), DbValue::Null);
-            record
-        }).collect();
+        let records = qxsql.list_records("events", Some(vec!["id", "name", "date", "owner", "is_local"]), None, None).await?;
         Ok(records)
     }
 
@@ -60,7 +54,7 @@ impl State {
             return Err(anyhow::anyhow!("Owner cannot be empty"));
         }
         let api_token = generate_api_token();
-        let event_data = EventData {
+        let event_data = EventRecord {
             name: String::new(),
             date: chrono::Local::now().fixed_offset(),
             owner: owner.clone(),
@@ -80,7 +74,7 @@ impl State {
             return Ok(());
         }
         let mount_point = event_mount_point(event_id);
-        let event_data = self.load_event_data_from_sql(event_id).await?;
+        let event_data = self.event_record(event_id).await?;
         let local_db = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
             let pool = migrate_db(&db_file, &event_data).await?;
@@ -93,7 +87,12 @@ impl State {
         };
 
         let now = chrono::Utc::now();
-        self.open_events.insert(event_id, OpenEventCtl { data: event_data, local_db, open_at: now, touched_at: now });
+        self.open_events.insert(event_id, OpenEventCtl {
+            //data: event_data,
+            local_db,
+            open_at: now,
+            touched_at: now
+        });
 
         let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
         client_command_sender.send_message(message)
@@ -102,7 +101,7 @@ impl State {
         Ok(())
     }
 
-    pub async fn event_status(&mut self, event_id: EventId) -> anyhow::Result<EventStatus> {
+    pub fn open_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
         self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
             .map(|ectl| {
                 EventStatus {
@@ -113,15 +112,11 @@ impl State {
             })
     }
 
-    pub async fn event_data(&mut self, event_id: EventId, include_api_token: bool) -> anyhow::Result<EventData> {
-        self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
-            .map(|ectl| {
-                let mut data = ectl.data.clone();
-                if !include_api_token {
-                    data.api_token = Default::default();
-                }
-                data
-            })
+    pub async fn event_record(&self, event_id: EventId) -> anyhow::Result<EventRecord> {
+        let qxsql = AppSqlApi::new(self.db_pool.clone());
+        let record = qxsql.read_record("events", event_id, None).await?
+            .ok_or_else(||anyhow!("Event id: {event_id} not found"))?;
+        EventRecord::from_record(&record)
     }
 
     pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
@@ -172,18 +167,6 @@ impl State {
         event_id.ok_or_else(|| anyhow::anyhow!("API token not found"))
     }
 
-    pub async fn load_event_data_from_sql(&self, event_id: EventId) -> anyhow::Result<EventData> {
-        let qxsql = AppSqlApi::new(self.db_pool.clone());
-        let data = qxsql
-            .read_record("events", event_id, None)
-            .await?;
-        if let Some(rec) = data {
-            let data = EventData::from_record(&rec)?;
-            return Ok(data)
-        }
-        Err(anyhow::anyhow!("Event id: {} not found", event_id))
-    }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,7 +177,7 @@ pub(crate) struct EventStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EventData {
+pub(crate) struct EventRecord {
     pub name: String,
     pub date: DateTime<chrono::FixedOffset>,
     pub owner: String,
@@ -202,7 +185,7 @@ pub(crate) struct EventData {
     pub is_local: bool,
 }
 
-impl EventData {
+impl EventRecord {
     fn from_record(record: &Record) -> anyhow::Result<Self> {
         let get_field = |name| record.get(name).ok_or_else(||anyhow!("Cannot get field '{}'.", name));
         Ok(Self {
@@ -225,10 +208,10 @@ impl EventData {
 }
 
 impl_rpcvalue_conversions!(EventStatus);
-impl_rpcvalue_conversions!(EventData);
+impl_rpcvalue_conversions!(EventRecord);
 
 pub(crate) struct OpenEventCtl {
-    pub data: EventData,
+    // pub data: EventRecord,
     pub local_db: Option<async_sqlite::Pool>,
     pub open_at: DateTime<chrono::Utc>,
     pub touched_at: DateTime<chrono::Utc>,
