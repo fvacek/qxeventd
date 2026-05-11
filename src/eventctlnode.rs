@@ -1,4 +1,4 @@
-use log::warn;
+use log::{info, warn};
 use qxsql::{QxSqlApiRecChng, Record};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
@@ -7,7 +7,7 @@ use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use crate::eventsqlapi::EventSqlApi;
 use crate::{anyhow_to_rpc_error, str_to_rpc_error, string_to_rpc_error};
-use crate::state::{EventId, SharedAppState, event_mount_point};
+use crate::state::{EventId, EventRecordChange, SharedAppState, event_mount_point};
 
 
 #[derive(Debug)]
@@ -77,7 +77,7 @@ const EVENTCTL_DIR_METHODS: &[MetaMethod] = &[
     ),
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can update event records
-        METH_UPDATE_EVENT_RECORD, Flags::None, AccessLevel::Service, "[i:event_id,{?}:event_record]", "n", &[], "",
+        METH_UPDATE_EVENT_RECORD, Flags::None, AccessLevel::Service, "[i:event_id,{?}:event_record]", "b", &[], "",
     ),
     MetaMethod::new_static(
         METH_DELETE_EVENT, Flags::None, AccessLevel::Write, "s:api_token", "b:was_deleted", &[], "",
@@ -109,18 +109,44 @@ const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
     ),
 ];
 
+fn sanitize_user_id(user_id: &str) -> &str {
+    user_id.split(':').next().unwrap_or(user_id)
+}
+
+const QX_API_TOKEN: &str = "qx_api_token";
+
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, method_name: &'static str, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
+    // info!("escalate_event_owner_rights, method_name: {method_name}");
     let event_id = if method_name == METH_READ_EVENT_RECORD {
-        rq.param().map(|event_id| event_id.as_int())
+        let event_id = rq.param().map(|event_id| event_id.as_int());
+        if event_id.is_none() {
+            warn!("Event id is missing in method: {method_name} parameters");
+        }
+        event_id
+    } else  if method_name == METH_UPDATE_EVENT_RECORD {
+        let event_id = rq.param()
+            .and_then(|p| p.as_list().first())
+            .map(|v| v.as_int());
+
+        if event_id.is_none() {
+            warn!("Event id is missing in method: {method_name} parameters");
+        }
+        event_id
     } else {
         None
     };
     if let Some(event_id) = event_id {
         if let Ok(record) = app_state.read().await.event_record(event_id).await {
-            let api_token = rq.meta().get("api_token").map(|v| v.as_str());
-            let user_id = rq.user_id();
+            let api_token = rq.meta().get(QX_API_TOKEN).map(|v| v.as_str());
+            let user_id = rq.user_id().map(|user_id| sanitize_user_id(user_id));
+            // info!("event_id: {event_id}, user_id: {user_id:?}");
             if let Some(mm) = methods.iter().find(|&m| m.name == method_name) {
-                let called_by_event_owner = api_token.map(|t| t == record.api_token).unwrap_or(false) || user_id.map(|u| u == record.owner).unwrap_or(false);
+                let called_by_event_owner = api_token.map(|t| t == record.api_token).unwrap_or(false)
+                    || user_id.map(|u| u == record.owner).unwrap_or(false);
+                if !called_by_event_owner {
+                    warn!("Method: {method_name} not called by event owner");
+                    warn!("User id: {:?}", user_id);
+                }
                 return vec![
                     MetaMethod::new_static(
                         method_name, mm.flags, if called_by_event_owner { AccessLevel::Read } else { mm.access }, mm.param.as_ref(), mm.result.as_ref(), &[], mm.description.as_ref(),
@@ -193,6 +219,18 @@ pub(crate) async fn request_handler(
                             let res = app_state.write().await.event_record(event_id).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),
+                        METH_UPDATE_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_UPDATE_EVENT_RECORD, EVENTCTL_DIR_METHODS).await, async move || {
+                            let event_id = rq.param().and_then(|p| p.as_list().first()).map(|v| v.as_int())
+                                .ok_or_else(|| anyhow_to_rpc_error(anyhow::anyhow!("Event ID parameter missing")))?;
+                            let record = rq.param().and_then(|p| p.as_list().get(1))
+                                .ok_or_else(|| anyhow_to_rpc_error(anyhow::anyhow!("Record parameter missing")))?;
+                            let record: EventRecordChange = from_rpcvalue(record).map_err(|e| anyhow_to_rpc_error(anyhow::anyhow!(e)))?;
+                            info!("update_event_record, event_id: {event_id:?}, record: {record:?}");
+                            let res = app_state.write().await.update_event_record(event_id, record, client_cmd_tx).await
+                                .map_err(anyhow_to_rpc_error)?;
+                            Ok(res)
+                        }),
+
                         METH_DELETE_EVENT => m.resolve(EVENTCTL_DIR_METHODS, async move || {
                             let api_token = rq.param().unwrap_or_default().as_str();
                             let event_id = app_state.read().await.api_token_to_event_id(api_token).await

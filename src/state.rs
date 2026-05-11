@@ -55,17 +55,23 @@ impl State {
         }
         let api_token = generate_api_token();
         let event_data = EventRecord {
+            is_local: false,
             name: String::new(),
             date: chrono::Local::now().fixed_offset(),
             owner: owner.clone(),
-            is_local: false,
             api_token: api_token.clone(),
+            id: None,
         };
         let rec = event_data.to_record()?;
         let qxsql = AppSqlApi::new(self.db_pool.clone());
         let event_id = qxsql.create_record_with_recchng("events", &rec, client_cmd_tx, Some(owner)).await?;
         info!("Created event {event_id}");
         Ok((event_id, api_token))
+    }
+
+    pub async fn update_event_record(&self, event_id: EventId, record: EventRecordChange, client_cmd_tx: ClientCommandSender) -> anyhow::Result<bool> {
+        let qxsql = AppSqlApi::new(self.db_pool.clone());
+        qxsql.update_record_with_recchng("events", event_id, &record.to_record(), client_cmd_tx, None).await
     }
 
     pub async fn open_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
@@ -178,6 +184,9 @@ pub(crate) struct EventStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub id: Option<i64>,
     pub name: String,
     pub date: DateTime<chrono::FixedOffset>,
     pub owner: String,
@@ -189,6 +198,7 @@ impl EventRecord {
     fn from_record(record: &Record) -> anyhow::Result<Self> {
         let get_field = |name| record.get(name).ok_or_else(||anyhow!("Cannot get field '{}'.", name));
         Ok(Self {
+            id: get_field("id")?.to_int(),
             name: get_field("name")?.as_str().unwrap_or_default().to_string(),
             date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Local::now().fixed_offset()),
             owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
@@ -209,6 +219,47 @@ impl EventRecord {
 
 impl_rpcvalue_conversions!(EventStatus);
 impl_rpcvalue_conversions!(EventRecord);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EventRecordChange {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub date: Option<DateTime<chrono::FixedOffset>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub api_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub is_local: Option<bool>,
+}
+
+impl EventRecordChange {
+    fn to_record(&self) -> Record {
+        let mut record = Record::new();
+        if let Some(name) = &self.name {
+            record.insert("name".to_string(), name.clone().into());
+        }
+        if let Some(date) = &self.date {
+            record.insert("date".to_string(), date.clone().into());
+        }
+        if let Some(owner) = &self.owner {
+            record.insert("owner".to_string(), owner.clone().into());
+        }
+        if let Some(api_token) = &self.api_token {
+            record.insert("api_token".to_string(), api_token.clone().into());
+        }
+        if let Some(is_local) = &self.is_local {
+            record.insert("is_local".to_string(), is_local.clone().into());
+        }
+        record
+    }
+}
 
 pub(crate) struct OpenEventCtl {
     // pub data: EventRecord,

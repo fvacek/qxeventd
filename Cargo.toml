@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 shvproto = "6.0.1"
-shvrpc = "13.0"
+shvrpc = "15.0"
 shvclient = { git = "https://github.com/silicon-heaven/libshvclient-rs", branch = "main", default-features = false, features = ["smol"]}
 qxsql = { git = "https://github.com/fvacek/qxsql.git", branch = "master", default-features = false, features = ["recchng-smol"] }
 

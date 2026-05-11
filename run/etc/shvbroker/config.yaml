@@ -1,4 +1,4 @@
-name: foo
+name: qxbroker
 listen:
 - url: tcp://0.0.0.0:3755
 - url: ws://localhost:3777
@@ -79,9 +79,9 @@ access:
     qxauthorized:
       roles:
       - qxanonymous
-      # access:
-      # - shvRI: test/qx/qxeventd/eventctl/**:*
-      #   grant: wr
+      access:
+      - shvRI: '**/qxeventd/eventctl:createEvent'
+        grant: wr
   mounts:
 tunnelling:
   enabled: false
