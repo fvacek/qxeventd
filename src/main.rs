@@ -27,7 +27,6 @@ use qxsql::{sql::{QxSqlApi, QUERY_PARAMS, QUERY_RESULT, QueryAndParams}};
 mod macros;
 mod state;
 mod config;
-mod events;
 mod migrate;
 mod appsqlapi;
 mod eventsqlapi;

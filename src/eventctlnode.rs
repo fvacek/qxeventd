@@ -1,5 +1,6 @@
 use log::{info, warn};
 use qxsql::{QxSqlApiRecChng, Record};
+use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
 use shvproto::{RpcValue, from_rpcvalue, make_map, to_rpcvalue};
@@ -115,23 +116,24 @@ fn sanitize_user_id(user_id: &str) -> &str {
 
 const QX_API_TOKEN: &str = "qx_api_token";
 
+fn get_event_id_from_param(rq: &RpcMessage, method_name: &'static str) -> Option<i64> {
+    let event_id = rq.param().map(|event_id| event_id.as_int());
+    if event_id.is_none() {
+        warn!("Event id is missing in method: {method_name} parameters");
+    }
+    event_id
+}
+
+#[derive(Debug, Clone, Serialize,Deserialize)]
+struct UpdateEventRecordParams(i64, EventRecordChange);
+impl_rpcvalue_conversions!(UpdateEventRecordParams);
+
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, method_name: &'static str, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
     // info!("escalate_event_owner_rights, method_name: {method_name}");
     let event_id = if method_name == METH_READ_EVENT_RECORD {
-        let event_id = rq.param().map(|event_id| event_id.as_int());
-        if event_id.is_none() {
-            warn!("Event id is missing in method: {method_name} parameters");
-        }
-        event_id
+        get_event_id_from_param(rq, method_name)
     } else  if method_name == METH_UPDATE_EVENT_RECORD {
-        let event_id = rq.param()
-            .and_then(|p| p.as_list().first())
-            .map(|v| v.as_int());
-
-        if event_id.is_none() {
-            warn!("Event id is missing in method: {method_name} parameters");
-        }
-        event_id
+        get_event_id_from_param(rq, method_name)
     } else {
         None
     };
@@ -220,13 +222,11 @@ pub(crate) async fn request_handler(
                             res.map_err(anyhow_to_rpc_error)
                         }),
                         METH_UPDATE_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_UPDATE_EVENT_RECORD, EVENTCTL_DIR_METHODS).await, async move || {
-                            let event_id = rq.param().and_then(|p| p.as_list().first()).map(|v| v.as_int())
-                                .ok_or_else(|| anyhow_to_rpc_error(anyhow::anyhow!("Event ID parameter missing")))?;
-                            let record = rq.param().and_then(|p| p.as_list().get(1))
-                                .ok_or_else(|| anyhow_to_rpc_error(anyhow::anyhow!("Record parameter missing")))?;
-                            let record: EventRecordChange = from_rpcvalue(record).map_err(|e| anyhow_to_rpc_error(anyhow::anyhow!(e)))?;
-                            info!("update_event_record, event_id: {event_id:?}, record: {record:?}");
-                            let res = app_state.write().await.update_event_record(event_id, record, client_cmd_tx).await
+                            let p = UpdateEventRecordParams::try_from(rq.param())
+                                .map_err(anyhow_to_rpc_error)?;
+                            let (event_id, change) = (p.0, p.1);
+                            info!("update_event_record, event_id: {event_id:?}, change: {change:?}");
+                            let res = app_state.write().await.update_event_record(event_id, change, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(res)
                         }),
