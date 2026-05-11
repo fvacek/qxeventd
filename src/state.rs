@@ -246,7 +246,7 @@ impl EventRecordChange {
             record.insert("name".to_string(), name.clone().into());
         }
         if let Some(date) = &self.date {
-            record.insert("date".to_string(), date.clone().into());
+            record.insert("date".to_string(), (*date).into());
         }
         if let Some(owner) = &self.owner {
             record.insert("owner".to_string(), owner.clone().into());
@@ -255,7 +255,7 @@ impl EventRecordChange {
             record.insert("api_token".to_string(), api_token.clone().into());
         }
         if let Some(is_local) = &self.is_local {
-            record.insert("is_local".to_string(), is_local.clone().into());
+            record.insert("is_local".to_string(), (*is_local).into());
         }
         record
     }

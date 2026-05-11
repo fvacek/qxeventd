@@ -130,17 +130,15 @@ impl_rpcvalue_conversions!(UpdateEventRecordParams);
 
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, method_name: &'static str, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
     // info!("escalate_event_owner_rights, method_name: {method_name}");
-    let event_id = if method_name == METH_READ_EVENT_RECORD {
-        get_event_id_from_param(rq, method_name)
-    } else  if method_name == METH_UPDATE_EVENT_RECORD {
+    let event_id = if method_name == METH_READ_EVENT_RECORD || method_name == METH_UPDATE_EVENT_RECORD {
         get_event_id_from_param(rq, method_name)
     } else {
         None
     };
-    if let Some(event_id) = event_id {
-        if let Ok(record) = app_state.read().await.event_record(event_id).await {
+    if let Some(event_id) = event_id
+        && let Ok(record) = app_state.read().await.event_record(event_id).await {
             let api_token = rq.meta().get(QX_API_TOKEN).map(|v| v.as_str());
-            let user_id = rq.user_id().map(|user_id| sanitize_user_id(user_id));
+            let user_id = rq.user_id().map(sanitize_user_id);
             // info!("event_id: {event_id}, user_id: {user_id:?}");
             if let Some(mm) = methods.iter().find(|&m| m.name == method_name) {
                 let called_by_event_owner = api_token.map(|t| t == record.api_token).unwrap_or(false)
@@ -156,7 +154,6 @@ async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState,
                 ]
             }
         }
-    }
     methods.to_vec()
 }
 
