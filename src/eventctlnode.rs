@@ -1,4 +1,4 @@
-use log::{info, warn};
+use log::warn;
 use qxsql::{QxSqlApiRecChng, Record};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
@@ -222,7 +222,7 @@ pub(crate) async fn request_handler(
                             let p = UpdateEventRecordParams::try_from(rq.param())
                                 .map_err(anyhow_to_rpc_error)?;
                             let (event_id, change) = (p.0, p.1);
-                            info!("update_event_record, event_id: {event_id:?}, change: {change:?}");
+                            // info!("update_event_record, event_id: {event_id:?}, change: {change:?}");
                             let res = app_state.write().await.update_event_record(event_id, change, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(res)

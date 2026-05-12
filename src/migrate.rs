@@ -10,6 +10,9 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up(
         include_str!("create_app_db.sql"),
     ),
+    M::up(
+        "ALTER TABLE events ADD COLUMN stage INTEGER NOT NULL DEFAULT 1",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

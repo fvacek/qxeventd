@@ -255,4 +255,4 @@ CREATE TABLE qxchanges (
 -- insert initial data;
 ------------------------------------;
 INSERT INTO config (ckey, cname, cvalue, ctype) VALUES
-('db.version', 'Data version', '30301', 'int');
+('db.version', 'Data version', '30500', 'int');

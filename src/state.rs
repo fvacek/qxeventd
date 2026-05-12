@@ -61,6 +61,7 @@ impl State {
             owner: owner.clone(),
             api_token: api_token.clone(),
             id: None,
+            stage: default_stage(),
         };
         let rec = event_data.to_record()?;
         let qxsql = AppSqlApi::new(self.db_pool.clone());
@@ -189,10 +190,14 @@ pub(crate) struct EventRecord {
     pub id: Option<i64>,
     pub name: String,
     pub date: DateTime<chrono::FixedOffset>,
+    #[serde(default = "default_stage")]
+    pub stage: i64,
     pub owner: String,
     pub api_token: String,
     pub is_local: bool,
 }
+
+fn default_stage() -> i64 { 1 }
 
 impl EventRecord {
     fn from_record(record: &Record) -> anyhow::Result<Self> {
@@ -201,6 +206,7 @@ impl EventRecord {
             id: get_field("id")?.to_int(),
             name: get_field("name")?.as_str().unwrap_or_default().to_string(),
             date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Local::now().fixed_offset()),
+            stage: get_field("stage")?.to_int().unwrap_or(default_stage()),
             owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
             is_local: get_field("is_local")?.to_bool(),
             api_token: get_field("api_token")?.as_str().unwrap_or_default().to_string(),
@@ -210,6 +216,7 @@ impl EventRecord {
         let mut record = Record::new();
         record.insert("name".to_string(), self.name.clone().into());
         record.insert("date".to_string(), self.date.into());
+        record.insert("stage".to_string(), self.stage.into());
         record.insert("owner".to_string(), self.owner.clone().into());
         record.insert("api_token".to_string(), self.api_token.clone().into());
         record.insert("is_local".to_string(), self.is_local.into());
@@ -229,6 +236,8 @@ pub(crate) struct EventRecordChange {
     #[serde(default)]
     pub date: Option<DateTime<chrono::FixedOffset>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -247,6 +256,9 @@ impl EventRecordChange {
         }
         if let Some(date) = &self.date {
             record.insert("date".to_string(), (*date).into());
+        }
+        if let Some(stage) = &self.stage {
+            record.insert("stage".to_string(), (*stage).into());
         }
         if let Some(owner) = &self.owner {
             record.insert("owner".to_string(), owner.clone().into());
