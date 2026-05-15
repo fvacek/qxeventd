@@ -10,6 +10,8 @@ use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
+use shvproto::RpcValue;
+use shvproto::make_map;
 use shvrpc::RpcMessage;
 use shvrpc::util::join_path;
 use smol::{lock::RwLock, channel};
@@ -65,12 +67,27 @@ impl State {
         };
         let rec = event_data.to_record()?;
         let qxsql = AppSqlApi::new(self.db_pool.clone());
-        let event_id = qxsql.create_record_with_recchng("events", &rec, client_cmd_tx, Some(owner)).await?;
+        let event_id = qxsql.create_record_with_recchng("events", &rec, client_cmd_tx.clone(), Some(owner)).await?;
         info!("Created event {event_id}");
+        Self::register_event_mount_point(event_id, &api_token, client_cmd_tx).await?;
         Ok((event_id, api_token))
     }
 
+    async fn register_event_mount_point(event_id: EventId, api_token: &str, client_cmd_tx: ClientCommandSender) -> anyhow::Result<()> {
+        let mount_point = event_mount_point(event_id);
+        let param: Vec<RpcValue> = vec![
+            api_token.into(),
+            make_map!( "mountPoint".to_string() => RpcValue::from(mount_point),).into(),
+        ];
+        let _res: RpcValue = client_cmd_tx.call_rpc_method(".broker/access/mounts", "setValue", Some(param.into()), None, None::<fn(f64)>)
+            .await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(())
+    }
+
     pub async fn update_event_record(&self, event_id: EventId, record: EventRecordChange, client_cmd_tx: ClientCommandSender) -> anyhow::Result<bool> {
+        // always update the mount point, for case than shvbroker config is reloaded from file
+        let api_token = self.event_record(event_id).await?.api_token;
+        Self::register_event_mount_point(event_id, &api_token, client_cmd_tx.clone()).await?;
         let qxsql = AppSqlApi::new(self.db_pool.clone());
         qxsql.update_record_with_recchng("events", event_id, &record.to_record(), client_cmd_tx, None).await
     }

@@ -3,7 +3,7 @@ use qxsql::{QxSqlApiRecChng, Record};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
-use shvproto::{RpcValue, from_rpcvalue, make_map, to_rpcvalue};
+use shvproto::{RpcValue, from_rpcvalue, to_rpcvalue};
 use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use crate::eventsqlapi::EventSqlApi;
@@ -189,14 +189,6 @@ pub(crate) async fn request_handler(
                             let owner = rq.param().unwrap_or_default().as_str().to_owned();
                             let (event_id, api_token) = app_state.write().await.create_event(owner, client_cmd_tx.clone()).await
                                 .map_err(anyhow_to_rpc_error)?;
-                            // add api token to broker mounts
-                            let mount_point = event_mount_point(event_id);
-                            let param: Vec<RpcValue> = vec![
-                                (&api_token).into(),
-                                make_map!( "mountPoint".to_string() => RpcValue::from(mount_point),).into(),
-                            ];
-                            let _res: RpcValue = client_cmd_tx.call_rpc_method(".broker/access/mounts", "setValue", Some(param.into()), None, None::<fn(f64)>)
-                                .await.map_err(|e| string_to_rpc_error(format!("{e}")))?;
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(api_token)]))
                         }),
                         METH_OPEN_EVENT => m.resolve(EVENTCTL_DIR_METHODS, async move || {

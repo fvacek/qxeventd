@@ -8,19 +8,19 @@ data_directory: /tmp/qx/shvbroker
 access:
   users:
     admin:
-      password: !Plain admin
+      password: "!Plain admin"
       roles:
       - su
     test:
-      password: !Plain test
+      password: "!Plain test"
       roles:
       - test
     qxeventd:
-      password: !Plain test
+      password: "!Plain test"
       roles:
       - qxeventd
     qxanonymous:
-      password: !Plain 2ddf6394ea6
+      password: "!Plain 2ddf6394ea6"
       roles:
       - qxanonymous
   roles:
