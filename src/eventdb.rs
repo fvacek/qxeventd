@@ -22,7 +22,7 @@ pub async fn migrate_db(db_file: &str, event_data: &EventRecord) -> anyhow::Resu
         info!("Creating event database file {}", db_file);
         create_file_path(db_file)?;
     }
-    info!("Opening db {db_file} in journal mode: Wal");
+    info!("Opening db {db_file}");
 
     let pool = PoolBuilder::new()
                     .path(db_file)

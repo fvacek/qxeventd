@@ -69,25 +69,29 @@ impl State {
         let qxsql = AppSqlApi::new(self.db_pool.clone());
         let event_id = qxsql.create_record_with_recchng("events", &rec, client_cmd_tx.clone(), Some(owner)).await?;
         info!("Created event {event_id}");
-        Self::register_event_mount_point(event_id, &api_token, client_cmd_tx).await?;
+        if !event_data.is_local {
+            Self::register_event_mount_point(event_id, &api_token, client_cmd_tx).await?;
+        }
         Ok((event_id, api_token))
     }
 
     async fn register_event_mount_point(event_id: EventId, api_token: &str, client_cmd_tx: ClientCommandSender) -> anyhow::Result<()> {
-        let mount_point = event_mount_point(event_id);
+        let mount_point = event_api_shv_path(event_id);
         let param: Vec<RpcValue> = vec![
             api_token.into(),
             make_map!( "mountPoint".to_string() => RpcValue::from(mount_point),).into(),
         ];
-        let _res: RpcValue = client_cmd_tx.call_rpc_method(".broker/access/mounts", "setValue", Some(param.into()), None, None::<fn(f64)>)
+        let _res: RpcValue = client_cmd_tx.call_rpc_method(".broker/access/mounts", "setValue", Some(param.into()), None, None, None::<fn(f64)>)
             .await.map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
     }
 
     pub async fn update_event_record(&self, event_id: EventId, record: EventRecordChange, client_cmd_tx: ClientCommandSender) -> anyhow::Result<bool> {
         // always update the mount point, for case than shvbroker config is reloaded from file
-        let api_token = self.event_record(event_id).await?.api_token;
-        Self::register_event_mount_point(event_id, &api_token, client_cmd_tx.clone()).await?;
+        let event_data = self.event_record(event_id).await?;
+        if !event_data.is_local {
+            Self::register_event_mount_point(event_id, &event_data.api_token, client_cmd_tx.clone()).await?;
+        }
         let qxsql = AppSqlApi::new(self.db_pool.clone());
         qxsql.update_record_with_recchng("events", event_id, &record.to_record(), client_cmd_tx, None).await
     }
@@ -97,7 +101,7 @@ impl State {
             event.touched_at = chrono::Utc::now();
             return Ok(());
         }
-        let mount_point = event_mount_point(event_id);
+        let mount_point = event_api_shv_path(event_id);
         let event_data = self.event_record(event_id).await?;
         let local_db = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
@@ -105,7 +109,7 @@ impl State {
             Some(pool)
         } else {
             // ping child
-            let _: () = client_command_sender.call_rpc_method(join_path(mount_point, ".app"), "ping", None, None, None::<fn(_)>).await
+            let _: () = client_command_sender.call_rpc_method(join_path(mount_point, ".app"), "ping", None, None, None, None::<fn(_)>).await
                 .map_err(|_| anyhow!("Failed to ping DB service."))?;
             None
         };
@@ -303,6 +307,6 @@ impl OpenEventCtl {
     }
 }
 
-pub fn event_mount_point(event_id: EventId) -> String {
-    format!("{}/{event_id}", global_config().events_mount_point)
+pub fn event_api_shv_path(event_id: EventId) -> String {
+    format!("{}/eventctl/{event_id}", global_config().client.mount.as_deref().unwrap_or_default())
 }

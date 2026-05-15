@@ -290,9 +290,9 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.16.3"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ec6fb3fe69024a75fa7e1bfb48aa6cf59706a101658ea01bfd33b2b248a038f"
+checksum = "5ec2f1fc3ec205783a5da9a7e6c1509cc69dedf09a1949e412c1e18469326d00"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -300,9 +300,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.40.0"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f50037ee5e1e41e7b8f9d161680a725bd1626cb6f8c7e901f91f942850852fe7"
+checksum = "1a2f9779ce85b93ab6170dd940ad0169b5766ff848247aff13bb788b832fe3f4"
 dependencies = [
  "cc",
  "cmake",
@@ -1582,7 +1582,7 @@ dependencies = [
 [[package]]
 name = "qxsql"
 version = "0.1.1"
-source = "git+https://github.com/fvacek/qxsql.git?branch=master#996812f12b1bf3f12e39024bf699bb66b87f8f48"
+source = "git+https://github.com/fvacek/qxsql.git?branch=master#b3b8b6876de079d1eb269a08c845e3081b4a7631"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1981,8 +1981,8 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shvclient"
-version = "5.1.4"
-source = "git+https://github.com/silicon-heaven/libshvclient-rs?branch=main#ddf1ba89625389a5380a2ce1ab85dadb0b22ae46"
+version = "6.0.0"
+source = "git+https://github.com/silicon-heaven/libshvclient-rs?branch=main#f41f172b11e775269d53368095b6cd30b5c64356"
 dependencies = [
  "async-broadcast",
  "async-trait",
@@ -2018,9 +2018,9 @@ dependencies = [
 
 [[package]]
 name = "shvrpc"
-version = "15.0.4"
+version = "16.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43656781f680b8c356551a6ef1de0c63581a37c4792036a2434e564f179200b8"
+checksum = "244f1e1ee71e9bc8cc6ae5a9a13fcdc6da02868a1982c90a71de603cad2ea60b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2865,9 +2865,9 @@ dependencies = [
 
 [[package]]
 name = "zerofrom"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69faa1f2a1ea75661980b013019ed6687ed0e83d069bc1114e2cc74c6c04c4df"
+checksum = "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272"
 dependencies = [
  "zerofrom-derive",
 ]

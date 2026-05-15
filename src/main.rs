@@ -33,6 +33,7 @@ mod eventsqlapi;
 mod appnode;
 mod eventctlnode;
 mod eventdb;
+// mod sqlnode;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
