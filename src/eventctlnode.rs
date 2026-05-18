@@ -1,6 +1,6 @@
 use log::warn;
 use qxsql::sql::{EXEC_PARAMS, EXEC_RESULT, QUERY_PARAMS, QUERY_RESULT, READ_PARAMS, READ_RESULT};
-use qxsql::{QueryAndParams, QxSqlApi, QxSqlApiRecChng, RecInsertParam, RecReadParam, Record};
+use qxsql::{QueryAndParams, QxSqlApi, QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecReadParam, RecUpdateParam, Record};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
@@ -13,23 +13,23 @@ use crate::state::{EventId, EventRecordChange, SharedAppState, event_api_shv_pat
 
 
 #[derive(Debug)]
-enum NodeType {
-    EventCtlDir,
-    EventCtlNode(EventId),
-    EventSqlNode(EventId),
+enum EventCtlNode {
+    Root,
+    Event(EventId),
+    EventSql(EventId),
 }
 
-impl NodeType {
+impl EventCtlNode {
     fn from_path(path: &str) -> anyhow::Result<Self> {
         if path.is_empty() {
-            return Ok(Self::EventCtlDir);
+            return Ok(Self::Root);
         }
         if let Some(prefix) = path.strip_suffix("/sql") {
             let event_id = prefix.parse::<i64>()?;
-            return Ok(Self::EventSqlNode(event_id));
+            return Ok(Self::EventSql(event_id));
         }
         let event_id = path.parse::<i64>()?;
-        Ok(Self::EventCtlNode(event_id))
+        Ok(Self::Event(event_id))
     }
 
 }
@@ -195,7 +195,7 @@ pub(crate) async fn request_handler(
     }
     let shv_path = rq.shv_path().unwrap_or_default().to_string();
     // info!("shv_path2: {shv_path}");
-    let node_type = match NodeType::from_path(&shv_path) {
+    let node_type = match EventCtlNode::from_path(&shv_path) {
         Ok(node_type) => node_type,
         Err(err) => {
             warn!("Invalid path: {shv_path}, error: {}", err);
@@ -203,7 +203,7 @@ pub(crate) async fn request_handler(
         }
     };
     match node_type {
-        NodeType::EventCtlDir => {
+        EventCtlNode::Root => {
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_DIR_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_DIR_METHODS, async move || {
@@ -276,7 +276,7 @@ pub(crate) async fn request_handler(
                 }
             }
         }
-        NodeType::EventCtlNode(event_id) => {
+        EventCtlNode::Event(event_id) => {
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_NODE_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_NODE_METHODS, async move || {
@@ -307,7 +307,7 @@ pub(crate) async fn request_handler(
                 }
             }
         }
-        NodeType::EventSqlNode(event_id) => {
+        EventCtlNode::EventSql(event_id) => {
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_SQL_NODE_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_SQL_NODE_METHODS, async move || { Ok(vec![]) }),
@@ -316,7 +316,7 @@ pub(crate) async fn request_handler(
                     match method {
                         METH_SQL_QUERY => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_SQL_QUERY, EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
-                                .map_err(|e| string_to_rpc_error(e))?;
+                                .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.query(query.query(), query.params()).await
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
@@ -325,7 +325,7 @@ pub(crate) async fn request_handler(
 
                         METH_SQL_EXEC => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_SQL_EXEC, EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
-                                .map_err(|e| string_to_rpc_error(e))?;
+                                .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.exec(query.query(), query.params()).await
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
@@ -333,7 +333,7 @@ pub(crate) async fn request_handler(
                         }),
                         METH_SQL_CREATE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_SQL_CREATE, EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let param = RecInsertParam::try_from(rq.param().unwrap_or_default())
-                                .map_err(|e| string_to_rpc_error(e))?;
+                                .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
                             sql_api.create_record_with_recchng(&param.table, &param.record, client_cmd_tx, param.issuer).await
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
@@ -341,10 +341,26 @@ pub(crate) async fn request_handler(
                         }),
                         METH_SQL_READ => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_SQL_READ, EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let param = RecReadParam::try_from(rq.param().unwrap_or_default())
-                                .map_err(|e| string_to_rpc_error(e))?;
+                                .map_err(string_to_rpc_error)?;
                             let fields = qxsql::string_list_to_ref_vec(&param.fields);
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.read_record(&param.table, param.id, fields).await
+                                .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
+                                .map_err(anyhow_to_rpc_error)
+                        }),
+                        METH_SQL_UPDATE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_SQL_UPDATE, EVENTCTL_SQL_NODE_METHODS).await, async move || {
+                            let param = RecUpdateParam::try_from(rq.param().unwrap_or_default())
+                                .map_err(string_to_rpc_error)?;
+                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
+                            sql_api.update_record_with_recchng(&param.table, param.id, &param.record, client_cmd_tx.clone(), param.issuer).await
+                                .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
+                                .map_err(anyhow_to_rpc_error)
+                        }),
+                        METH_SQL_DELETE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_SQL_DELETE, EVENTCTL_SQL_NODE_METHODS).await, async move || {
+                            let param = RecDeleteParam::try_from(rq.param().unwrap_or_default())
+                                .map_err(string_to_rpc_error)?;
+                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
+                            sql_api.delete_record_with_recchng(&param.table, param.id, client_cmd_tx.clone(), param.issuer).await
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
                                 .map_err(anyhow_to_rpc_error)
                         }),
