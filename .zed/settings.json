@@ -1,0 +1,6 @@
+{
+  "project_name": "qxeventd",
+  "file_scan_exclusions": [
+      "run/**/config.yaml"
+  ]
+}

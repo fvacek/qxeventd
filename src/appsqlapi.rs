@@ -1,6 +1,6 @@
 use async_sqlite::rusqlite::types::ValueRef;
 use async_trait::async_trait;
-use qxsql::{DbValue, sql::{DbField, ExecResult, QueryResult}};
+use qxsql::{DbValue, RecChng, sql::{DbField, ExecResult, QueryResult}};
 use qxsql::sql::Record;
 
 pub struct AppSqlApi(async_sqlite::Pool);
@@ -24,7 +24,16 @@ impl qxsql::QxSqlApi for AppSqlApi {
     }
 }
 
-impl qxsql::QxSqlApiRecChng for AppSqlApi {}
+impl qxsql::QxSqlApiRecChng for AppSqlApi {
+    fn filter_recchng(&self, mut recchng: RecChng) -> Option<RecChng> {
+        if let Some(mut record) = recchng.record.take() {
+            record.remove("api_token");
+            recchng.record = Some(record);
+        }
+        Some(recchng)
+    }
+
+}
 
 fn convert_dbvalue_to_sql(key: &str, value: &DbValue) -> Result<async_sqlite::rusqlite::types::Value, async_sqlite::rusqlite::Error> {
     match value {

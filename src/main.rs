@@ -184,7 +184,7 @@ shvclient::impl_static_node! {
         }
         "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
             let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
-            let update_success = qxsql.update_record_with_recchng(&param.table, param.id, &param.record, client_cmd_tx.clone(), issuer(&request)).await;
+            let update_success = qxsql.update_record_with_recchng(&param.table, param.id, &param.record, client_cmd_tx, issuer(&request)).await;
             Some(res_to_rpcvalue(update_success))
         }
         "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {

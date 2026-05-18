@@ -1582,7 +1582,7 @@ dependencies = [
 [[package]]
 name = "qxsql"
 version = "0.1.1"
-source = "git+https://github.com/fvacek/qxsql.git?branch=master#b3b8b6876de079d1eb269a08c845e3081b4a7631"
+source = "git+https://github.com/fvacek/qxsql.git?branch=master#635b04165767a2b81445d9a41d9d725e1fede6b0"
 dependencies = [
  "anyhow",
  "async-trait",

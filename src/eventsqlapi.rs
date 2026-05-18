@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use async_sqlite::Pool;
 use async_trait::async_trait;
+use qxsql::{RecChng};
 use qxsql::sql::{ExecResult, QueryResult};
 use qxsql::sql::Record;
 use shvclient::ClientCommandSender;
@@ -62,4 +63,8 @@ impl qxsql::QxSqlApi for EventSqlApi {
     }
 }
 
-impl qxsql::QxSqlApiRecChng for EventSqlApi {}
+impl qxsql::QxSqlApiRecChng for EventSqlApi {
+    fn filter_recchng(&self, recchng: RecChng) -> Option<RecChng>  {
+        Some(recchng)
+    }
+}

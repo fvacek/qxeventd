@@ -1,6 +1,6 @@
 use log::warn;
 use qxsql::sql::{EXEC_PARAMS, EXEC_RESULT, QUERY_PARAMS, QUERY_RESULT, READ_PARAMS, READ_RESULT};
-use qxsql::{QueryAndParams, QxSqlApi, QxSqlApiRecChng, RecReadParam, Record};
+use qxsql::{QueryAndParams, QxSqlApi, QxSqlApiRecChng, RecInsertParam, RecReadParam, Record};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
@@ -65,6 +65,7 @@ const METH_READ_EVENT_RECORD: &str = "readEventRecord";
 const METH_UPDATE_EVENT_RECORD: &str = "updateEventRecord";
 const METH_DELETE_EVENT: &str = "deleteEvent";
 const METH_LIST_EVENTS: &str = "listEvents";
+const METH_EVENT_DATA: &str = "eventData";
 
 const EVENTCTL_DIR_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
@@ -93,11 +94,12 @@ const EVENTCTL_DIR_METHODS: &[MetaMethod] = &[
     MetaMethod::new_static(
         METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", "[{?}]", &[], "",
     ),
+    MetaMethod::new_static(
+        METH_EVENT_DATA, Flags::None, AccessLevel::Read, "n", "{?}", &[], "",
+    ),
 ];
 
 const METH_EVENT_STATUS: &str = "status";
-const METH_EVENT_DATA: &str = "data";
-// const METH_UPDATE_EVENT_DATA: &str = "updateData";
 const METH_EVENT_ADD_ENTRY: &str = "addEntry";
 const METH_EVENT_CLOSE: &str = "close";
 const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
@@ -110,16 +112,16 @@ const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
         METH_EVENT_STATUS, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
     ),
     MetaMethod::new_static(
-        METH_EVENT_DATA, Flags::None, AccessLevel::Browse, "", "{?}", &[], "",
-    ),
-    MetaMethod::new_static(
         METH_EVENT_CLOSE, Flags::None, AccessLevel::Read, "",  "", &[], "",
     ),
 ];
 
 const METH_SQL_QUERY: &str = "query";
 const METH_SQL_EXEC: &str = "exec";
+const METH_SQL_CREATE: &str = "create";
 const METH_SQL_READ: &str = "read";
+const METH_SQL_UPDATE: &str = "update";
+const METH_SQL_DELETE: &str = "delete";
 
 const EVENTCTL_SQL_NODE_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
@@ -217,7 +219,8 @@ pub(crate) async fn request_handler(
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(api_token)]))
                         }),
                         METH_OPEN_EVENT => m.resolve(EVENTCTL_DIR_METHODS, async move || {
-                            let event_id = rq.param().unwrap_or_default().as_i64();
+                            let event_id = rq.param().unwrap_or_default().as_str().parse::<EventId>()
+                                .map_err(|e| string_to_rpc_error(e.to_string()))?;
                             app_state.write().await.open_event(event_id, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::from(event_api_shv_path(event_id)))
@@ -231,7 +234,8 @@ pub(crate) async fn request_handler(
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_api_shv_path(event_id))]))
                         }),
                         METH_READ_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_READ_EVENT_RECORD, EVENTCTL_DIR_METHODS).await, async move || {
-                            let event_id = rq.param().unwrap_or_default().as_str().parse::<EventId>().unwrap_or_default();
+                            let event_id = rq.param().unwrap_or_default().as_str().parse::<EventId>()
+                                .map_err(|e| string_to_rpc_error(e.to_string()))?;
                             let res = app_state.read().await.event_record(event_id).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),
@@ -258,6 +262,15 @@ pub(crate) async fn request_handler(
                                 .map_err(anyhow_to_rpc_error)?;
                             to_rpcvalue(&events).map_err(|e| string_to_rpc_error(e.to_string()))
                         }),
+                        METH_EVENT_DATA => m.resolve(EVENTCTL_NODE_METHODS, async move || {
+                            let event_id = rq.param().unwrap_or_default().as_str().parse::<EventId>()
+                                .map_err(|e| string_to_rpc_error(e.to_string()))?;
+                            let res = app_state.read().await.event_record(event_id).await;
+                            res.map(|mut rec| {
+                                rec.api_token = "".into();
+                                rec
+                            }).map_err(anyhow_to_rpc_error)
+                        }),
                         _ => err_unresolved_request(),
                     }
                 }
@@ -276,20 +289,13 @@ pub(crate) async fn request_handler(
                             let res = app_state.read().await.open_event_status(event_id);
                             res.map_err(anyhow_to_rpc_error)
                         }),
-                        METH_EVENT_DATA => m.resolve(EVENTCTL_NODE_METHODS, async move || {
-                            let res = app_state.read().await.event_record(event_id).await;
-                            res.map(|mut rec| {
-                                rec.api_token = "".into();
-                                rec
-                            }).map_err(anyhow_to_rpc_error)
-                        }),
                         METH_EVENT_ADD_ENTRY => m.resolve(EVENTCTL_NODE_METHODS, async move || {
                             let Some(param) = rq.param() else {
                                 return Err(str_to_rpc_error("Invalid parameters"));
                             };
                             let record: Record = from_rpcvalue(param).map_err(|e| string_to_rpc_error(e.to_string()))?;
                             let qxsql = EventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
-                            let id = qxsql.create_record_with_recchng("late_entries", &record, client_cmd_tx.clone(), None).await.map_err(anyhow_to_rpc_error)?;
+                            let id = qxsql.create_record_with_recchng("late_entries", &record, client_cmd_tx, None).await.map_err(anyhow_to_rpc_error)?;
                             Ok(id)
                         }),
                         METH_EVENT_CLOSE => m.resolve(EVENTCTL_NODE_METHODS, async move || {
@@ -322,6 +328,14 @@ pub(crate) async fn request_handler(
                                 .map_err(|e| string_to_rpc_error(e))?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.exec(query.query(), query.params()).await
+                                .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
+                                .map_err(anyhow_to_rpc_error)
+                        }),
+                        METH_SQL_CREATE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), METH_SQL_CREATE, EVENTCTL_SQL_NODE_METHODS).await, async move || {
+                            let param = RecInsertParam::try_from(rq.param().unwrap_or_default())
+                                .map_err(|e| string_to_rpc_error(e))?;
+                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
+                            sql_api.create_record_with_recchng(&param.table, &param.record, client_cmd_tx, param.issuer).await
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
                                 .map_err(anyhow_to_rpc_error)
                         }),
