@@ -7,7 +7,7 @@ use shvrpc::client::ClientConfig;
 pub struct Config {
     pub client: ClientConfig,
     pub data_dir: String,
-    pub events_mount_point: String,
+    pub remote_events_mount_point: String,
     #[serde(
         default,
         deserialize_with = "duration_str::deserialize_duration_chrono",
@@ -31,7 +31,7 @@ impl Default for Config {
         Self {
             client: ClientConfig::default(),
             data_dir: String::from("/tmp/qxeventd"),
-            events_mount_point: String::from("test/qx/event"),
+            remote_events_mount_point: String::from("test/qx/remotedb"),
             event_expire_duration: chrono::Duration::days(2),
         }
     }

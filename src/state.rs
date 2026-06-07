@@ -76,10 +76,10 @@ impl State {
     }
 
     async fn register_event_mount_point(event_id: EventId, api_token: &str, client_cmd_tx: ClientCommandSender) -> anyhow::Result<()> {
-        let mount_point = event_api_shv_path(event_id);
+        let remote_mount_point = format!("{}/{}", global_config().remote_events_mount_point, event_id);
         let param: Vec<RpcValue> = vec![
             api_token.into(),
-            make_map!( "mountPoint".to_string() => RpcValue::from(mount_point),).into(),
+            make_map!( "mountPoint".to_string() => RpcValue::from(remote_mount_point),).into(),
         ];
         let _res: RpcValue = client_cmd_tx.call_rpc_method(".broker/access/mounts", "setValue", Some(param.into()), None, None, None::<fn(f64)>)
             .await.map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -96,12 +96,12 @@ impl State {
         qxsql.update_record_with_recchng("events", event_id, &record.to_record(), client_cmd_tx, None).await
     }
 
-    pub async fn open_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
+    pub async fn open_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<String> {
+        let event_shv_path = event_api_shv_path(event_id);
         if let Some(event) = self.open_events.get_mut(&event_id) {
             event.touched_at = chrono::Utc::now();
-            return Ok(());
+            return Ok(event_shv_path);
         }
-        let mount_point = event_api_shv_path(event_id);
         let event_data = self.event_record(event_id).await?;
         let local_db = if event_data.is_local {
             let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
@@ -109,7 +109,7 @@ impl State {
             Some(pool)
         } else {
             // ping child
-            let _: () = client_command_sender.call_rpc_method(join_path(mount_point, ".app"), "ping", None, None, None, None::<fn(_)>).await
+            let _: () = client_command_sender.call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>).await
                 .map_err(|_| anyhow!("Failed to ping DB service."))?;
             None
         };
@@ -126,7 +126,7 @@ impl State {
         client_command_sender.send_message(message)
             .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
-        Ok(())
+        Ok(event_shv_path)
     }
 
     pub fn open_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
@@ -309,4 +309,8 @@ impl OpenEventCtl {
 
 pub fn event_api_shv_path(event_id: EventId) -> String {
     format!("{}/eventctl/{event_id}", global_config().client.mount.as_deref().unwrap_or_default())
+}
+
+pub fn remote_event_mount_point(event_id: EventId) -> String {
+    format!("{}/{event_id}", global_config().remote_events_mount_point)
 }

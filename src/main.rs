@@ -33,7 +33,7 @@ mod eventsqlapi;
 mod appnode;
 mod eventctlnode;
 mod eventdb;
-// mod sqlnode;
+mod qxchange;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -52,7 +52,7 @@ struct Opts {
 
     /// Mount point base of child qxsqld processes, note that broker might not accept any path.
     #[arg(long)]
-    events_mount: Option<String>,
+    remote_events_mount: Option<String>,
 
     #[arg(
         short,
@@ -115,8 +115,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if config.client.mount.is_none() && config.client.device_id.is_none() {
         config.client.mount = Some("test/qx/qxevent".to_string());
     }
-    if let Some(mount) = cli_opts.events_mount {
-        config.events_mount_point = mount;
+    if let Some(mount) = cli_opts.remote_events_mount {
+        config.remote_events_mount_point = mount;
     }
     if let Some(expiration) = cli_opts.event_expire_duration {
         match duration_str::parse_chrono(&expiration) {
@@ -127,7 +127,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     info!("local events data directory: {:?}", config.data_dir);
     info!("qxevent mount point: {:?}", config.client.mount);
-    info!("qxsql events mount point base: {}", config.events_mount_point);
+    info!("qxsql events mount point base: {}", config.remote_events_mount_point);
 
     if cli_opts.print_config {
         let yaml = serde_yaml::to_string(&config)?;

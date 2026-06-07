@@ -8,7 +8,8 @@ use shvclient::ClientCommandSender;
 use shvproto::{make_list, to_rpcvalue, from_rpcvalue};
 
 use crate::appsqlapi::AppSqlApi;
-use crate::{call_rpc_error_to_anyhow, state::{EventId, SharedAppState, event_api_shv_path}};
+use crate::state::{remote_event_mount_point};
+use crate::{call_rpc_error_to_anyhow, state::{EventId, SharedAppState}};
 
 pub struct EventSqlApi {
     event_id: EventId,
@@ -29,8 +30,8 @@ impl EventSqlApi {
             .map(|e| e.local_db.clone())
             .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
     }
-    fn event_sql_path(&self) -> String {
-        format!("{}/sql", event_api_shv_path(self.event_id))
+    fn remote_event_sql_path(&self) -> String {
+        format!("{}/sql", remote_event_mount_point(self.event_id))
     }
 }
 
@@ -42,7 +43,7 @@ impl qxsql::QxSqlApi for EventSqlApi {
             qxsql.query(query, params).await
         } else {
             let params = to_rpcvalue(&params)?;
-            let rpc_value = self.rpc_client.call_rpc_method(self.event_sql_path(), "query", Some(make_list![query, params].into()), None, None, None::<fn(f64)>).await
+            let rpc_value = self.rpc_client.call_rpc_method(self.remote_event_sql_path(), "query", Some(make_list![query, params].into()), None, None, None::<fn(f64)>).await
                 .map_err(call_rpc_error_to_anyhow)?;
             let res: QueryResult = from_rpcvalue(&rpc_value)?;
             Ok(res)
@@ -55,7 +56,7 @@ impl qxsql::QxSqlApi for EventSqlApi {
             qxsql.exec(query, params).await
         } else {
             let params = to_rpcvalue(&params)?;
-            let rpc_value = self.rpc_client.call_rpc_method(self.event_sql_path(), "exec", Some(make_list![query, params].into()), None, None, None::<fn(f64)>).await
+            let rpc_value = self.rpc_client.call_rpc_method(self.remote_event_sql_path(), "exec", Some(make_list![query, params].into()), None, None, None::<fn(f64)>).await
                 .map_err(call_rpc_error_to_anyhow)?;
             let res: ExecResult = from_rpcvalue(&rpc_value)?;
             Ok(res)
