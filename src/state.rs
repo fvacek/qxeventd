@@ -188,14 +188,15 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, cli
         None
     };
 
-    let current_stage = update_event_record_from_event_config(app_state.clone(), client_command_sender.clone(), event_id, &event_record).await?;
     let now = chrono::Utc::now();
     app_state.write().await.open_events.insert(event_id, OpenEventCtl {
-        current_stage,
+        current_stage: 1,
         local_db,
         open_at: now,
         touched_at: now
     });
+    let current_stage = update_event_record_from_event_config(app_state.clone(), client_command_sender.clone(), event_id, &event_record).await?;
+    app_state.write().await.open_events.get_mut(&event_id).map(|e| e.current_stage = current_stage);
 
     let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
     client_command_sender.send_message(message)
