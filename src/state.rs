@@ -18,6 +18,7 @@ use smol::{lock::RwLock, channel};
 
 use crate::appsqlapi::AppSqlApi;
 use crate::eventdb::migrate_db;
+use crate::eventsqlapi::EventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
 
@@ -96,46 +97,14 @@ impl State {
         qxsql.update_record_with_recchng("events", event_id, &record.to_record(), client_cmd_tx, None).await
     }
 
-    pub async fn open_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<String> {
-        let event_shv_path = event_api_shv_path(event_id);
-        if let Some(event) = self.open_events.get_mut(&event_id) {
-            event.touched_at = chrono::Utc::now();
-            return Ok(event_shv_path);
-        }
-        let event_data = self.event_record(event_id).await?;
-        let local_db = if event_data.is_local {
-            let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-            let pool = migrate_db(&db_file, &event_data).await?;
-            Some(pool)
-        } else {
-            // ping child
-            let _: () = client_command_sender.call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>).await
-                .map_err(|_| anyhow!("Failed to ping DB service."))?;
-            None
-        };
-
-        let now = chrono::Utc::now();
-        self.open_events.insert(event_id, OpenEventCtl {
-            //data: event_data,
-            local_db,
-            open_at: now,
-            touched_at: now
-        });
-
-        let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
-        client_command_sender.send_message(message)
-            .map_err(|e| anyhow!("Failed to send message {}", e))?;
-
-        Ok(event_shv_path)
-    }
-
     pub fn open_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
         self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
             .map(|ectl| {
                 EventStatus {
                     is_local: ectl.local_db.is_some(),
                     open_at: ectl.open_at.with_timezone(&Local).fixed_offset(),
-                    expires_at: ectl.expires_at().with_timezone(&Local).fixed_offset()
+                    expires_at: ectl.expires_at().with_timezone(&Local).fixed_offset(),
+                    current_stage: ectl.current_stage,
                 }
             })
     }
@@ -197,8 +166,87 @@ impl State {
 
 }
 
+pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<String> {
+    let event_shv_path = event_api_shv_path(event_id);
+    {
+        let mut state = app_state.write().await;
+        if let Some(event) = state.open_events.get_mut(&event_id) {
+            event.touched_at = chrono::Utc::now();
+            return Ok(event_shv_path);
+        }
+    }
+
+    let event_record = app_state.read().await.event_record(event_id).await?;
+    let local_db = if event_record.is_local {
+        let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
+        let pool = migrate_db(&db_file, &event_record).await?;
+        Some(pool)
+    } else {
+        // ping child
+        let _: () = client_command_sender.call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>).await
+            .map_err(|_| anyhow!("Failed to ping DB service."))?;
+        None
+    };
+
+    let current_stage = update_event_record_from_event_config(app_state.clone(), client_command_sender.clone(), event_id, &event_record).await?;
+    let now = chrono::Utc::now();
+    app_state.write().await.open_events.insert(event_id, OpenEventCtl {
+        current_stage,
+        local_db,
+        open_at: now,
+        touched_at: now
+    });
+
+    let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
+    client_command_sender.send_message(message)
+        .map_err(|e| anyhow!("Failed to send message {}", e))?;
+
+    Ok(event_shv_path)
+}
+
+async fn update_event_record_from_event_config(app_state: SharedAppState, client_command_sender: ClientCommandSender, event_id: i64, event_record: &EventRecord) -> anyhow::Result<i64> {
+    let event_sql = EventSqlApi::new(event_id, app_state.clone(), client_command_sender.clone());
+    let result = event_sql.query("SELECT ckey, cvalue FROM config WHERE ckey IN ('event.currentStageId', 'event.name')", None).await?;
+    let mut changes = EventRecordChange::default();
+    let mut current_stage = 1;
+    for row in 0..result.row_count() {
+        if let Some(key) = result.value(row, 0) {
+            if let Some(key) = key.as_str() {
+                match key {
+                    "event.currentStageId" => {
+                        let stage = result.value(row, 1).and_then(|v| v.as_str())
+                            .and_then(|v| v.parse::<i64>().ok());
+                        if let Some(stage) = stage {
+                            current_stage = stage;
+                            if event_record.stage != stage {
+                                changes.stage = Some(stage);
+                            }
+                        }
+                    }
+                    "event.name" => {
+                        let event_name = result.value(row, 1).and_then(|v| v.as_str());
+                        if let Some(event_name) = event_name && event_record.name != event_name {
+                            changes.name = Some(event_name.to_string());
+                        }
+                    }
+                    _ => {
+                        // skip other keys
+                    }
+                }
+
+            }
+        }
+    }
+    if !changes.is_empty() {
+        app_state.read().await.update_event_record(event_id, changes, client_command_sender).await?;
+        info!("Updated event record for event {event_id}");
+    }
+    Ok(current_stage)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventStatus {
+    pub current_stage: i64,
     pub is_local: bool,
     pub open_at: DateTime<chrono::FixedOffset>,
     pub expires_at: DateTime<chrono::FixedOffset>,
@@ -248,7 +296,7 @@ impl EventRecord {
 impl_rpcvalue_conversions!(EventStatus);
 impl_rpcvalue_conversions!(EventRecord);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct EventRecordChange {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -292,10 +340,18 @@ impl EventRecordChange {
         }
         record
     }
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.date.is_none()
+            && self.stage.is_none()
+            && self.owner.is_none()
+            && self.api_token.is_none()
+            && self.is_local.is_none()
+    }
 }
 
 pub(crate) struct OpenEventCtl {
-    // pub data: EventRecord,
+    pub current_stage: i64,
     pub local_db: Option<async_sqlite::Pool>,
     pub open_at: DateTime<chrono::Utc>,
     pub touched_at: DateTime<chrono::Utc>,

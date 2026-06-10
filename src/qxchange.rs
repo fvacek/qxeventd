@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 pub struct QxChange {
     // #[serde(default, skip_serializing_if = "Option::is_none")] pub id: Option<i64>,
     pub stage_id: i64,
+    pub data_type: String,
+    pub foreign_id: Option<i64>,
     pub data: Data,
     pub user_id: Option<String>,
-    pub source: Option<String>,
     pub status: Status,
 }
 
@@ -47,6 +48,7 @@ pub enum Data {
     LateEntry {
         run_id: Option<i64>,
         record: Record,
-        #[serde(default)] issuer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] comment: Option<String>,
+        // #[serde(default, skip_serializing_if = "Option::is_none")] issuer: Option<String>,
     },
 }
