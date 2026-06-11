@@ -2,12 +2,16 @@ use async_sqlite::rusqlite::types::ValueRef;
 use async_trait::async_trait;
 use qxsql::{DbValue, RecChng, sql::{DbField, ExecResult, QueryResult}};
 use qxsql::sql::Record;
+use shvclient::ClientCommandSender;
 
-pub struct AppSqlApi(async_sqlite::Pool);
+pub struct AppSqlApi(async_sqlite::Pool, Option<ClientCommandSender>);
 
 impl AppSqlApi {
-    pub fn new(pool: async_sqlite::Pool) -> Self {
-        Self(pool)
+    pub fn new(pool: async_sqlite::Pool, client_command_sender: ClientCommandSender) -> Self {
+        Self(pool, Some(client_command_sender))
+    }
+    pub fn new_without_recchng(pool: async_sqlite::Pool) -> Self {
+        Self(pool, None)
     }
 }
 
@@ -24,6 +28,7 @@ impl qxsql::QxSqlApi for AppSqlApi {
     }
 }
 
+#[async_trait]
 impl qxsql::QxSqlApiRecChng for AppSqlApi {
     fn filter_recchng(&self, mut recchng: RecChng) -> Option<RecChng> {
         if let Some(mut record) = recchng.record.take() {
@@ -31,6 +36,10 @@ impl qxsql::QxSqlApiRecChng for AppSqlApi {
             recchng.record = Some(record);
         }
         Some(recchng)
+    }
+
+    async fn client_command_sender(&self) -> Option<ClientCommandSender> {
+        self.1.clone()
     }
 
 }

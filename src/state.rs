@@ -47,12 +47,12 @@ impl State {
     }
 
     pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
-        let qxsql = AppSqlApi::new(self.db_pool.clone());
+        let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
         let records = qxsql.list_records("events", Some(vec!["id", "name", "date", "owner", "is_local"]), None, None).await?;
         Ok(records)
     }
 
-    pub async fn create_event(&self, owner: String, client_cmd_tx: ClientCommandSender) -> anyhow::Result<(EventId, String)> {
+    pub async fn create_event(&self, owner: String, rpc_client: ClientCommandSender) -> anyhow::Result<(EventId, String)> {
         if owner.is_empty() {
             return Err(anyhow::anyhow!("Owner cannot be empty"));
         }
@@ -67,11 +67,11 @@ impl State {
             stage: default_stage(),
         };
         let rec = event_data.to_record()?;
-        let qxsql = AppSqlApi::new(self.db_pool.clone());
-        let event_id = qxsql.create_record_with_recchng("events", &rec, client_cmd_tx.clone(), Some(owner)).await?;
+        let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client.clone());
+        let event_id = qxsql.create_record_with_recchng("events", &rec, Some(owner)).await?;
         info!("Created event {event_id}");
         if !event_data.is_local {
-            Self::register_event_mount_point(event_id, &api_token, client_cmd_tx).await?;
+            Self::register_event_mount_point(event_id, &api_token, rpc_client).await?;
         }
         Ok((event_id, api_token))
     }
@@ -87,14 +87,14 @@ impl State {
         Ok(())
     }
 
-    pub async fn update_event_record(&self, event_id: EventId, record: EventRecordChange, client_cmd_tx: ClientCommandSender) -> anyhow::Result<bool> {
+    pub async fn update_event_record(&self, event_id: EventId, record: EventRecordChange, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
         // always update the mount point, for case than shvbroker config is reloaded from file
         let event_data = self.event_record(event_id).await?;
         if !event_data.is_local {
-            Self::register_event_mount_point(event_id, &event_data.api_token, client_cmd_tx.clone()).await?;
+            Self::register_event_mount_point(event_id, &event_data.api_token, rpc_client.clone()).await?;
         }
-        let qxsql = AppSqlApi::new(self.db_pool.clone());
-        qxsql.update_record_with_recchng("events", event_id, &record.to_record(), client_cmd_tx, None).await
+        let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client.clone());
+        qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await
     }
 
     pub fn open_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
@@ -110,7 +110,7 @@ impl State {
     }
 
     pub async fn event_record(&self, event_id: EventId) -> anyhow::Result<EventRecord> {
-        let qxsql = AppSqlApi::new(self.db_pool.clone());
+        let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
         let record = qxsql.read_record("events", event_id, None).await?
             .ok_or_else(||anyhow!("Event id: {event_id} not found"))?;
         EventRecord::from_record(&record)
@@ -132,11 +132,11 @@ impl State {
             Ok(false)
         }
     }
-    pub async fn delete_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
-        self.close_event(event_id, client_command_sender.clone()).await?;
+    pub async fn delete_event(&mut self, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
+        self.close_event(event_id, rpc_client.clone()).await?;
         log::info!("Deleting event {}", event_id);
-        let qxsql = AppSqlApi::new(self.db_pool.clone());
-        let was_deleted = qxsql.delete_record_with_recchng("events", event_id, client_command_sender, None).await?;
+        let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client);
+        let was_deleted = qxsql.delete_record_with_recchng("events", event_id, None).await?;
         Ok(was_deleted)
     }
 
@@ -154,7 +154,7 @@ impl State {
     }
 
     pub async fn api_token_to_event_id(&self, api_token: &str) -> anyhow::Result<EventId> {
-        let qxsql = AppSqlApi::new(self.db_pool.clone());
+        let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
         let result = qxsql
             .query("SELECT id FROM events WHERE api_token = :api_token", Some(&record_from_slice(&[("api_token", api_token.into())])))
             .await?;
@@ -179,7 +179,7 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, cli
     let event_record = app_state.read().await.event_record(event_id).await?;
     let local_db = if event_record.is_local {
         let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-        let pool = migrate_db(&db_file, &event_record).await?;
+        let pool = migrate_db(&db_file, &event_record, client_command_sender.clone()).await?;
         Some(pool)
     } else {
         // ping child

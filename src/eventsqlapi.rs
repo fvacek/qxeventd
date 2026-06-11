@@ -30,6 +30,11 @@ impl EventSqlApi {
             .map(|e| e.local_db.clone())
             .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
     }
+    async fn is_local_event_db(&self) -> anyhow::Result<bool> {
+        self.app_state.read().await.open_events.get(&self.event_id)
+            .map(|e| e.local_db.is_some())
+            .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
+    }
     fn remote_event_sql_path(&self) -> String {
         format!("{}/sql", remote_event_mount_point(self.event_id))
     }
@@ -39,7 +44,7 @@ impl EventSqlApi {
 impl qxsql::QxSqlApi for EventSqlApi {
     async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> {
         if let Some(db) = self.local_event_db().await? {
-            let qxsql = AppSqlApi::new(db);
+            let qxsql = AppSqlApi::new(db, self.rpc_client.clone());
             qxsql.query(query, params).await
         } else {
             let params = to_rpcvalue(&params)?;
@@ -52,7 +57,7 @@ impl qxsql::QxSqlApi for EventSqlApi {
 
     async fn exec(&self, query: &str, params: Option<&Record>) -> anyhow::Result<ExecResult> {
         if let Some(db) = self.local_event_db().await? {
-            let qxsql = AppSqlApi::new(db);
+            let qxsql = AppSqlApi::new(db, self.rpc_client.clone());
             qxsql.exec(query, params).await
         } else {
             let params = to_rpcvalue(&params)?;
@@ -64,8 +69,17 @@ impl qxsql::QxSqlApi for EventSqlApi {
     }
 }
 
+#[async_trait]
 impl qxsql::QxSqlApiRecChng for EventSqlApi {
     fn filter_recchng(&self, recchng: RecChng) -> Option<RecChng>  {
         Some(recchng)
+    }
+
+    async fn client_command_sender(&self) -> Option<ClientCommandSender>  {
+        if self.is_local_event_db().await.unwrap_or(true) {
+            None
+        } else {
+            Some(self.rpc_client.clone())
+        }
     }
 }

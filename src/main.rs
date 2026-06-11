@@ -154,42 +154,42 @@ struct SqlNode {
 }
 
 shvclient::impl_static_node! {
-    SqlNode(&self, request, client_cmd_tx) {
+    SqlNode(&self, request, rpc_client) {
         "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
-            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
             let result = qxsql.query(query.query(), query.params()).await;
             Some(res_to_rpcvalue(result))
         }
         "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
-            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
             let result = qxsql.exec(query.query(), query.params()).await;
             Some(res_to_rpcvalue(result))
         }
         "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
-            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
             let fields = string_list_to_ref_vec(&param.fields);
             let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
             Some(res_to_rpcvalue(result))
         }
         "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
-            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
-            let insert_id = qxsql.create_record_with_recchng(&param.table, &param.record, client_cmd_tx, issuer(&request)).await;
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+            let insert_id = qxsql.create_record_with_recchng(&param.table, &param.record, issuer(&request)).await;
             Some(res_to_rpcvalue(insert_id))
         }
         "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
-            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
             let fields = string_list_to_ref_vec(&param.fields);
             let result = qxsql.read_record(&param.table, param.id, fields).await;
             Some(res_to_rpcvalue(result))
         }
         "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
-            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
-            let update_success = qxsql.update_record_with_recchng(&param.table, param.id, &param.record, client_cmd_tx, issuer(&request)).await;
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+            let update_success = qxsql.update_record_with_recchng(&param.table, param.id, &param.record, issuer(&request)).await;
             Some(res_to_rpcvalue(update_success))
         }
         "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
-            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone());
-            let was_deleted = qxsql.delete_record_with_recchng(&param.table, param.id, client_cmd_tx, issuer(&request)).await;
+            let qxsql = AppSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+            let was_deleted = qxsql.delete_record_with_recchng(&param.table, param.id, issuer(&request)).await;
             Some(res_to_rpcvalue(was_deleted))
         }
     }

@@ -299,10 +299,10 @@ pub(crate) async fn request_handler(
                                 };
                                 let qxsql = EventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
                                 if let Some(qxchange_id) = qxchange_id {
-                                    let ok = qxsql.update_record_with_recchng("qxchanges", qxchange_id, &qxchange.to_record(), client_cmd_tx, None).await.map_err(anyhow_to_rpc_error)?;
+                                    let ok = qxsql.update_record_with_recchng("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(ok))
                                 } else {
-                                    let id = qxsql.create_record_with_recchng("qxchanges", &qxchange.to_record(), client_cmd_tx, None).await.map_err(anyhow_to_rpc_error)?;
+                                    let id = qxsql.create_record_with_recchng("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(id))
                                 }
                             })
@@ -344,7 +344,7 @@ pub(crate) async fn request_handler(
                             let param = RecInsertParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
-                            sql_api.create_record_with_recchng(&param.table, &param.record, client_cmd_tx, param.issuer).await
+                            sql_api.create_record_with_recchng(&param.table, &param.record, param.issuer).await
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
                                 .map_err(anyhow_to_rpc_error)
                         }),
@@ -361,7 +361,7 @@ pub(crate) async fn request_handler(
                             let param = RecUpdateParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
-                            sql_api.update_record_with_recchng(&param.table, param.id, &param.record, client_cmd_tx.clone(), param.issuer).await
+                            sql_api.update_record_with_recchng(&param.table, param.id, &param.record, param.issuer).await
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
                                 .map_err(anyhow_to_rpc_error)
                         }),
@@ -369,7 +369,7 @@ pub(crate) async fn request_handler(
                             let param = RecDeleteParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
-                            sql_api.delete_record_with_recchng(&param.table, param.id, client_cmd_tx.clone(), param.issuer).await
+                            sql_api.delete_record_with_recchng(&param.table, param.id, param.issuer).await
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
                                 .map_err(anyhow_to_rpc_error)
                         }),

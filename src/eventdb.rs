@@ -4,6 +4,7 @@ use async_sqlite::{JournalMode, Pool, PoolBuilder};
 use log::info;
 use qxsql::sql::{QxSqlApi, record_from_slice};
 use rusqlite_migration::{M, Migrations};
+use shvclient::ClientCommandSender;
 
 use crate::{appsqlapi::AppSqlApi, state::EventRecord};
 
@@ -16,7 +17,7 @@ fn create_file_path(db_file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn migrate_db(db_file: &str, event_data: &EventRecord) -> anyhow::Result<Pool> {
+pub async fn migrate_db(db_file: &str, event_data: &EventRecord, client_command_sender: ClientCommandSender) -> anyhow::Result<Pool> {
     let db_file_exists = check_file_exists(db_file);
     if !db_file_exists {
         info!("Creating event database file {}", db_file);
@@ -37,7 +38,7 @@ pub async fn migrate_db(db_file: &str, event_data: &EventRecord) -> anyhow::Resu
             Err(e) => panic!("{}", e),
         }
     }).await?;
-    let qxsql = AppSqlApi::new(pool.clone());
+    let qxsql = AppSqlApi::new(pool.clone(), client_command_sender);
     if !db_file_exists {
         let config_entries = [
             ("event.name", event_data.name.clone()),
