@@ -284,7 +284,12 @@ pub(crate) async fn request_handler(
                                     [row] => row[0].to_int(),
                                     _ => return Err(str_to_rpc_error("Multiple pending late entries found")),
                                 };
-                                // let issuer = Some("qxeventd".to_string());
+                                let qxsql = EventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
+                                if let Some(qxchange_id) = qxchange_id && params.record.is_empty() {
+                                    // delete existing record with no changes
+                                    let ok = qxsql.delete_record_event("qxchanges", qxchange_id, None).await.map_err(anyhow_to_rpc_error)?;
+                                    return Ok(RpcValue::from(ok))
+                                }
                                 let qxchange = QxChange {
                                     stage_id: current_stage,
                                     data_type: "LateEntry".to_string(),
@@ -297,12 +302,11 @@ pub(crate) async fn request_handler(
                                     user_id: Some(user_id),
                                     status: qxchange::Status::Pending,
                                 };
-                                let qxsql = EventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
                                 if let Some(qxchange_id) = qxchange_id {
-                                    let ok = qxsql.update_record_with_recchng("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
+                                    let ok = qxsql.update_record_event("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(ok))
                                 } else {
-                                    let id = qxsql.create_record_with_recchng("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
+                                    let id = qxsql.create_record_event("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(id))
                                 }
                             })

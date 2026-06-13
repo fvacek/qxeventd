@@ -4,15 +4,19 @@ use anyhow::bail;
 use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Local;
-use log::info;
+use futures::StreamExt;
+use log::{error, info};
 use qxsql::QxSqlApiRecChng;
 use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
+
 use shvproto::RpcValue;
 use shvproto::make_map;
 use shvrpc::RpcMessage;
+use shvrpc::RpcMessageMetaTags;
+use shvrpc::rpc::ShvRI;
 use shvrpc::util::join_path;
 use smol::{lock::RwLock, channel};
 
@@ -21,6 +25,7 @@ use crate::eventdb::migrate_db;
 use crate::eventsqlapi::EventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
+use crate::string_to_rpc_error;
 
 pub type EventId = i64;
 
@@ -166,7 +171,7 @@ impl State {
 
 }
 
-pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<String> {
+pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<String> {
     let event_shv_path = event_api_shv_path(event_id);
     {
         let mut state = app_state.write().await;
@@ -179,12 +184,19 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, cli
     let event_record = app_state.read().await.event_record(event_id).await?;
     let local_db = if event_record.is_local {
         let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-        let pool = migrate_db(&db_file, &event_record, client_command_sender.clone()).await?;
+        let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
         Some(pool)
     } else {
         // ping child
-        let _: () = client_command_sender.call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>).await
+        let _: () = rpc_client.call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>).await
             .map_err(|_| anyhow!("Failed to ping DB service."))?;
+
+        let ri = ShvRI::from_path_method_signal(&remote_event_sql_path(event_id), "", Some("recchng"))
+            .map_err(|e| string_to_rpc_error(e))?;
+        info!("Subscribing SQL recchng: {ri:?}");
+        let subscriber = rpc_client.subscribe(ri).await
+            .map_err(|e| anyhow!("Failed to subscribe to remote event: {}", e))?;
+        smol::spawn(forward_remote_db_recchng_signals(event_id, subscriber, rpc_client.clone())).detach();
         None
     };
 
@@ -193,16 +205,39 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, cli
         current_stage: 1,
         local_db,
         open_at: now,
-        touched_at: now
+        touched_at: now,
     });
-    let current_stage = update_event_record_from_event_config(app_state.clone(), client_command_sender.clone(), event_id, &event_record).await?;
+    let current_stage = update_event_record_from_event_config(app_state.clone(), rpc_client.clone(), event_id, &event_record).await?;
     app_state.write().await.open_events.get_mut(&event_id).map(|e| e.current_stage = current_stage);
 
     let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
-    client_command_sender.send_message(message)
+    rpc_client.send_message(message)
         .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
     Ok(event_shv_path)
+}
+
+async fn forward_remote_db_recchng_signals(event_id: EventId, mut subscriber: shvclient::clientapi::Subscriber, rpc_client: ClientCommandSender) {
+    while let Some(frame) = subscriber.next().await {
+        match frame.to_rpcmesage() {
+            Ok(message) => {
+                if message.is_signal() && message.method() == Some("recchng") {
+                    let remote_sql_path = remote_event_sql_path(event_id);
+                    if let Some(path) = message.shv_path() && path == &remote_sql_path {
+                        info!("Received event {event_id} subscription message: {:?}", message.shv_path());
+                        let mut signal = message;
+                        let event_sql_path = format!("eventctl/{event_id}/sql");
+                        signal.set_shvpath(&event_sql_path);
+                        if let Err(e) = rpc_client.send_message(signal) {
+                            error!("Failed to send event {event_id} recchng signal: {e}");
+                        }
+                    }
+                }
+            },
+            Err(err) => error!("Failed to decode event {event_id} subscription message: {err}"),
+        }
+    }
+    info!("SQL recchng {event_id} subscription stream closed");
 }
 
 async fn update_event_record_from_event_config(app_state: SharedAppState, client_command_sender: ClientCommandSender, event_id: i64, event_record: &EventRecord) -> anyhow::Result<i64> {
@@ -356,6 +391,7 @@ pub(crate) struct OpenEventCtl {
     pub local_db: Option<async_sqlite::Pool>,
     pub open_at: DateTime<chrono::Utc>,
     pub touched_at: DateTime<chrono::Utc>,
+
 }
 
 impl OpenEventCtl {
@@ -370,4 +406,8 @@ pub fn event_api_shv_path(event_id: EventId) -> String {
 
 pub fn remote_event_mount_point(event_id: EventId) -> String {
     format!("{}/{event_id}", global_config().remote_events_mount_point)
+}
+
+pub fn remote_event_sql_path(event_id: EventId) -> String {
+    format!("{}/sql", remote_event_mount_point(event_id))
 }
