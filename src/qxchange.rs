@@ -3,15 +3,15 @@ use std::fmt::Display;
 use qxsql::{DbValue, Record, ToRecord};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, ToRecord)]
-pub struct QxChange {
+#[derive(Debug, Serialize, Deserialize, Default, ToRecord)]
+pub struct QxChangeRecord {
     // #[serde(default, skip_serializing_if = "Option::is_none")] pub id: Option<i64>,
-    pub stage_id: i64,
-    pub data_type: String,
-    pub foreign_id: Option<i64>,
-    pub data: Data,
-    pub user_id: Option<String>,
-    pub status: Status,
+    #[to_record(skip_if_none)] pub data_type: Option<String>,
+    #[to_record(skip_if_none)] pub foreign_id: Option<i64>,
+    #[to_record(skip_if_none)] pub data: Option<Data>,
+    #[to_record(skip_if_none)] pub user_id: Option<String>,
+    #[to_record(skip_if_none)] pub status: Option<Status>,
+    #[to_record(skip_if_none)] pub stage_id: Option<i64>,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ pub enum Data {
     LateEntry {
         run_id: Option<i64>,
         record: Record,
-        #[serde(default, skip_serializing_if = "Option::is_none")] comment: Option<String>,
+        // #[serde(default, skip_serializing_if = "Option::is_none")] comment: Option<String>,
         // #[serde(default, skip_serializing_if = "Option::is_none")] issuer: Option<String>,
     },
 }

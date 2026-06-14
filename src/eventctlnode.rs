@@ -9,7 +9,7 @@ use shvproto::{RpcValue, from_rpcvalue, to_rpcvalue};
 use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use crate::eventsqlapi::EventSqlApi;
-use crate::qxchange::{self, QxChange};
+use crate::qxchange::{self, QxChangeRecord};
 use crate::{anyhow_to_rpc_error, str_to_rpc_error, string_to_rpc_error};
 use crate::state::{open_event, EventId, EventRecordChange, SharedAppState};
 
@@ -290,22 +290,28 @@ pub(crate) async fn request_handler(
                                     let ok = qxsql.delete_record_event("qxchanges", qxchange_id, None).await.map_err(anyhow_to_rpc_error)?;
                                     return Ok(RpcValue::from(ok))
                                 }
-                                let qxchange = QxChange {
-                                    stage_id: current_stage,
-                                    data_type: "LateEntry".to_string(),
-                                    foreign_id: Some(params.run_id),
-                                    data: qxchange::Data::LateEntry {
-                                        run_id: Some(params.run_id),
-                                        record: params.record,
-                                        comment: None,
-                                    },
-                                    user_id: Some(user_id),
-                                    status: qxchange::Status::Pending,
-                                };
                                 if let Some(qxchange_id) = qxchange_id {
+                                    let qxchange = QxChangeRecord {
+                                        data: Some(qxchange::Data::LateEntry {
+                                            run_id: Some(params.run_id),
+                                            record: params.record,
+                                        }),
+                                        ..Default::default()
+                                    };
                                     let ok = qxsql.update_record_event("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(ok))
                                 } else {
+                                    let qxchange = QxChangeRecord {
+                                        stage_id: Some(current_stage),
+                                        data_type: Some("LateEntry".to_string()),
+                                        foreign_id: Some(params.run_id),
+                                        data: Some(qxchange::Data::LateEntry {
+                                            run_id: Some(params.run_id),
+                                            record: params.record,
+                                        }),
+                                        user_id: Some(user_id),
+                                        status: Some(qxchange::Status::Pending),
+                                    };
                                     let id = qxsql.create_record_event("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(id))
                                 }
