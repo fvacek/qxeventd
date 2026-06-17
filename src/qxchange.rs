@@ -11,6 +11,7 @@ pub struct QxChangeRecord {
     #[to_record(skip_if_none)] pub data: Option<Data>,
     #[to_record(skip_if_none)] pub user_id: Option<String>,
     #[to_record(skip_if_none)] pub status: Option<Status>,
+    #[to_record(skip_if_none)] pub status_message: Option<String>,
     #[to_record(skip_if_none)] pub stage_id: Option<i64>,
 }
 

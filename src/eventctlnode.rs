@@ -311,6 +311,7 @@ pub(crate) async fn request_handler(
                                         }),
                                         user_id: Some(user_id),
                                         status: Some(qxchange::Status::Pending),
+                                        status_message: None,
                                     };
                                     let id = qxsql.create_record_event("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(id))
