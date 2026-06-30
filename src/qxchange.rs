@@ -1,12 +1,13 @@
 use std::fmt::Display;
 
-use qxsql::{DbValue, Record, ToRecord};
+use qxsql::{DbValue, ToRecord};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Default, ToRecord)]
 pub struct QxChangeRecord {
     // #[serde(default, skip_serializing_if = "Option::is_none")] pub id: Option<i64>,
     #[to_record(skip_if_none)] pub data_type: Option<String>,
+    #[to_record(skip_if_none)] pub foreign_table: Option<String>,
     #[to_record(skip_if_none)] pub foreign_id: Option<i64>,
     #[to_record(skip_if_none)] pub data: Option<Data>,
     #[to_record(skip_if_none)] pub user_id: Option<String>,
@@ -45,11 +46,25 @@ impl From<Data> for DbValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LateEntryId {
+    RunId(i64),
+    ClassId(i64),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LateEntry {
+    pub id: LateEntryId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firstname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lastname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub siid: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Data {
-    LateEntry {
-        run_id: Option<i64>,
-        record: Record,
-        // #[serde(default, skip_serializing_if = "Option::is_none")] comment: Option<String>,
-        // #[serde(default, skip_serializing_if = "Option::is_none")] issuer: Option<String>,
-    },
+    LateEntry(LateEntry),
 }
