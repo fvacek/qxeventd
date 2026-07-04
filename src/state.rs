@@ -158,8 +158,8 @@ impl State {
         }
     }
     pub async fn delete_event(&mut self, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
-        self.close_event(event_id, rpc_client.clone()).await?;
         log::info!("Deleting event {}", event_id);
+        self.close_event(event_id, rpc_client.clone()).await?;
         let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client);
         let was_deleted = qxsql.delete_record_with_recchng("events", event_id, None).await?;
         Ok(was_deleted)

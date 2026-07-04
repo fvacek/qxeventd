@@ -68,7 +68,7 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
         METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, "[i:event_id,{?}:event_record]", "b", &[], "",
     ),
     MetaMethod::new_static(
-        METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Write, "s:api_token", "b:was_deleted", &[], "",
+        METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, "s:api_token", "b:was_deleted", &[], "",
     ),
     MetaMethod::new_static(
         METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", "[{?}]", &[], "",
@@ -243,7 +243,6 @@ pub(crate) async fn request_handler(
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(res)
                         }),
-
                         METH_DELETE_EVENT => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                             let api_token = rq.param().unwrap_or_default().as_str();
                             let event_id = app_state.read().await.api_token_to_event_id(api_token).await
