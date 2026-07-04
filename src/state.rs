@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::bail;
@@ -25,6 +26,7 @@ use crate::eventdb::migrate_db;
 use crate::eventsqlapi::EventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
+use crate::qxeventconfig::QxEventConfig;
 use crate::string_to_rpc_error;
 
 pub type EventId = i64;
@@ -34,6 +36,7 @@ pub type SharedAppState = Arc<RwLock<State>>;
 pub(crate) struct State {
     pub db_pool: async_sqlite::Pool,
     pub open_events: BTreeMap<EventId, OpenEventCtl>,
+    pub event_records: HashMap<EventId, Arc<RwLock<EventRecord>>>,
     pub shutdown_sender: Option<channel::Sender<()>>,
 }
 
@@ -70,6 +73,7 @@ impl State {
             api_token: api_token.clone(),
             id: None,
             stage: default_stage(),
+            config: QxEventConfig::default(),
         };
         let rec = event_data.to_record()?;
         let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client.clone());
@@ -92,17 +96,19 @@ impl State {
         Ok(())
     }
 
-    pub async fn update_event_record(&self, event_id: EventId, record: EventRecordChange, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
+    pub async fn update_event_record(&mut self, event_id: EventId, record: EventRecordChange, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
         // always update the mount point, for case than shvbroker config is reloaded from file
-        let event_data = self.event_record(event_id).await?;
+        let event_data = self.load_event_record(event_id).await?;
         if !event_data.is_local {
             Self::register_event_mount_point(event_id, &event_data.api_token, rpc_client.clone()).await?;
         }
         let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client.clone());
-        qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await
+        let ret = qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await;
+        self.forget_event_record(event_id).await?;
+        ret
     }
 
-    pub fn open_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
+    pub fn opened_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
         self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
             .map(|ectl| {
                 EventStatus {
@@ -114,7 +120,21 @@ impl State {
             })
     }
 
-    pub async fn event_record(&self, event_id: EventId) -> anyhow::Result<EventRecord> {
+    pub async fn event_record(&mut self, event_id: EventId) -> anyhow::Result<Arc<RwLock<EventRecord>>> {
+        if let Some(record) = self.event_records.get(&event_id) {
+            return Ok(record.clone());
+        }
+        let record = Arc::new(RwLock::new(self.load_event_record(event_id).await?));
+        self.event_records.insert(event_id, record.clone());
+        Ok(record)
+    }
+
+    async fn forget_event_record(&mut self, event_id: EventId) -> anyhow::Result<()> {
+        self.event_records.remove(&event_id);
+        Ok(())
+    }
+
+    pub async fn load_event_record(&self, event_id: EventId) -> anyhow::Result<EventRecord> {
         let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
         let record = qxsql.read_record("events", event_id, None).await?
             .ok_or_else(||anyhow!("Event id: {event_id} not found"))?;
@@ -181,7 +201,7 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
         }
     }
 
-    let event_record = app_state.read().await.event_record(event_id).await?;
+    let event_record = app_state.read().await.load_event_record(event_id).await?;
     let local_db = if event_record.is_local {
         let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
         let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
@@ -274,7 +294,7 @@ async fn update_event_record_from_event_config(app_state: SharedAppState, client
         }
     }
     if !changes.is_empty() {
-        app_state.read().await.update_event_record(event_id, changes, client_command_sender).await?;
+        app_state.write().await.update_event_record(event_id, changes, client_command_sender).await?;
         info!("Updated event record for event {event_id}");
     }
     Ok(current_stage)
@@ -299,6 +319,7 @@ pub(crate) struct EventRecord {
     pub stage: i64,
     pub owner: String,
     pub api_token: String,
+    pub config: QxEventConfig,
     pub is_local: bool,
 }
 
@@ -315,6 +336,9 @@ impl EventRecord {
             owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
             is_local: get_field("is_local")?.to_bool(),
             api_token: get_field("api_token")?.as_str().unwrap_or_default().to_string(),
+            config: get_field("config")?.as_str()
+                .and_then(|config| serde_json::from_str(config).ok())
+                .unwrap_or_default(),
         })
     }
     fn to_record(&self) -> anyhow::Result<Record> {
@@ -324,6 +348,7 @@ impl EventRecord {
         record.insert("stage".to_string(), self.stage.into());
         record.insert("owner".to_string(), self.owner.clone().into());
         record.insert("api_token".to_string(), self.api_token.clone().into());
+        record.insert("config".to_string(), serde_json::to_string(&self.config)?.into());
         record.insert("is_local".to_string(), self.is_local.into());
         Ok(record)
     }
@@ -391,7 +416,6 @@ pub(crate) struct OpenEventCtl {
     pub local_db: Option<async_sqlite::Pool>,
     pub open_at: DateTime<chrono::Utc>,
     pub touched_at: DateTime<chrono::Utc>,
-
 }
 
 impl OpenEventCtl {

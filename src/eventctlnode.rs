@@ -10,6 +10,7 @@ use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use crate::eventsqlapi::EventSqlApi;
 use crate::qxchange::{self, Data, LateEntry, QxChangeRecord};
+use crate::qxeventconfig::Role;
 use crate::{anyhow_to_rpc_error, str_to_rpc_error, string_to_rpc_error};
 use crate::state::{open_event, EventId, EventRecordChange, SharedAppState};
 
@@ -60,14 +61,14 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can read event records
         // read event record is privileged operation, because it exposes api_key
-        METH_READ_EVENT_RECORD, Flags::None, AccessLevel::Service, "i:event_id", "{?}", &[], "",
+        METH_READ_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, "i:event_id", "{?}", &[], "",
     ),
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can update event records
-        METH_UPDATE_EVENT_RECORD, Flags::None, AccessLevel::Service, "[i:event_id,{?}:event_record]", "b", &[], "",
+        METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, "[i:event_id,{?}:event_record]", "b", &[], "",
     ),
     MetaMethod::new_static(
-        METH_DELETE_EVENT, Flags::None, AccessLevel::Write, "s:api_token", "b:was_deleted", &[], "",
+        METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Write, "s:api_token", "b:was_deleted", &[], "",
     ),
     MetaMethod::new_static(
         METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", "[{?}]", &[], "",
@@ -127,13 +128,15 @@ impl_rpcvalue_conversions!(UpdateEventRecordParams);
 
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
     // log::info!("escalate_event_owner_rights, method_name: {method_name}, event id: {event_id:?}");
-    if let Some(event_id) = event_id && let Ok(event_record) = app_state.read().await.event_record(event_id).await {
+    if let Some(event_id) = event_id && let Ok(event_record) = app_state.write().await.event_record(event_id).await {
         let api_token = rq.meta().get(QX_API_TOKEN).map(|v| v.as_str());
         let user_id = sanitize_user_id(rq);
         // info!("event_id: {event_id}, user_id: {user_id:?}");
         if let Some(mm) = methods.iter().find(|&m| m.name == method_name) {
+            let event_record = event_record.read().await;
             let called_by_event_owner = api_token.map(|t| t == event_record.api_token).unwrap_or(false)
-                || user_id.map(|u| u == event_record.owner).unwrap_or(false);
+                || user_id.map(|u| u == event_record.owner).unwrap_or(false)
+                || user_id.map(|u| matches!(event_record.config.members.get(u), Some(Role::Organizer))).unwrap_or(false);
             if !called_by_event_owner && mm.flags.contains(Flags::UserIDRequired) {
                 warn!("Method: {method_name} not called by event owner");
                 warn!("User id: {:?}", user_id);
@@ -206,7 +209,7 @@ pub(crate) async fn request_handler(
                         }),
                         METH_READ_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), read_event_record_event_id(&rq), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                             let event_id = rq.param().unwrap_or_default().as_int();
-                            let res = app_state.read().await.event_record(event_id).await;
+                            let res = app_state.read().await.load_event_record(event_id).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),
                         METH_UPDATE_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), update_event_record_event_id(&rq), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
@@ -234,7 +237,7 @@ pub(crate) async fn request_handler(
                         }),
                         METH_EVENT_DATA => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                             let event_id = rq.param().unwrap_or_default().as_int();
-                            let res = app_state.read().await.event_record(event_id).await;
+                            let res = app_state.read().await.load_event_record(event_id).await;
                             res.map(|mut rec| {
                                 rec.api_token = "".into();
                                 rec
@@ -255,7 +258,7 @@ pub(crate) async fn request_handler(
                     let method = m.method();
                     match method {
                         METH_EVENT_STATUS => m.resolve(EVENTCTL_NODE_METHODS, async move || {
-                            let res = app_state.read().await.open_event_status(event_id);
+                            let res = app_state.read().await.opened_event_status(event_id);
                             res.map_err(anyhow_to_rpc_error)
                         }),
                         METH_EVENT_UPDATE_LATE_ENTRY => {
@@ -266,7 +269,7 @@ pub(crate) async fn request_handler(
                                 };
                                 let params = LateEntryParams::try_from(rq.param().unwrap_or_default())
                                     .map_err(string_to_rpc_error)?;
-                                let current_stage = app_state.read().await.open_event_status(event_id).map_err(anyhow_to_rpc_error)?.current_stage;
+                                let current_stage = app_state.read().await.opened_event_status(event_id).map_err(anyhow_to_rpc_error)?.current_stage;
                                 let qxsql = EventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
                                 if let Some(qxchange_id) = params.change_id {
                                     if params.late_entry.is_none() {

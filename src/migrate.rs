@@ -13,6 +13,9 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up(
         "ALTER TABLE events ADD COLUMN stage INTEGER NOT NULL DEFAULT 1",
     ),
+    M::up(
+        "ALTER TABLE events ADD COLUMN config TEXT",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

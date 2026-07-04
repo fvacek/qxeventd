@@ -34,6 +34,7 @@ mod appnode;
 mod eventctlnode;
 mod eventdb;
 mod qxchange;
+mod qxeventconfig;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -202,6 +203,7 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         db_pool,
         open_events: Default::default(),
         shutdown_sender: Some(shutdown_sender),
+        event_records: Default::default(),
     }));
     let config = GLOBAL_CONFIG
         .get()
