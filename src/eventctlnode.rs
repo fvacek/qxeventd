@@ -1,4 +1,5 @@
 
+use anyhow::anyhow;
 use log::warn;
 use qxsql::sql::{EXEC_PARAMS, EXEC_RESULT, QUERY_PARAMS, QUERY_RESULT, READ_PARAMS, READ_RESULT};
 use qxsql::{QueryAndParams, QxSqlApi, QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecReadParam, RecUpdateParam};
@@ -126,9 +127,9 @@ const QX_API_TOKEN: &str = "qx_api_token";
 struct UpdateEventRecordParams(i64, EventRecordChange);
 impl_rpcvalue_conversions!(UpdateEventRecordParams);
 
-async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
-    // log::info!("escalate_event_owner_rights, method_name: {method_name}, event id: {event_id:?}");
-    if let Some(event_id) = event_id && let Ok(event_record) = app_state.write().await.event_record(event_id).await {
+async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: EventId, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
+    log::info!("escalate_event_owner_rights, method_name: {method_name}, event id: {event_id:?}");
+    if let Ok(event_record) = app_state.write().await.event_record(event_id).await {
         let api_token = rq.meta().get(QX_API_TOKEN).map(|v| v.as_str());
         let user_id = sanitize_user_id(rq);
         // info!("event_id: {event_id}, user_id: {user_id:?}");
@@ -184,8 +185,8 @@ pub(crate) async fn request_handler(
                 }),
                 Method::Other(m) => {
                     let method = m.method();
-                    let read_event_record_event_id = |rq: &RpcMessage| rq.param().map(|p| p.as_int());
-                    let update_event_record_event_id = |rq: &RpcMessage| UpdateEventRecordParams::try_from(rq.param()).map(|p| p.0).ok();
+                    let get_read_event_record_event_id = |rq: &RpcMessage| rq.param().map(|p| p.as_int()).ok_or_else(|| anyhow!("Event id must be set"));
+                    let get_update_event_record_event_id = |rq: &RpcMessage| UpdateEventRecordParams::try_from(rq.param()).map(|p| p.0);
                     match method {
                         METH_CREATE_EVENT => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                             let owner = rq.param().unwrap_or_default().as_str().to_owned();
@@ -207,16 +208,15 @@ pub(crate) async fn request_handler(
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_shv_path)]))
                         }),
-                        METH_READ_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), read_event_record_event_id(&rq), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
+                        METH_READ_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), get_read_event_record_event_id(&rq)?, method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                             let event_id = rq.param().unwrap_or_default().as_int();
                             let res = app_state.read().await.load_event_record(event_id).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),
-                        METH_UPDATE_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), update_event_record_event_id(&rq), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
+                        METH_UPDATE_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), get_update_event_record_event_id(&rq)?, method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                             let p = UpdateEventRecordParams::try_from(rq.param())
                                 .map_err(anyhow_to_rpc_error)?;
                             let (event_id, change) = (p.0, p.1);
-                            // info!("update_event_record, event_id: {event_id:?}, change: {change:?}");
                             let res = app_state.write().await.update_event_record(event_id, change, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(res)
@@ -262,7 +262,7 @@ pub(crate) async fn request_handler(
                             res.map_err(anyhow_to_rpc_error)
                         }),
                         METH_EVENT_UPDATE_LATE_ENTRY => {
-                            let methods = escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_NODE_METHODS).await;
+                            let methods = escalate_event_owner_rights(&rq, app_state.clone(), event_id, method.to_owned(), EVENTCTL_NODE_METHODS).await;
                             m.resolve(methods, async move || {
                                 let Some(user_id) = sanitize_user_id(&rq).map(str::to_string) else {
                                     return Err(str_to_rpc_error("user id is required"));
@@ -323,7 +323,7 @@ pub(crate) async fn request_handler(
                 Method::Other(m) => {
                     let method = m.method();
                     match method {
-                        METH_SQL_QUERY => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
+                        METH_SQL_QUERY => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), event_id, method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
                                 .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
@@ -332,7 +332,7 @@ pub(crate) async fn request_handler(
                                 .map_err(anyhow_to_rpc_error)
                         }),
 
-                        METH_SQL_EXEC => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
+                        METH_SQL_EXEC => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), event_id, method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
                                 .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
@@ -340,7 +340,7 @@ pub(crate) async fn request_handler(
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
                                 .map_err(anyhow_to_rpc_error)
                         }),
-                        METH_SQL_CREATE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
+                        METH_SQL_CREATE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), event_id, method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let param = RecInsertParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
@@ -348,7 +348,7 @@ pub(crate) async fn request_handler(
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
                                 .map_err(anyhow_to_rpc_error)
                         }),
-                        METH_SQL_READ => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
+                        METH_SQL_READ => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), event_id, method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let param = RecReadParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(string_to_rpc_error)?;
                             let fields = qxsql::string_list_to_ref_vec(&param.fields);
@@ -357,7 +357,7 @@ pub(crate) async fn request_handler(
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
                                 .map_err(anyhow_to_rpc_error)
                         }),
-                        METH_SQL_UPDATE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
+                        METH_SQL_UPDATE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), event_id, method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let param = RecUpdateParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
@@ -365,7 +365,7 @@ pub(crate) async fn request_handler(
                                 .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
                                 .map_err(anyhow_to_rpc_error)
                         }),
-                        METH_SQL_DELETE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
+                        METH_SQL_DELETE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), event_id, method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
                             let param = RecDeleteParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(string_to_rpc_error)?;
                             let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
@@ -403,5 +403,22 @@ impl TryFrom<&RpcValue> for LateEntryParams {
     type Error = String;
     fn try_from(value: &RpcValue) -> Result<Self, Self::Error> {
         from_rpcvalue(value).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_event_record_params_try_from_rpcvalue() {
+        let value = RpcValue::from_cpon(r#"[2,{"api_token":"gubosinori","config":{"members":{"member@example.com":"Organizer"}},"stage":3}]"#).unwrap();
+        let params = UpdateEventRecordParams::try_from(&value).unwrap();
+
+        assert_eq!(params.0, 2);
+        assert_eq!(params.1.stage, Some(3));
+        assert_eq!(params.1.api_token.as_deref(), Some("gubosinori"));
+        let config = params.1.config.unwrap();
+        assert!(matches!(config.members.get("member@example.com"), Some(Role::Organizer)));
     }
 }

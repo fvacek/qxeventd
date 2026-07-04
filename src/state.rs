@@ -376,6 +376,8 @@ pub(crate) struct EventRecordChange {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub is_local: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<QxEventConfig>,
 }
 
 impl EventRecordChange {
@@ -399,6 +401,9 @@ impl EventRecordChange {
         if let Some(is_local) = &self.is_local {
             record.insert("is_local".to_string(), (*is_local).into());
         }
+        if let Some(config) = &self.config {
+            record.insert("config".to_string(), serde_json::to_string(config).expect("config to json should not fail").into());
+        }
         record
     }
     pub fn is_empty(&self) -> bool {
@@ -408,6 +413,7 @@ impl EventRecordChange {
             && self.owner.is_none()
             && self.api_token.is_none()
             && self.is_local.is_none()
+            && self.config.is_none()
     }
 }
 
