@@ -63,6 +63,8 @@ pub struct LateEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub siid: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starttimems: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
