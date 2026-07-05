@@ -56,7 +56,7 @@ impl State {
 
     pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
         let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
-        let records = qxsql.list_records("events", Some(vec!["id", "name", "date", "owner", "is_local"]), None, None).await?;
+        let records = qxsql.list_records("events", Some(vec!["id", "name", "stage", "date", "owner", "is_local"]), None, None).await?;
         Ok(records)
     }
 
