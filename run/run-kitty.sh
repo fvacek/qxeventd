@@ -35,10 +35,10 @@ open_in_kitty() {
 }
 
 echo "Starting shvbroker"
-open_in_kitty shvbroker "${SHVBROKER_BIN} --config $QXEVENTD_DIR/run/etc/shvbroker/config.yaml --data-directory $QX_DATA_DIR/shvbroker \n"
+open_in_kitty shvbroker "${SHVBROKER_BIN} --config $QX_DATA_DIR/shvbroker/config.yaml --data-directory $QX_DATA_DIR/shvbroker \n"
 sleep 1
 
 echo "Starting qxeventd"
-open_in_kitty qxeventd "${QXEVENTD_BIN} --config $QXEVENTD_DIR/run/etc/qxeventd/config.yaml --data-directory $QX_DATA_DIR/event\n"
+open_in_kitty qxeventd "${QXEVENTD_BIN} --config $QX_DATA_DIR/qxeventd/config.yaml --data-directory $QX_DATA_DIR/qxeventd/db\n"
 
 kitty @ --to "$TUNNEL" close-window --match id:1
