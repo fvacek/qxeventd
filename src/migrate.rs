@@ -16,6 +16,9 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up(
         "ALTER TABLE events ADD COLUMN config TEXT",
     ),
+    M::up(
+        "ALTER TABLE events RENAME COLUMN stage TO stage_count",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

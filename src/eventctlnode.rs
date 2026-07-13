@@ -437,7 +437,7 @@ mod tests {
         let params = UpdateEventRecordParams::try_from(&value).unwrap();
 
         assert_eq!(params.0, 2);
-        assert_eq!(params.1.stage, Some(3));
+        assert_eq!(params.1.stage_count, Some(3));
         assert_eq!(params.1.api_token.as_deref(), Some("gubosinori"));
         let config = params.1.config.unwrap();
         assert!(matches!(config.members.get("member@example.com"), Some(Role::Organizer)));

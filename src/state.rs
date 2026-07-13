@@ -56,7 +56,7 @@ impl State {
 
     pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
         let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
-        let records = qxsql.list_records("events", Some(vec!["id", "name", "stage", "date", "owner", "is_local"]), None, None).await?;
+        let records = qxsql.list_records("events", Some(vec!["id", "name", "stage_count", "date", "owner", "is_local"]), None, None).await?;
         Ok(records)
     }
 
@@ -72,7 +72,7 @@ impl State {
             owner: owner.clone(),
             api_token: api_token.clone(),
             id: None,
-            stage: default_stage(),
+            stage_count: default_stage_count(),
             config: QxEventConfig::default(),
         };
         let rec = event_data.to_record()?;
@@ -274,8 +274,18 @@ async fn update_event_record_from_event_config(app_state: SharedAppState, client
                             .and_then(|v| v.parse::<i64>().ok());
                         if let Some(stage) = stage {
                             current_stage = stage;
-                            if event_record.stage != stage {
-                                changes.stage = Some(stage);
+                            if event_record.stage_count != stage {
+                                changes.stage_count = Some(stage);
+                            }
+                        }
+                    }
+                    "event.stageCount" => {
+                        let stage_count = result.value(row, 1).and_then(|v| v.as_str())
+                            .and_then(|v| v.parse::<i64>().ok());
+                        if let Some(stage_count) = stage_count {
+                            current_stage = stage_count;
+                            if event_record.stage_count != stage_count {
+                                changes.stage_count = Some(stage_count);
                             }
                         }
                     }
@@ -315,15 +325,15 @@ pub(crate) struct EventRecord {
     pub id: Option<i64>,
     pub name: String,
     pub date: DateTime<chrono::FixedOffset>,
-    #[serde(default = "default_stage")]
-    pub stage: i64,
+    #[serde(default = "default_stage_count")]
+    pub stage_count: i64,
     pub owner: String,
     pub api_token: String,
     pub config: QxEventConfig,
     pub is_local: bool,
 }
 
-fn default_stage() -> i64 { 1 }
+fn default_stage_count() -> i64 { 1 }
 
 impl EventRecord {
     fn from_record(record: &Record) -> anyhow::Result<Self> {
@@ -332,7 +342,7 @@ impl EventRecord {
             id: get_field("id")?.to_int(),
             name: get_field("name")?.as_str().unwrap_or_default().to_string(),
             date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Local::now().fixed_offset()),
-            stage: get_field("stage")?.to_int().unwrap_or(default_stage()),
+            stage_count: get_field("stage_count")?.to_int().unwrap_or(default_stage_count()),
             owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
             is_local: get_field("is_local")?.to_bool(),
             api_token: get_field("api_token")?.as_str().unwrap_or_default().to_string(),
@@ -345,7 +355,7 @@ impl EventRecord {
         let mut record = Record::new();
         record.insert("name".to_string(), self.name.clone().into());
         record.insert("date".to_string(), self.date.into());
-        record.insert("stage".to_string(), self.stage.into());
+        record.insert("stage_count".to_string(), self.stage_count.into());
         record.insert("owner".to_string(), self.owner.clone().into());
         record.insert("api_token".to_string(), self.api_token.clone().into());
         record.insert("config".to_string(), serde_json::to_string(&self.config)?.into());
@@ -366,7 +376,7 @@ pub(crate) struct EventRecordChange {
     #[serde(default)]
     pub date: Option<DateTime<chrono::FixedOffset>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stage: Option<i64>,
+    pub stage_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub owner: Option<String>,
@@ -389,8 +399,8 @@ impl EventRecordChange {
         if let Some(date) = &self.date {
             record.insert("date".to_string(), (*date).into());
         }
-        if let Some(stage) = &self.stage {
-            record.insert("stage".to_string(), (*stage).into());
+        if let Some(stage) = &self.stage_count {
+            record.insert("stage_count".to_string(), (*stage).into());
         }
         if let Some(owner) = &self.owner {
             record.insert("owner".to_string(), owner.clone().into());
@@ -409,7 +419,7 @@ impl EventRecordChange {
     pub fn is_empty(&self) -> bool {
         self.name.is_none()
             && self.date.is_none()
-            && self.stage.is_none()
+            && self.stage_count.is_none()
             && self.owner.is_none()
             && self.api_token.is_none()
             && self.is_local.is_none()

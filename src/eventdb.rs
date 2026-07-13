@@ -42,6 +42,7 @@ pub async fn migrate_db(db_file: &str, event_data: &EventRecord, client_command_
     if !db_file_exists {
         let config_entries = [
             ("event.name", event_data.name.clone()),
+            ("event.stage_count", event_data.stage_count.to_string()),
             ("event.date", event_data.date.format("%Y-%m-%d").to_string()),
             ("event.time", event_data.date.format("%H:%M:%S").to_string()),
         ];

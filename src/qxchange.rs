@@ -66,6 +66,8 @@ pub struct LateEntry {
     pub starttimems: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paid: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
