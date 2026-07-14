@@ -290,7 +290,7 @@ pub(crate) async fn request_handler(
                                 };
                                 let params = LateEntryParams::try_from(rq.param().unwrap_or_default())
                                     .map_err(string_to_rpc_error)?;
-                                let current_stage = app_state.read().await.opened_event_status(event_id).map_err(anyhow_to_rpc_error)?.current_stage;
+                                app_state.read().await.opened_event_status(event_id).map_err(anyhow_to_rpc_error)?;
                                 let qxsql = EventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
                                 if let Some(qxchange_id) = params.change_id {
                                     if params.late_entry.is_none() {
@@ -314,7 +314,7 @@ pub(crate) async fn request_handler(
                                         return Err(str_to_rpc_error("Run or Class ID is required"));
                                     };
                                     let qxchange = QxChangeRecord {
-                                        stage_id: Some(current_stage),
+                                        stage_id: Some(params.stage_id),
                                         foreign_table: Some(foreign_table),
                                         foreign_id: Some(foreign_id),
                                         data_type: Some("LateEntry".to_string()),
@@ -415,6 +415,7 @@ async fn list_events(app_state: SharedAppState) -> Vec<String> {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LateEntryParams {
+    stage_id: i64,
     change_id: Option<i64>,
     late_entry: Option<LateEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

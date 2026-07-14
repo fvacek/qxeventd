@@ -115,7 +115,6 @@ impl State {
                     is_local: ectl.local_db.is_some(),
                     open_at: ectl.open_at.with_timezone(&Local).fixed_offset(),
                     expires_at: ectl.expires_at().with_timezone(&Local).fixed_offset(),
-                    current_stage: ectl.current_stage,
                 }
             })
     }
@@ -222,13 +221,11 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
 
     let now = chrono::Utc::now();
     app_state.write().await.open_events.insert(event_id, OpenEventCtl {
-        current_stage: 1,
         local_db,
         open_at: now,
         touched_at: now,
     });
-    let current_stage = update_event_record_from_event_config(app_state.clone(), rpc_client.clone(), event_id, &event_record).await?;
-    app_state.write().await.open_events.get_mut(&event_id).map(|e| e.current_stage = current_stage);
+    update_event_record_from_event_config(app_state.clone(), rpc_client.clone(), event_id, &event_record).await?;
 
     let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
     rpc_client.send_message(message)
@@ -260,59 +257,65 @@ async fn forward_remote_db_recchng_signals(event_id: EventId, mut subscriber: sh
     info!("SQL recchng {event_id} subscription stream closed");
 }
 
-async fn update_event_record_from_event_config(app_state: SharedAppState, client_command_sender: ClientCommandSender, event_id: i64, event_record: &EventRecord) -> anyhow::Result<i64> {
-    let event_sql = EventSqlApi::new(event_id, app_state.clone(), client_command_sender.clone());
-    let result = event_sql.query("SELECT ckey, cvalue FROM config WHERE ckey IN ('event.currentStageId', 'event.name')", None).await?;
+async fn update_event_record_from_event_config(app_state: SharedAppState, client_command_sender: ClientCommandSender, event_id: i64, event_record: &EventRecord) -> anyhow::Result<()> {
     let mut changes = EventRecordChange::default();
-    let mut current_stage = 1;
-    for row in 0..result.row_count() {
-        if let Some(key) = result.value(row, 0) {
-            if let Some(key) = key.as_str() {
-                match key {
-                    "event.currentStageId" => {
-                        let stage = result.value(row, 1).and_then(|v| v.as_str())
-                            .and_then(|v| v.parse::<i64>().ok());
-                        if let Some(stage) = stage {
-                            current_stage = stage;
-                            if event_record.stage_count != stage {
-                                changes.stage_count = Some(stage);
+    let event_sql = EventSqlApi::new(event_id, app_state.clone(), client_command_sender.clone());
+    {
+        let result = event_sql.query("SELECT ckey, cvalue FROM config WHERE ckey LIKE 'event.%'", None).await?;
+        for row in 0..result.row_count() {
+            if let Some(key) = result.value(row, 0) {
+                if let Some(key) = key.as_str() {
+                    match key {
+                        "event.stageCount" => {
+                            let stage_count = result.value(row, 1).and_then(|v| v.as_str())
+                                .and_then(|v| v.parse::<i64>().ok());
+                            if let Some(stage_count) = stage_count {
+                                if event_record.stage_count != stage_count {
+                                    log::debug!("Updating event {event_id} stage count from {} to {stage_count}", event_record.stage_count);
+                                    changes.stage_count = Some(stage_count);
+                                }
                             }
                         }
-                    }
-                    "event.stageCount" => {
-                        let stage_count = result.value(row, 1).and_then(|v| v.as_str())
-                            .and_then(|v| v.parse::<i64>().ok());
-                        if let Some(stage_count) = stage_count {
-                            current_stage = stage_count;
-                            if event_record.stage_count != stage_count {
-                                changes.stage_count = Some(stage_count);
+                        "event.name" => {
+                            let event_name = result.value(row, 1).and_then(|v| v.as_str());
+                            if let Some(event_name) = event_name && event_record.name != event_name {
+                                log::debug!("Updating event {event_id} name from '{}' to '{event_name}'", event_record.name);
+                                changes.name = Some(event_name.to_string());
                             }
                         }
-                    }
-                    "event.name" => {
-                        let event_name = result.value(row, 1).and_then(|v| v.as_str());
-                        if let Some(event_name) = event_name && event_record.name != event_name {
-                            changes.name = Some(event_name.to_string());
+                        _ => {
+                            // skip other keys
                         }
                     }
-                    _ => {
-                        // skip other keys
+
+                }
+            }
+        }
+    }
+    {
+        let result = event_sql.query("SELECT startdatetime FROM stages WHERE id=1", None).await?;
+        for row in 0..result.row_count() {
+            if let Some(dt) = result.value(row, 0) {
+                if let Some(dt) = dt.as_str() {
+                    if let Some(dt) = chrono::DateTime::parse_from_rfc3339(dt).ok() {
+                        if event_record.date != dt {
+                            log::debug!("Updating event {event_id} date from {} to {dt}", event_record.date);
+                            changes.date = Some(dt);
+                        }
                     }
                 }
-
             }
         }
     }
     if !changes.is_empty() {
+        log::debug!("Updating event record for event {event_id}: {changes:?}");
         app_state.write().await.update_event_record(event_id, changes, client_command_sender).await?;
-        info!("Updated event record for event {event_id}");
     }
-    Ok(current_stage)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventStatus {
-    pub current_stage: i64,
     pub is_local: bool,
     pub open_at: DateTime<chrono::FixedOffset>,
     pub expires_at: DateTime<chrono::FixedOffset>,
@@ -428,7 +431,6 @@ impl EventRecordChange {
 }
 
 pub(crate) struct OpenEventCtl {
-    pub current_stage: i64,
     pub local_db: Option<async_sqlite::Pool>,
     pub open_at: DateTime<chrono::Utc>,
     pub touched_at: DateTime<chrono::Utc>,
