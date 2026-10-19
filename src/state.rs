@@ -7,7 +7,7 @@ use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Local;
 use log::*;
-use qxsql::{DbValue, QxSqlApiRecChng, RecChng, RecOp};
+use qxsql::{QxSqlApiRecChng, RecChng, RecOp};
 use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
@@ -236,7 +236,10 @@ async fn process_remote_db_recchng_signals(app_state: SharedAppState, event_id: 
                     if let Some(path) = message.shv_path() && path == &remote_sql_path {
                         info!("Received event {event_id} subscription message: {:?}", message.shv_path());
                         match rechng_from_rpcvalue(message.param()) {
-                            Ok(recchng) => reply_remote_db_recchng(app_state.clone(), event_id, &recchng, rpc_client.clone()).await,
+                            Ok(recchng) => match reply_remote_db_recchng(app_state.clone(), event_id, &recchng, rpc_client.clone()).await {
+                                Ok(()) => {}
+                                Err(err) => error!("Failed to reply remote db recchng for event {event_id}: {err}"),
+                            },
                             Err(err) => {
                                 error!("Failed to decode event {event_id} recchng signal: {err}");
                                 continue;
@@ -257,61 +260,32 @@ async fn process_remote_db_recchng_signals(app_state: SharedAppState, event_id: 
     info!("SQL recchng {event_id} subscription stream closed");
 }
 
-async fn reply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) {
+async fn reply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) -> anyhow::Result<()> {
     let sql_api = EventSqlApi::new(event_id, app_state, rpc_client);
 
-    let result = match &recchng.op {
+    match &recchng.op {
         RecOp::Insert => match recchng.record.as_ref() {
             Some(record) => {
-                let mut record = record.clone();
-                record.insert("id".to_string(), DbValue::Int(recchng.id));
-                sql_api.create_record(&recchng.table, &record).await.map(|id| {
-                    if id != recchng.id {
-                        warn!(
-                            "Remote insert for {} returned local id {}, expected {}",
-                            recchng.table, id, recchng.id
-                        );
-                    }
-                })
+                sql_api.create_record_with_recchng(&recchng.table, &record, recchng.issuer.clone()).await?;
+                Ok(())
             }
             None => Err(anyhow!("insert recchng has no record")),
         },
         RecOp::Update => match recchng.record.as_ref() {
-            Some(record) => sql_api
-                .update_record(&recchng.table, recchng.id, record)
-                .await
-                .and_then(|updated| {
-                    if updated {
-                        Ok(())
-                    } else {
-                        Err(anyhow!("record {} does not exist", recchng.id))
-                    }
-                }),
+            Some(record) => {
+                sql_api
+                    .update_record_with_recchng(&recchng.table, recchng.id, &record, recchng.issuer.clone())
+                    .await?;
+                Ok(())
+            }
             None => Err(anyhow!("update recchng has no record")),
         },
-        RecOp::Delete => sql_api
-            .delete_record(&recchng.table, recchng.id)
-            .await
-            .and_then(|deleted| {
-                if deleted {
-                    Ok(())
-                } else {
-                    Err(anyhow!("record {} does not exist", recchng.id))
-                }
-            }),
-    };
-
-    match result {
-        Ok(()) => info!(
-            "Replayed remote db recchng: {} {} {:?}",
-            recchng.table,
-            recchng.id,
-            recchng.op
-        ),
-        Err(err) => error!(
-            "Failed to replay remote db recchng for {} {}: {err}",
-            recchng.table, recchng.id
-        ),
+        RecOp::Delete => {
+            sql_api
+                .delete_record_with_recchng(&recchng.table, recchng.id, recchng.issuer.clone())
+                .await?;
+            Ok(())
+        }
     }
 }
 
@@ -429,15 +403,15 @@ impl EventRecordChange {
         }
         record
     }
-    pub fn is_empty(&self) -> bool {
-        self.name.is_none()
-            && self.date.is_none()
-            && self.stage_count.is_none()
-            && self.owner.is_none()
-            && self.api_token.is_none()
-            && self.master_db_mode.is_none()
-            && self.config.is_none()
-    }
+    // pub fn is_empty(&self) -> bool {
+    //     self.name.is_none()
+    //         && self.date.is_none()
+    //         && self.stage_count.is_none()
+    //         && self.owner.is_none()
+    //         && self.api_token.is_none()
+    //         && self.master_db_mode.is_none()
+    //         && self.config.is_none()
+    // }
 }
 
 pub(crate) struct OpenEventCtl {

@@ -1,7 +1,7 @@
 
 use log::warn;
-use qxsql::sql::{EXEC_PARAMS, EXEC_RESULT, QUERY_PARAMS, QUERY_RESULT, READ_PARAMS, READ_RESULT};
-use serde::{Deserialize, Serialize};
+use serde::{Serialize};
+use serde::Deserialize;
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
 use shvproto::{RpcValue, from_rpcvalue, to_rpcvalue};

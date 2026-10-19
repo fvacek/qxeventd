@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use async_sqlite::Pool;
 use async_trait::async_trait;
-use qxsql::QxSqlApiRecChng;
 use qxsql::sql::{ExecResult, QueryResult, RecChng};
 use qxsql::sql::Record;
 use shvclient::ClientCommandSender;
@@ -27,15 +26,15 @@ impl EventSqlApi {
             .map(|e| e.db.clone())
             .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
     }
-    pub async fn create_record_event(&self, table: &str, record: &Record, issuer: Option<String>) -> anyhow::Result<i64> {
-            return self.create_record_with_recchng(table, record, issuer).await;
-    }
-    pub async fn update_record_event(&self, table: &str, id: i64, record: &Record, issuer: Option<String>) -> anyhow::Result<bool> {
-        return self.update_record_with_recchng(table, id, record, issuer).await;
-    }
-    pub async fn delete_record_event(&self, table: &str, id: i64, issuer: Option<String>) -> anyhow::Result<bool> {
-        return self.delete_record_with_recchng(table, id, issuer).await;
-    }
+    // pub async fn create_record_event(&self, table: &str, record: &Record, issuer: Option<String>) -> anyhow::Result<i64> {
+    //         return self.create_record_with_recchng(table, record, issuer).await;
+    // }
+    // pub async fn update_record_event(&self, table: &str, id: i64, record: &Record, issuer: Option<String>) -> anyhow::Result<bool> {
+    //     return self.update_record_with_recchng(table, id, record, issuer).await;
+    // }
+    // pub async fn delete_record_event(&self, table: &str, id: i64, issuer: Option<String>) -> anyhow::Result<bool> {
+    //     return self.delete_record_with_recchng(table, id, issuer).await;
+    // }
 }
 
 #[async_trait]
