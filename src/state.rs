@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::{collections::BTreeMap, sync::Arc};
 
+use futures::StreamExt;
 use anyhow::bail;
 use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Local;
-use log::info;
-use qxsql::QxSqlApiRecChng;
+use log::*;
+use qxsql::{DbValue, QxSqlApiRecChng, RecChng, RecOp};
 use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
@@ -14,12 +15,15 @@ use shvclient::ClientCommandSender;
 
 use shvproto::RpcValue;
 use shvproto::make_map;
-use shvrpc::RpcMessage;
+use shvrpc::rpc::ShvRI;
+use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use smol::{lock::RwLock, channel};
+use shvrpc::util::join_path;
 
 use crate::appsqlapi::AppSqlApi;
 use crate::eventdb::migrate_db;
-use crate::generate_api_token;
+use crate::eventsqlapi::EventSqlApi;
+use crate::{generate_api_token, string_to_rpc_error};
 use crate::global_config;
 use crate::qxeventconfig::QxEventConfig;
 
@@ -198,7 +202,17 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
     let event_record = app_state.read().await.load_event_record(event_id).await?;
     let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
     let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
+    {
+        let _: () = rpc_client.call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>).await
+            .map_err(|_| anyhow!("Failed to ping DB service."))?;
 
+        let ri = ShvRI::from_path_method_signal(&remote_event_sql_path(event_id), "", Some("recchng"))
+            .map_err(|e| string_to_rpc_error(e))?;
+        info!("Subscribing SQL recchng: {ri:?}");
+        let subscriber = rpc_client.subscribe(ri).await
+            .map_err(|e| anyhow!("Failed to subscribe to remote event: {}", e))?;
+        smol::spawn(process_remote_db_recchng_signals(app_state.clone(), event_id, subscriber, rpc_client.clone())).detach();
+    }
     let now = chrono::Utc::now();
     app_state.write().await.open_events.insert(event_id, OpenEventCtl {
         db: pool,
@@ -211,6 +225,100 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
         .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
     Ok(event_shv_path)
+}
+
+async fn process_remote_db_recchng_signals(app_state: SharedAppState, event_id: EventId, mut subscriber: shvclient::clientapi::Subscriber, rpc_client: ClientCommandSender) {
+    while let Some(frame) = subscriber.next().await {
+        match frame.to_rpcmesage() {
+            Ok(message) => {
+                if message.is_signal() && message.method() == Some("recchng") {
+                    let remote_sql_path = remote_event_sql_path(event_id);
+                    if let Some(path) = message.shv_path() && path == &remote_sql_path {
+                        info!("Received event {event_id} subscription message: {:?}", message.shv_path());
+                        match rechng_from_rpcvalue(message.param()) {
+                            Ok(recchng) => reply_remote_db_recchng(app_state.clone(), event_id, &recchng, rpc_client.clone()).await,
+                            Err(err) => {
+                                error!("Failed to decode event {event_id} recchng signal: {err}");
+                                continue;
+                            }
+                        }
+                        let mut signal = message;
+                        let event_sql_path = format!("eventctl/{event_id}/sql");
+                        signal.set_shvpath(&event_sql_path);
+                        if let Err(e) = rpc_client.send_message(signal) {
+                            error!("Failed to send event {event_id} recchng signal: {e}");
+                        }
+                    }
+                }
+            },
+            Err(err) => error!("Failed to decode event {event_id} subscription message: {err}"),
+        }
+    }
+    info!("SQL recchng {event_id} subscription stream closed");
+}
+
+async fn reply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) {
+    let sql_api = EventSqlApi::new(event_id, app_state, rpc_client);
+
+    let result = match &recchng.op {
+        RecOp::Insert => match recchng.record.as_ref() {
+            Some(record) => {
+                let mut record = record.clone();
+                record.insert("id".to_string(), DbValue::Int(recchng.id));
+                sql_api.create_record(&recchng.table, &record).await.map(|id| {
+                    if id != recchng.id {
+                        warn!(
+                            "Remote insert for {} returned local id {}, expected {}",
+                            recchng.table, id, recchng.id
+                        );
+                    }
+                })
+            }
+            None => Err(anyhow!("insert recchng has no record")),
+        },
+        RecOp::Update => match recchng.record.as_ref() {
+            Some(record) => sql_api
+                .update_record(&recchng.table, recchng.id, record)
+                .await
+                .and_then(|updated| {
+                    if updated {
+                        Ok(())
+                    } else {
+                        Err(anyhow!("record {} does not exist", recchng.id))
+                    }
+                }),
+            None => Err(anyhow!("update recchng has no record")),
+        },
+        RecOp::Delete => sql_api
+            .delete_record(&recchng.table, recchng.id)
+            .await
+            .and_then(|deleted| {
+                if deleted {
+                    Ok(())
+                } else {
+                    Err(anyhow!("record {} does not exist", recchng.id))
+                }
+            }),
+    };
+
+    match result {
+        Ok(()) => info!(
+            "Replayed remote db recchng: {} {} {:?}",
+            recchng.table,
+            recchng.id,
+            recchng.op
+        ),
+        Err(err) => error!(
+            "Failed to replay remote db recchng for {} {}: {err}",
+            recchng.table, recchng.id
+        ),
+    }
+}
+
+fn rechng_from_rpcvalue(value: Option<&RpcValue>) -> anyhow::Result<RecChng> {
+    let value = value.ok_or_else(|| anyhow!("recchng signal has no parameter"))?;
+    shvproto::from_rpcvalue(value)
+        .map_err(|err| anyhow!("invalid recchng value: {err}"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,4 +454,12 @@ impl OpenEventCtl {
 
 pub fn event_api_shv_path(event_id: EventId) -> String {
     format!("{}/eventctl/{event_id}", global_config().client.mount.as_deref().unwrap_or_default())
+}
+
+pub fn remote_event_mount_point(event_id: EventId) -> String {
+    format!("{}/{event_id}", global_config().remote_events_mount_point)
+}
+
+pub fn remote_event_sql_path(event_id: EventId) -> String {
+    format!("{}/sql", remote_event_mount_point(event_id))
 }
