@@ -1,15 +1,13 @@
 
 use log::warn;
 use qxsql::sql::{EXEC_PARAMS, EXEC_RESULT, QUERY_PARAMS, QUERY_RESULT, READ_PARAMS, READ_RESULT};
-use qxsql::{QueryAndParams, QxSqlApi, QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecReadParam, RecUpdateParam};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
 use shvproto::{RpcValue, from_rpcvalue, to_rpcvalue};
 use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
-use crate::eventsqlapi::EventSqlApi;
-use crate::qxchange::{self, Data, LateEntry, QxChangeRecord};
+use crate::qxchange::LateEntry;
 use crate::qxeventconfig::Role;
 use crate::{anyhow_to_rpc_error, str_to_rpc_error, string_to_rpc_error};
 use crate::state::{open_event, EventId, EventRecordChange, SharedAppState};
@@ -19,17 +17,12 @@ use crate::state::{open_event, EventId, EventRecordChange, SharedAppState};
 enum EventCtlNode {
     Root,
     Event(EventId),
-    EventSql(EventId),
 }
 
 impl EventCtlNode {
     fn from_path(path: &str) -> anyhow::Result<Self> {
         if path.is_empty() {
             return Ok(Self::Root);
-        }
-        if let Some(prefix) = path.strip_suffix("/sql") {
-            let event_id = prefix.parse::<i64>()?;
-            return Ok(Self::EventSql(event_id));
         }
         let event_id = path.parse::<i64>()?;
         Ok(Self::Event(event_id))
@@ -92,27 +85,6 @@ const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
     ),
     MetaMethod::new_static(
         METH_EVENT_CLOSE, Flags::None, AccessLevel::Read, "",  "", &[], "",
-    ),
-];
-
-const METH_SQL_QUERY: &str = "query";
-const METH_SQL_EXEC: &str = "exec";
-const METH_SQL_CREATE: &str = "create";
-const METH_SQL_READ: &str = "read";
-const METH_SQL_UPDATE: &str = "update";
-const METH_SQL_DELETE: &str = "delete";
-
-const EVENTCTL_SQL_NODE_METHODS: &[MetaMethod] = &[
-    META_METHOD_DIR,
-    META_METHOD_LS,
-    MetaMethod::new_static(
-        METH_SQL_QUERY, Flags::None, AccessLevel::Read, QUERY_PARAMS, QUERY_RESULT, &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_SQL_EXEC, Flags::None, AccessLevel::Write, EXEC_PARAMS, EXEC_RESULT, &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_SQL_READ, Flags::None, AccessLevel::Read, READ_PARAMS, READ_RESULT, &[], "",
     ),
 ];
 
@@ -286,113 +258,52 @@ pub(crate) async fn request_handler(
                             let methods = escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_NODE_METHODS).await;
                             m.resolve(methods, async move || {
                                 let Some(user_id) = sanitize_user_id(&rq).map(str::to_string) else {
-                                    return Err(str_to_rpc_error("user id is required"));
+                                    return Err::<RpcValue, _>(str_to_rpc_error("user id is required"));
                                 };
                                 let params = LateEntryParams::try_from(rq.param().unwrap_or_default())
                                     .map_err(string_to_rpc_error)?;
-                                app_state.read().await.opened_event_status(event_id).map_err(anyhow_to_rpc_error)?;
-                                let qxsql = EventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
-                                if let Some(qxchange_id) = params.change_id {
-                                    if params.late_entry.is_none() {
-                                        // delete existing record with no changes
-                                        let ok = qxsql.delete_record_event("qxchanges", qxchange_id, None).await.map_err(anyhow_to_rpc_error)?;
-                                        return Ok(RpcValue::from(ok))
-                                    }
-                                    let qxchange = QxChangeRecord {
-                                        data: params.late_entry.map(|le| Data::LateEntry(le)),
-                                        ..Default::default()
-                                    };
-                                    let ok = qxsql.update_record_event("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
-                                    Ok(RpcValue::from(ok))
-                                } else {
-                                    let (foreign_table, foreign_id) = if let Some(le) = &params.late_entry {
-                                        match le.id {
-                                            qxchange::LateEntryId::RunId(id) => ("runs".to_string(), id),
-                                            qxchange::LateEntryId::ClassId(id) => ("classes".to_string(), id),
-                                        }
-                                    } else {
-                                        return Err(str_to_rpc_error("Run or Class ID is required"));
-                                    };
-                                    let qxchange = QxChangeRecord {
-                                        stage_id: Some(params.stage_id),
-                                        foreign_table: Some(foreign_table),
-                                        foreign_id: Some(foreign_id),
-                                        data_type: Some("LateEntry".to_string()),
-                                        data: params.late_entry.map(|le| Data::LateEntry(le)),
-                                        user_id: Some(user_id),
-                                        status: Some(qxchange::Status::Pending),
-                                        status_message: None,
-                                    };
-                                    let id = qxsql.create_record_event("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
-                                    Ok(RpcValue::from(id))
-                                }
+                                // app_state.read().await.opened_event_status(event_id).map_err(anyhow_to_rpc_error)?;
+                                // let qxsql = EventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
+                                // if let Some(qxchange_id) = params.change_id {
+                                //     if params.late_entry.is_none() {
+                                //         // delete existing record with no changes
+                                //         let ok = qxsql.delete_record_event("qxchanges", qxchange_id, None).await.map_err(anyhow_to_rpc_error)?;
+                                //         return Ok(RpcValue::from(ok))
+                                //     }
+                                //     let qxchange = QxChangeRecord {
+                                //         data: params.late_entry.map(|le| Data::LateEntry(le)),
+                                //         ..Default::default()
+                                //     };
+                                //     let ok = qxsql.update_record_event("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
+                                //     Ok(RpcValue::from(ok))
+                                // } else {
+                                //     let (foreign_table, foreign_id) = if let Some(le) = &params.late_entry {
+                                //         match le.id {
+                                //             qxchange::LateEntryId::RunId(id) => ("runs".to_string(), id),
+                                //             qxchange::LateEntryId::ClassId(id) => ("classes".to_string(), id),
+                                //         }
+                                //     } else {
+                                //         return Err(str_to_rpc_error("Run or Class ID is required"));
+                                //     };
+                                //     let qxchange = QxChangeRecord {
+                                //         stage_id: Some(params.stage_id),
+                                //         foreign_table: Some(foreign_table),
+                                //         foreign_id: Some(foreign_id),
+                                //         data_type: Some("LateEntry".to_string()),
+                                //         data: params.late_entry.map(|le| Data::LateEntry(le)),
+                                //         user_id: Some(user_id),
+                                //         status: Some(qxchange::Status::Pending),
+                                //         status_message: None,
+                                //     };
+                                //     let id = qxsql.create_record_event("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
+                                //     Ok(RpcValue::from(id))
+                                // }
+                                return Err(str_to_rpc_error("NIY"));
                             })
                         },
                         METH_EVENT_CLOSE => m.resolve(EVENTCTL_NODE_METHODS, async move || {
                             let res = app_state.write().await.close_event(event_id, client_cmd_tx.clone()).await;
                             res.map_err(anyhow_to_rpc_error)
-                        }),
-                        _ => err_unresolved_request(),
-                    }
-                }
-            }
-        }
-        EventCtlNode::EventSql(event_id) => {
-            match Method::from_request(&rq) {
-                Method::Dir(dir) => dir.resolve(EVENTCTL_SQL_NODE_METHODS),
-                Method::Ls(ls) => ls.resolve(EVENTCTL_SQL_NODE_METHODS, async move || { Ok(vec![]) }),
-                Method::Other(m) => {
-                    let method = m.method();
-                    match method {
-                        METH_SQL_QUERY => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
-                            let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
-                                .map_err(string_to_rpc_error)?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
-                            sql_api.query(query.query(), query.params()).await
-                                .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
-                                .map_err(anyhow_to_rpc_error)
-                        }),
-
-                        METH_SQL_EXEC => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
-                            let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
-                                .map_err(string_to_rpc_error)?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
-                            sql_api.exec(query.query(), query.params()).await
-                                .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
-                                .map_err(anyhow_to_rpc_error)
-                        }),
-                        METH_SQL_CREATE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
-                            let param = RecInsertParam::try_from(rq.param().unwrap_or_default())
-                                .map_err(string_to_rpc_error)?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
-                            sql_api.create_record_with_recchng(&param.table, &param.record, param.issuer).await
-                                .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
-                                .map_err(anyhow_to_rpc_error)
-                        }),
-                        METH_SQL_READ => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
-                            let param = RecReadParam::try_from(rq.param().unwrap_or_default())
-                                .map_err(string_to_rpc_error)?;
-                            let fields = qxsql::string_list_to_ref_vec(&param.fields);
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
-                            sql_api.read_record(&param.table, param.id, fields).await
-                                .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
-                                .map_err(anyhow_to_rpc_error)
-                        }),
-                        METH_SQL_UPDATE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
-                            let param = RecUpdateParam::try_from(rq.param().unwrap_or_default())
-                                .map_err(string_to_rpc_error)?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
-                            sql_api.update_record_with_recchng(&param.table, param.id, &param.record, param.issuer).await
-                                .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
-                                .map_err(anyhow_to_rpc_error)
-                        }),
-                        METH_SQL_DELETE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_SQL_NODE_METHODS).await, async move || {
-                            let param = RecDeleteParam::try_from(rq.param().unwrap_or_default())
-                                .map_err(string_to_rpc_error)?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx.clone());
-                            sql_api.delete_record_with_recchng(&param.table, param.id, param.issuer).await
-                                .map(|query_result| to_rpcvalue(&query_result).expect("serde should work"))
-                                .map_err(anyhow_to_rpc_error)
                         }),
                         _ => err_unresolved_request(),
                     }

@@ -29,7 +29,6 @@ mod state;
 mod config;
 mod migrate;
 mod appsqlapi;
-mod eventsqlapi;
 mod appnode;
 mod eventctlnode;
 mod eventdb;
@@ -275,6 +274,7 @@ async fn app_task(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn call_rpc_error_to_anyhow(err: CallRpcMethodError) -> anyhow::Error {
     anyhow::anyhow!("{}", err)
 }

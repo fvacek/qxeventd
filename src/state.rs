@@ -5,8 +5,7 @@ use anyhow::bail;
 use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Local;
-use futures::StreamExt;
-use log::{error, info};
+use log::info;
 use qxsql::QxSqlApiRecChng;
 use qxsql::{Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
@@ -16,18 +15,14 @@ use shvclient::ClientCommandSender;
 use shvproto::RpcValue;
 use shvproto::make_map;
 use shvrpc::RpcMessage;
-use shvrpc::RpcMessageMetaTags;
-use shvrpc::rpc::ShvRI;
-use shvrpc::util::join_path;
 use smol::{lock::RwLock, channel};
 
 use crate::appsqlapi::AppSqlApi;
 use crate::eventdb::migrate_db;
-use crate::eventsqlapi::EventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
 use crate::qxeventconfig::QxEventConfig;
-use crate::string_to_rpc_error;
+
 
 pub type EventId = i64;
 
@@ -112,7 +107,7 @@ impl State {
         self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
             .map(|ectl| {
                 EventStatus {
-                    master_db_mode: ectl.local_db.is_some(),
+                    master_db_mode: false,
                     open_at: ectl.open_at.with_timezone(&Local).fixed_offset(),
                     expires_at: ectl.expires_at().with_timezone(&Local).fixed_offset(),
                 }
@@ -201,117 +196,21 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
     }
 
     let event_record = app_state.read().await.load_event_record(event_id).await?;
-    let local_db = if event_record.master_db_mode {
-        let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-        let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
-        Some(pool)
-    } else {
-        // ping child
-        let _: () = rpc_client.call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>).await
-            .map_err(|_| anyhow!("Failed to ping DB service."))?;
-
-        let ri = ShvRI::from_path_method_signal(&remote_event_sql_path(event_id), "", Some("recchng"))
-            .map_err(|e| string_to_rpc_error(e))?;
-        info!("Subscribing SQL recchng: {ri:?}");
-        let subscriber = rpc_client.subscribe(ri).await
-            .map_err(|e| anyhow!("Failed to subscribe to remote event: {}", e))?;
-        smol::spawn(forward_remote_db_recchng_signals(event_id, subscriber, rpc_client.clone())).detach();
-        None
-    };
+    let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
+    let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
 
     let now = chrono::Utc::now();
     app_state.write().await.open_events.insert(event_id, OpenEventCtl {
-        local_db,
+        db: pool,
         open_at: now,
         touched_at: now,
     });
-    update_event_record_from_event_config(app_state.clone(), rpc_client.clone(), event_id, &event_record).await?;
 
     let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
     rpc_client.send_message(message)
         .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
     Ok(event_shv_path)
-}
-
-async fn forward_remote_db_recchng_signals(event_id: EventId, mut subscriber: shvclient::clientapi::Subscriber, rpc_client: ClientCommandSender) {
-    while let Some(frame) = subscriber.next().await {
-        match frame.to_rpcmesage() {
-            Ok(message) => {
-                if message.is_signal() && message.method() == Some("recchng") {
-                    let remote_sql_path = remote_event_sql_path(event_id);
-                    if let Some(path) = message.shv_path() && path == &remote_sql_path {
-                        info!("Received event {event_id} subscription message: {:?}", message.shv_path());
-                        let mut signal = message;
-                        let event_sql_path = format!("eventctl/{event_id}/sql");
-                        signal.set_shvpath(&event_sql_path);
-                        if let Err(e) = rpc_client.send_message(signal) {
-                            error!("Failed to send event {event_id} recchng signal: {e}");
-                        }
-                    }
-                }
-            },
-            Err(err) => error!("Failed to decode event {event_id} subscription message: {err}"),
-        }
-    }
-    info!("SQL recchng {event_id} subscription stream closed");
-}
-
-async fn update_event_record_from_event_config(app_state: SharedAppState, client_command_sender: ClientCommandSender, event_id: i64, event_record: &EventRecord) -> anyhow::Result<()> {
-    let mut changes = EventRecordChange::default();
-    let event_sql = EventSqlApi::new(event_id, app_state.clone(), client_command_sender.clone());
-    {
-        let result = event_sql.query("SELECT ckey, cvalue FROM config WHERE ckey LIKE 'event.%'", None).await?;
-        for row in 0..result.row_count() {
-            if let Some(key) = result.value(row, 0) {
-                if let Some(key) = key.as_str() {
-                    match key {
-                        "event.stageCount" => {
-                            let stage_count = result.value(row, 1).and_then(|v| v.as_str())
-                                .and_then(|v| v.parse::<i64>().ok());
-                            if let Some(stage_count) = stage_count {
-                                if event_record.stage_count != stage_count {
-                                    log::debug!("Updating event {event_id} stage count from {} to {stage_count}", event_record.stage_count);
-                                    changes.stage_count = Some(stage_count);
-                                }
-                            }
-                        }
-                        "event.name" => {
-                            let event_name = result.value(row, 1).and_then(|v| v.as_str());
-                            if let Some(event_name) = event_name && event_record.name != event_name {
-                                log::debug!("Updating event {event_id} name from '{}' to '{event_name}'", event_record.name);
-                                changes.name = Some(event_name.to_string());
-                            }
-                        }
-                        _ => {
-                            // skip other keys
-                        }
-                    }
-
-                }
-            }
-        }
-    }
-    {
-        let result = event_sql.query("SELECT startdatetime FROM stages WHERE id=1", None).await?;
-        for row in 0..result.row_count() {
-            if let Some(dt) = result.value(row, 0) {
-                if let Some(dt) = dt.as_str() {
-                    if let Some(dt) = chrono::DateTime::parse_from_rfc3339(dt).ok() {
-                        if event_record.date != dt {
-                            log::debug!("Updating event {event_id} date from {} to {dt}", event_record.date);
-                            changes.date = Some(dt);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if !changes.is_empty() {
-        log::debug!("Updating event record for event {event_id}: {changes:?}");
-        app_state.write().await.update_event_record(event_id, changes, client_command_sender).await?;
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -434,7 +333,7 @@ impl EventRecordChange {
 }
 
 pub(crate) struct OpenEventCtl {
-    pub local_db: Option<async_sqlite::Pool>,
+    pub db: async_sqlite::Pool,
     pub open_at: DateTime<chrono::Utc>,
     pub touched_at: DateTime<chrono::Utc>,
 }
@@ -447,12 +346,4 @@ impl OpenEventCtl {
 
 pub fn event_api_shv_path(event_id: EventId) -> String {
     format!("{}/eventctl/{event_id}", global_config().client.mount.as_deref().unwrap_or_default())
-}
-
-pub fn remote_event_mount_point(event_id: EventId) -> String {
-    format!("{}/{event_id}", global_config().remote_events_mount_point)
-}
-
-pub fn remote_event_sql_path(event_id: EventId) -> String {
-    format!("{}/sql", remote_event_mount_point(event_id))
 }
