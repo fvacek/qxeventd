@@ -245,12 +245,6 @@ async fn process_remote_db_recchng_signals(app_state: SharedAppState, event_id: 
                                 continue;
                             }
                         }
-                        let mut signal = message;
-                        let event_sql_path = format!("eventctl/{event_id}/sql");
-                        signal.set_shvpath(&event_sql_path);
-                        if let Err(e) = rpc_client.send_message(signal) {
-                            error!("Failed to send event {event_id} recchng signal: {e}");
-                        }
                     }
                 }
             },
