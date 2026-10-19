@@ -34,7 +34,7 @@ pub type SharedAppState = Arc<RwLock<State>>;
 
 pub(crate) struct State {
     pub db_pool: async_sqlite::Pool,
-    pub open_events: BTreeMap<EventId, OpenEventCtl>,
+    pub open_events: BTreeMap<EventId, Arc<RwLock<OpenEventCtl>>>,
     pub event_records: HashMap<EventId, Arc<RwLock<EventRecord>>>,
     pub shutdown_sender: Option<channel::Sender<()>>,
 }
@@ -107,15 +107,16 @@ impl State {
         ret
     }
 
-    pub fn opened_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
-        self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
-            .map(|ectl| {
-                EventStatus {
-                    master_db_mode: false,
-                    open_at: ectl.open_at.with_timezone(&Local).fixed_offset(),
-                    expires_at: ectl.expires_at().with_timezone(&Local).fixed_offset(),
-                }
-            })
+    pub async fn opened_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
+        let event = self.open_events.get(&event_id)
+            .ok_or_else(|| anyhow!("Invalid event id: {event_id}"))?
+            .clone();
+        let event = event.read().await;
+        Ok(EventStatus {
+            master_db_mode: false,
+            open_at: event.open_at.with_timezone(&Local).fixed_offset(),
+            expires_at: event.expires_at().with_timezone(&Local).fixed_offset(),
+        })
     }
 
     pub async fn event_record(&mut self, event_id: EventId) -> anyhow::Result<Arc<RwLock<EventRecord>>> {
@@ -165,10 +166,10 @@ impl State {
 
     pub async fn gc_expired_events(&mut self, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
         let event_age_list = self.open_events.iter()
-            .map(|(id, event)| (*id, event.expires_at())).collect::<Vec<_>>();
+            .map(|(id, event)| (*id, event.clone())).collect::<Vec<_>>();
         let now = chrono::Utc::now();
-        for (event_id, expires_at) in event_age_list {
-            if expires_at < now {
+        for (event_id, event) in event_age_list {
+            if event.read().await.expires_at() < now {
                 info!("Closing event: {event_id} as expired.");
                 self.close_event(event_id, client_command_sender.clone()).await?;
             }
@@ -192,9 +193,9 @@ impl State {
 pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<String> {
     let event_shv_path = event_api_shv_path(event_id);
     {
-        let mut state = app_state.write().await;
-        if let Some(event) = state.open_events.get_mut(&event_id) {
-            event.touched_at = chrono::Utc::now();
+        let state = app_state.write().await;
+        if let Some(event) = state.open_events.get(&event_id).cloned() {
+            event.write().await.touched_at = chrono::Utc::now();
             return Ok(event_shv_path);
         }
     }
@@ -214,11 +215,11 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
         smol::spawn(process_remote_db_recchng_signals(app_state.clone(), event_id, subscriber, rpc_client.clone())).detach();
     }
     let now = chrono::Utc::now();
-    app_state.write().await.open_events.insert(event_id, OpenEventCtl {
+    app_state.write().await.open_events.insert(event_id, Arc::new(RwLock::new(OpenEventCtl {
         db: pool,
         open_at: now,
         touched_at: now,
-    });
+    })));
 
     let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
     rpc_client.send_message(message)

@@ -252,7 +252,7 @@ pub(crate) async fn request_handler(
                     let method = m.method();
                     match method {
                         METH_EVENT_STATUS => m.resolve(EVENTCTL_NODE_METHODS, async move || {
-                            let res = app_state.read().await.opened_event_status(event_id);
+                            let res = app_state.read().await.opened_event_status(event_id).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),
                         METH_EVENT_UPDATE_LATE_ENTRY => {
@@ -263,7 +263,7 @@ pub(crate) async fn request_handler(
                                 };
                                 let params = LateEntryParams::try_from(rq.param().unwrap_or_default())
                                     .map_err(string_to_rpc_error)?;
-                                app_state.read().await.opened_event_status(event_id).map_err(anyhow_to_rpc_error)?;
+                                app_state.read().await.opened_event_status(event_id).await.map_err(anyhow_to_rpc_error)?;
                                 let qxsql = RemoteEventSqlApi::new(event_id, client_cmd_tx.clone());
                                 if let Some(qxchange_id) = params.change_id {
                                     if params.late_entry.is_none() {

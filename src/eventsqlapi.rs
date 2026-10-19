@@ -22,9 +22,10 @@ impl EventSqlApi {
         }
     }
     async fn event_db(&self) -> anyhow::Result<Pool> {
-        self.app_state.read().await.open_events.get(&self.event_id)
-            .map(|e| e.db.clone())
-            .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
+        let event = self.app_state.read().await.open_events.get(&self.event_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))?;
+        Ok(event.read().await.db.clone())
     }
     // pub async fn create_record_event(&self, table: &str, record: &Record, issuer: Option<String>) -> anyhow::Result<i64> {
     //         return self.create_record_with_recchng(table, record, issuer).await;
