@@ -20,7 +20,7 @@ use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use smol::{lock::RwLock, channel};
 use shvrpc::util::join_path;
 
-use crate::appsqlapi::AppSqlApi;
+use crate::localdbsqlapi::LocalDbSqlApi;
 use crate::eventdb::migrate_db;
 use crate::eventsqlapi::EventSqlApi;
 use crate::{generate_api_token, string_to_rpc_error};
@@ -54,7 +54,7 @@ impl State {
     }
 
     pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
-        let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
+        let qxsql = LocalDbSqlApi::new_without_recchng(self.db_pool.clone());
         let records = qxsql.list_records("events", Some(vec!["id", "name", "stage_count", "date", "owner", "master_db_mode"]), None, None).await?;
         Ok(records)
     }
@@ -75,7 +75,7 @@ impl State {
             config: QxEventConfig::default(),
         };
         let rec = event_data.to_record()?;
-        let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client.clone());
+        let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client.clone());
         let event_id = qxsql.create_record_with_recchng("events", &rec, Some(owner)).await?;
         info!("Created event {event_id}");
         if !event_data.master_db_mode {
@@ -101,7 +101,7 @@ impl State {
         if event_data.is_replica_db_mode() {
             Self::register_event_mount_point(event_id, &event_data.api_token, rpc_client.clone()).await?;
         }
-        let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client.clone());
+        let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client.clone());
         let ret = qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await;
         self.forget_event_record(event_id).await?;
         ret
@@ -133,7 +133,7 @@ impl State {
     }
 
     pub async fn load_event_record(&self, event_id: EventId) -> anyhow::Result<EventRecord> {
-        let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
+        let qxsql = LocalDbSqlApi::new_without_recchng(self.db_pool.clone());
         let record = qxsql.read_record("events", event_id, None).await?
             .ok_or_else(||anyhow!("Event id: {event_id} not found"))?;
         EventRecord::from_record(&record)
@@ -158,7 +158,7 @@ impl State {
     pub async fn delete_event(&mut self, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
         log::info!("Deleting event {}", event_id);
         self.close_event(event_id, rpc_client.clone()).await?;
-        let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client);
+        let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client);
         let was_deleted = qxsql.delete_record_with_recchng("events", event_id, None).await?;
         Ok(was_deleted)
     }
@@ -177,7 +177,7 @@ impl State {
     }
 
     pub async fn api_token_to_event_id(&self, api_token: &str) -> anyhow::Result<EventId> {
-        let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
+        let qxsql = LocalDbSqlApi::new_without_recchng(self.db_pool.clone());
         let result = qxsql
             .query("SELECT id FROM events WHERE api_token = :api_token", Some(&record_from_slice(&[("api_token", api_token.into())])))
             .await?;

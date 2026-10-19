@@ -4,9 +4,9 @@ use qxsql::{DbValue, RecChng, sql::{DbField, ExecResult, QueryResult}};
 use qxsql::sql::Record;
 use shvclient::ClientCommandSender;
 
-pub struct AppSqlApi(async_sqlite::Pool, Option<ClientCommandSender>);
+pub struct LocalDbSqlApi(async_sqlite::Pool, Option<ClientCommandSender>);
 
-impl AppSqlApi {
+impl LocalDbSqlApi {
     pub fn new(pool: async_sqlite::Pool, client_command_sender: ClientCommandSender) -> Self {
         Self(pool, Some(client_command_sender))
     }
@@ -16,7 +16,7 @@ impl AppSqlApi {
 }
 
 #[async_trait]
-impl qxsql::QxSqlApi for AppSqlApi {
+impl qxsql::QxSqlApi for LocalDbSqlApi {
     async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> { let empty_params = Record::default();
         let params = params.unwrap_or(&empty_params);
         sql_query(&self.0, query, params).await
@@ -29,7 +29,7 @@ impl qxsql::QxSqlApi for AppSqlApi {
 }
 
 #[async_trait]
-impl qxsql::QxSqlApiRecChng for AppSqlApi {
+impl qxsql::QxSqlApiRecChng for LocalDbSqlApi {
     fn filter_recchng(&self, mut recchng: RecChng) -> Option<RecChng> {
         if let Some(mut record) = recchng.record.take() {
             record.remove("api_token");

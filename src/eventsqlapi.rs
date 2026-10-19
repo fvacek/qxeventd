@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use qxsql::sql::{ExecResult, QueryResult, RecChng};
 use qxsql::sql::Record;
 use shvclient::ClientCommandSender;
-use crate::appsqlapi::AppSqlApi;
+use crate::localdbsqlapi::LocalDbSqlApi;
 use crate::state::{EventId, SharedAppState};
 
 pub struct EventSqlApi {
@@ -40,12 +40,12 @@ impl EventSqlApi {
 #[async_trait]
 impl qxsql::QxSqlApi for EventSqlApi {
     async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> {
-        let qxsql = AppSqlApi::new(self.event_db().await?, self.rpc_client.clone());
+        let qxsql = LocalDbSqlApi::new(self.event_db().await?, self.rpc_client.clone());
         qxsql.query(query, params).await
     }
 
     async fn exec(&self, query: &str, params: Option<&Record>) -> anyhow::Result<ExecResult> {
-        let qxsql = AppSqlApi::new(self.event_db().await?, self.rpc_client.clone());
+        let qxsql = LocalDbSqlApi::new(self.event_db().await?, self.rpc_client.clone());
         qxsql.exec(query, params).await
     }
 }
