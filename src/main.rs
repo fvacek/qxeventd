@@ -29,6 +29,7 @@ mod state;
 mod config;
 mod migrate;
 mod localdbsqlapi;
+mod remotedbsqlapi;
 mod eventsqlapi;
 mod appnode;
 mod eventctlnode;
