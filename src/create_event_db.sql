@@ -23,15 +23,6 @@ CREATE TABLE config (
 	CONSTRAINT config_pkey PRIMARY KEY (ckey)
 );
 ;
--- create table: stages;
-CREATE TABLE stages (
-	id integer,
-	startDateTime timestamp,
-	useAllMaps boolean NOT NULL DEFAULT 0,
-	drawingConfig character varying,
-	CONSTRAINT stages_pkey PRIMARY KEY (id)
-);
-;
 -- create table: courses;
 CREATE TABLE courses (
 	id integer PRIMARY KEY,
@@ -92,10 +83,10 @@ CREATE TABLE classdefs (
 	drawLock boolean NOT NULL DEFAULT 0,
 	relayStartNumber integer,
 	relayLegCount integer,
-	CONSTRAINT classdefs_foreign0 FOREIGN KEY (stageId) REFERENCES stages (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
 	CONSTRAINT classdefs_foreign1 FOREIGN KEY (classId) REFERENCES classes (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
 	CONSTRAINT classdefs_foreign2 FOREIGN KEY (courseId) REFERENCES courses (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
+CREATE INDEX classdefs_ix0 ON classdefs (stageId);
 -- comments not suported for driver: SQLITE
 -- COMMENT ON COLUMN classdefs.vacantsBefore IS 'place n vacants gap before first competitor in class start list';
 -- comments not suported for driver: SQLITE
@@ -144,6 +135,8 @@ CREATE TABLE runs (
 	finishTimeMs integer,
 	penaltyTimeMs integer,
 	timeMs integer,
+	startGateTime timestamp,
+	finishGateTime timestamp,
 	isRunning boolean NOT NULL DEFAULT 1,
 	disqualified boolean GENERATED ALWAYS AS (disqualifiedByOrganizer OR  misPunch OR  notStart OR  notFinish OR  badCheck OR  overTime OR notCompeting) STORED,
 	disqualifiedByOrganizer boolean NOT NULL DEFAULT 0,
@@ -156,11 +149,10 @@ CREATE TABLE runs (
 	cardLent boolean NOT NULL DEFAULT 0,
 	cardReturned boolean NOT NULL DEFAULT 0,
 	importId integer,
-	CONSTRAINT runs_foreign0 FOREIGN KEY (competitorId) REFERENCES competitors (id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-	CONSTRAINT runs_foreign1 FOREIGN KEY (stageId) REFERENCES stages (id) ON UPDATE RESTRICT ON DELETE RESTRICT
+	CONSTRAINT runs_foreign0 FOREIGN KEY (competitorId) REFERENCES competitors (id) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
-CREATE INDEX runs_ix2 ON runs (relayId, leg);
-CREATE INDEX runs_ix3 ON runs (stageId, siId);
+CREATE INDEX runs_ix1 ON runs (relayId, leg);
+CREATE INDEX runs_ix2 ON runs (stageId, siId);
 -- comments not suported for driver: SQLITE
 -- COMMENT ON COLUMN runs.corridorTime IS 'DateTime when competitor entered start corridor. (Experimental)';
 -- comments not suported for driver: SQLITE
@@ -173,6 +165,10 @@ CREATE INDEX runs_ix3 ON runs (stageId, siId);
 -- COMMENT ON COLUMN runs.penaltyTimeMs IS 'in miliseconds';
 -- comments not suported for driver: SQLITE
 -- COMMENT ON COLUMN runs.timeMs IS 'in miliseconds';
+-- comments not suported for driver: SQLITE
+-- COMMENT ON COLUMN runs.startGateTime IS 'DateTime when competitor crossed start photocell';
+-- comments not suported for driver: SQLITE
+-- COMMENT ON COLUMN runs.finishGateTime IS 'DateTime when competitor crossed finish photocell';
 -- comments not suported for driver: SQLITE
 -- COMMENT ON COLUMN runs.isRunning IS 'Competitor is running in this stage';
 -- comments not suported for driver: SQLITE
@@ -325,13 +321,24 @@ CREATE TABLE qxchanges (
 	status character varying,
 	status_message character varying,
 	created timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	source character varying,
+	change_id integer,
 	lock_number integer
 );
-CREATE INDEX qxchanges_ix0 ON qxchanges (stage_id, data_type, foreign_id);
+CREATE INDEX qxchanges_ix0 ON qxchanges (stage_id, data_type, foreign_table, foreign_id);
 CREATE INDEX qxchanges_ix1 ON qxchanges (stage_id, status);
 CREATE UNIQUE INDEX qxchanges_unique2 ON qxchanges (stage_id, foreign_id) WHERE status = 'Pending' AND data_type = 'LateEntry' AND foreign_table='runs' AND foreign_id IS NOT NULL;
 -- comments not suported for driver: SQLITE
 -- COMMENT ON COLUMN qxchanges.orig_data IS 'Store data overriden by change here to enable change rollback.';
+;
+-- create table: reports;
+CREATE TABLE reports (
+	id integer PRIMARY KEY,
+	path character varying,
+	hash character varying,
+	data BLOB,
+	CONSTRAINT reports_unique0 UNIQUE (path)
+);
 ;
 ------------------------------------;
 -- insert initial data;
@@ -339,4 +346,4 @@ CREATE UNIQUE INDEX qxchanges_unique2 ON qxchanges (stage_id, foreign_id) WHERE 
 ;
 -- insert into table: config;
 INSERT INTO config (ckey, cname, cvalue, ctype) VALUES
-('db.version', 'Data version', '30600', 'int');
+('db.version', 'Data version', '30800', 'int');
