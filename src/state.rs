@@ -56,7 +56,7 @@ impl State {
 
     pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
         let qxsql = AppSqlApi::new_without_recchng(self.db_pool.clone());
-        let records = qxsql.list_records("events", Some(vec!["id", "name", "stage_count", "date", "owner", "is_local"]), None, None).await?;
+        let records = qxsql.list_records("events", Some(vec!["id", "name", "stage_count", "date", "owner", "master_db_mode"]), None, None).await?;
         Ok(records)
     }
 
@@ -66,7 +66,7 @@ impl State {
         }
         let api_token = generate_api_token();
         let event_data = EventRecord {
-            is_local: false,
+            master_db_mode: false,
             name: String::new(),
             date: chrono::Local::now().fixed_offset(),
             owner: owner.clone(),
@@ -79,7 +79,7 @@ impl State {
         let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client.clone());
         let event_id = qxsql.create_record_with_recchng("events", &rec, Some(owner)).await?;
         info!("Created event {event_id}");
-        if !event_data.is_local {
+        if !event_data.master_db_mode {
             Self::register_event_mount_point(event_id, &api_token, rpc_client).await?;
         }
         Ok((event_id, api_token))
@@ -99,7 +99,7 @@ impl State {
     pub async fn update_event_record(&mut self, event_id: EventId, record: EventRecordChange, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
         // always update the mount point, for case than shvbroker config is reloaded from file
         let event_data = self.load_event_record(event_id).await?;
-        if !event_data.is_local {
+        if event_data.is_replica_db_mode() {
             Self::register_event_mount_point(event_id, &event_data.api_token, rpc_client.clone()).await?;
         }
         let qxsql = AppSqlApi::new(self.db_pool.clone(), rpc_client.clone());
@@ -112,7 +112,7 @@ impl State {
         self.open_events.get(&event_id).ok_or_else(|| anyhow!("Invalid event id: {event_id}"))
             .map(|ectl| {
                 EventStatus {
-                    is_local: ectl.local_db.is_some(),
+                    master_db_mode: ectl.local_db.is_some(),
                     open_at: ectl.open_at.with_timezone(&Local).fixed_offset(),
                     expires_at: ectl.expires_at().with_timezone(&Local).fixed_offset(),
                 }
@@ -201,7 +201,7 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
     }
 
     let event_record = app_state.read().await.load_event_record(event_id).await?;
-    let local_db = if event_record.is_local {
+    let local_db = if event_record.master_db_mode {
         let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
         let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
         Some(pool)
@@ -316,7 +316,7 @@ async fn update_event_record_from_event_config(app_state: SharedAppState, client
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventStatus {
-    pub is_local: bool,
+    pub master_db_mode: bool,
     pub open_at: DateTime<chrono::FixedOffset>,
     pub expires_at: DateTime<chrono::FixedOffset>,
 }
@@ -333,7 +333,7 @@ pub(crate) struct EventRecord {
     pub owner: String,
     pub api_token: String,
     pub config: QxEventConfig,
-    pub is_local: bool,
+    pub master_db_mode: bool,
 }
 
 fn default_stage_count() -> i64 { 1 }
@@ -347,7 +347,7 @@ impl EventRecord {
             date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Local::now().fixed_offset()),
             stage_count: get_field("stage_count")?.to_int().unwrap_or(default_stage_count()),
             owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
-            is_local: get_field("is_local")?.to_bool(),
+            master_db_mode: get_field("master_db_mode")?.to_bool(),
             api_token: get_field("api_token")?.as_str().unwrap_or_default().to_string(),
             config: get_field("config")?.as_str()
                 .and_then(|config| serde_json::from_str(config).ok())
@@ -362,8 +362,11 @@ impl EventRecord {
         record.insert("owner".to_string(), self.owner.clone().into());
         record.insert("api_token".to_string(), self.api_token.clone().into());
         record.insert("config".to_string(), serde_json::to_string(&self.config)?.into());
-        record.insert("is_local".to_string(), self.is_local.into());
+        record.insert("master_db_mode".to_string(), self.master_db_mode.into());
         Ok(record)
+    }
+    fn is_replica_db_mode(&self) -> bool {
+        !self.master_db_mode
     }
 }
 
@@ -388,7 +391,7 @@ pub(crate) struct EventRecordChange {
     pub api_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub is_local: Option<bool>,
+    pub master_db_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<QxEventConfig>,
 }
@@ -411,8 +414,8 @@ impl EventRecordChange {
         if let Some(api_token) = &self.api_token {
             record.insert("api_token".to_string(), api_token.clone().into());
         }
-        if let Some(is_local) = &self.is_local {
-            record.insert("is_local".to_string(), (*is_local).into());
+        if let Some(master_db_mode) = &self.master_db_mode {
+            record.insert("master_db_mode".to_string(), (*master_db_mode).into());
         }
         if let Some(config) = &self.config {
             record.insert("config".to_string(), serde_json::to_string(config).expect("config to json should not fail").into());
@@ -425,7 +428,7 @@ impl EventRecordChange {
             && self.stage_count.is_none()
             && self.owner.is_none()
             && self.api_token.is_none()
-            && self.is_local.is_none()
+            && self.master_db_mode.is_none()
             && self.config.is_none()
     }
 }

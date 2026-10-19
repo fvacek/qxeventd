@@ -4,6 +4,6 @@ CREATE TABLE events (
     name TEXT,
     date TEXT,
     owner TEXT NOT NULL,
-    is_local BOOLEAN DEFAULT 1,
+    is_local BOOLEAN DEFAULT 0,
     CONSTRAINT events_unique0 UNIQUE (api_token)
 );

@@ -29,13 +29,13 @@ impl EventSqlApi {
             .map(|e| e.local_db.clone())
             .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
     }
-    async fn is_local_event_db(&self) -> anyhow::Result<bool> {
+    async fn is_master_db_mode(&self) -> anyhow::Result<bool> {
         self.app_state.read().await.open_events.get(&self.event_id)
             .map(|e| e.local_db.is_some())
             .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
     }
     pub async fn create_record_event(&self, table: &str, record: &Record, issuer: Option<String>) -> anyhow::Result<i64> {
-        if self.is_local_event_db().await? {
+        if self.is_master_db_mode().await? {
             return self.create_record_with_recchng(table, record, issuer).await;
         } else {
             let param = RecInsertParam {
@@ -49,7 +49,7 @@ impl EventSqlApi {
         }
     }
     pub async fn update_record_event(&self, table: &str, id: i64, record: &Record, issuer: Option<String>) -> anyhow::Result<bool> {
-        if self.is_local_event_db().await? {
+        if self.is_master_db_mode().await? {
             return self.update_record_with_recchng(table, id, record, issuer).await;
         } else {
             let param = RecUpdateParam {
@@ -65,7 +65,7 @@ impl EventSqlApi {
     }
     #[allow(dead_code)]
     pub async fn delete_record_event(&self, table: &str, id: i64, issuer: Option<String>) -> anyhow::Result<bool> {
-        if self.is_local_event_db().await? {
+        if self.is_master_db_mode().await? {
             return self.delete_record_with_recchng(table, id, issuer).await;
         } else {
             let param = RecDeleteParam {
@@ -116,7 +116,7 @@ impl qxsql::QxSqlApiRecChng for EventSqlApi {
     }
 
     async fn client_command_sender(&self) -> Option<ClientCommandSender>  {
-        if self.is_local_event_db().await.unwrap_or(true) {
+        if self.is_master_db_mode().await.unwrap_or(true) {
             None
         } else {
             Some(self.rpc_client.clone())

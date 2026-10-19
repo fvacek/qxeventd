@@ -19,6 +19,9 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up(
         "ALTER TABLE events RENAME COLUMN stage TO stage_count",
     ),
+    M::up(
+        "ALTER TABLE events RENAME COLUMN is_local TO master_db_mode",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
