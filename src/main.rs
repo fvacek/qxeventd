@@ -1,27 +1,23 @@
 use std::{backtrace::Backtrace, sync::OnceLock};
 use clap::Parser;
 use log::{error, info, warn};
-use qxsql::{QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecListParam, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
-use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
+// use qxsql::{QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecListParam, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
+// use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
 use shvclient::clientapi::CallRpcMethodError;
 use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver};
 use shvclient::appnodes::{DotDeviceNode};
-use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
 use smol::{lock::RwLock, channel};
 use futures::{select, FutureExt};
 use url::Url;
 
 use crate::appnode::AppNode;
-use crate::localdbsqlapi::LocalDbSqlApi;
 use crate::state::SharedAppState;
 use crate::{
     state::{State},
     config::Config,
     migrate::create_db_connection,
 };
-use shvproto::{RpcValue, to_rpcvalue};
-use qxsql::{sql::{QxSqlApi, QUERY_PARAMS, QUERY_RESULT, QueryAndParams}};
 
 #[macro_use]
 mod macros;
@@ -151,51 +147,51 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     smol::block_on(async_main())
 }
 
-struct SqlNode {
-    app_state: SharedAppState,
-}
+// struct SqlNode {
+//     app_state: SharedAppState,
+// }
 
-shvclient::impl_static_node! {
-    SqlNode(&self, request, rpc_client) {
-        "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
-            let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
-            let result = qxsql.query(query.query(), query.params()).await;
-            Some(res_to_rpcvalue(result))
-        }
-        "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
-            let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
-            let result = qxsql.exec(query.query(), query.params()).await;
-            Some(res_to_rpcvalue(result))
-        }
-        "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
-            let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
-            let fields = string_list_to_ref_vec(&param.fields);
-            let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
-            Some(res_to_rpcvalue(result))
-        }
-        "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
-            let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
-            let insert_id = qxsql.create_record_with_recchng(&param.table, &param.record, issuer(&request)).await;
-            Some(res_to_rpcvalue(insert_id))
-        }
-        "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
-            let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
-            let fields = string_list_to_ref_vec(&param.fields);
-            let result = qxsql.read_record(&param.table, param.id, fields).await;
-            Some(res_to_rpcvalue(result))
-        }
-        "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
-            let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
-            let update_success = qxsql.update_record_with_recchng(&param.table, param.id, &param.record, issuer(&request)).await;
-            Some(res_to_rpcvalue(update_success))
-        }
-        "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
-            let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
-            let was_deleted = qxsql.delete_record_with_recchng(&param.table, param.id, issuer(&request)).await;
-            Some(res_to_rpcvalue(was_deleted))
-        }
-    }
-}
+// shvclient::impl_static_node! {
+//     SqlNode(&self, request, rpc_client) {
+//         "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let result = qxsql.query(query.query(), query.params()).await;
+//             Some(res_to_rpcvalue(result))
+//         }
+//         "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let result = qxsql.exec(query.query(), query.params()).await;
+//             Some(res_to_rpcvalue(result))
+//         }
+//         "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let fields = string_list_to_ref_vec(&param.fields);
+//             let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
+//             Some(res_to_rpcvalue(result))
+//         }
+//         "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let insert_id = qxsql.create_record_with_recchng(&param.table, &param.record, issuer(&request)).await;
+//             Some(res_to_rpcvalue(insert_id))
+//         }
+//         "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let fields = string_list_to_ref_vec(&param.fields);
+//             let result = qxsql.read_record(&param.table, param.id, fields).await;
+//             Some(res_to_rpcvalue(result))
+//         }
+//         "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let update_success = qxsql.update_record_with_recchng(&param.table, param.id, &param.record, issuer(&request)).await;
+//             Some(res_to_rpcvalue(update_success))
+//         }
+//         "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let was_deleted = qxsql.delete_record_with_recchng(&param.table, param.id, issuer(&request)).await;
+//             Some(res_to_rpcvalue(was_deleted))
+//         }
+//     }
+// }
 
 async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let db_pool = create_db_connection().await?;
@@ -221,7 +217,7 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let ret = shvclient::Client::new()
         .device(DotDeviceNode::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), Some("00000".into())))
         .mount_static(".app", AppNode::new(env!("CARGO_PKG_NAME"), app_state.clone()))
-        .mount_static("sql", SqlNode { app_state: app_state.clone() })
+        // .mount_static("sql", SqlNode { app_state: app_state.clone() })
         .mount_dynamic("eventctl", move |rq, client_cmd_tx| {
                         eventctlnode::request_handler(rq, client_cmd_tx, app_state2.clone())
         })
@@ -296,13 +292,13 @@ fn str_to_rpc_error(err: &str) -> RpcError {
     RpcError::new(RpcErrorCode::MethodCallException, err.to_string())
 }
 
-fn res_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<T>) -> Result<RpcValue, RpcError> {
-    res.and_then(|value| {
-        to_rpcvalue(&value)
-            .map_err(|err| anyhow::anyhow!("Serialization error: {}", err))
-    })
-    .map_err(anyhow_to_rpc_error)
-}
+// fn res_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<T>) -> Result<RpcValue, RpcError> {
+//     res.and_then(|value| {
+//         to_rpcvalue(&value)
+//             .map_err(|err| anyhow::anyhow!("Serialization error: {}", err))
+//     })
+//     .map_err(anyhow_to_rpc_error)
+// }
 
 fn generate_api_token() -> String {
     use rand::Rng;
@@ -319,23 +315,23 @@ fn generate_api_token() -> String {
         .collect()
 }
 
-fn issuer(rq: &RpcMessage) -> Option<String> {
-    rq.user_id().and_then(|uid| {
-        let (issuer, _) = split_first_fragment(uid, ';');
-        if issuer.is_empty() {
-            Some(issuer.to_string())
-        } else {
-            None
-        }
-    })
-}
+// fn issuer(rq: &RpcMessage) -> Option<String> {
+//     rq.user_id().and_then(|uid| {
+//         let (issuer, _) = split_first_fragment(uid, ';');
+//         if issuer.is_empty() {
+//             Some(issuer.to_string())
+//         } else {
+//             None
+//         }
+//     })
+// }
 
-fn split_first_fragment(path: &str, sep: char) -> (&str, &str) {
-    if let Some(ix) = path.find(sep) {
-        let dir = &path[0 .. ix];
-        let rest = &path[ix + 1..];
-        (dir, rest)
-    } else {
-        (path, "")
-    }
-}
+// fn split_first_fragment(path: &str, sep: char) -> (&str, &str) {
+//     if let Some(ix) = path.find(sep) {
+//         let dir = &path[0 .. ix];
+//         let rest = &path[ix + 1..];
+//         (dir, rest)
+//     } else {
+//         (path, "")
+//     }
+// }
