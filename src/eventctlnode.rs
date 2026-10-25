@@ -11,7 +11,7 @@ use crate::qxchange::{self, Data, LateEntry, QxChangeRecord};
 use crate::qxeventconfig::Role;
 use crate::remotedbsqlapi::RemoteEventSqlApi;
 use crate::{anyhow_to_rpc_error, str_to_rpc_error, string_to_rpc_error};
-use crate::state::{open_event, EventId, EventRecordChange, SharedAppState};
+use crate::state::{open_event, EventId, EventRecordChange, SharedAppState, State};
 
 
 #[derive(Debug)]
@@ -39,6 +39,7 @@ const METH_UPDATE_EVENT_RECORD: &str = "updateEventRecord";
 const METH_DELETE_EVENT: &str = "deleteEvent";
 const METH_LIST_EVENTS: &str = "listEvents";
 const METH_EVENT_DATA: &str = "eventData";
+const METH_PUSH_EVENT_DB: &str = "pushEventDb";
 
 const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
@@ -63,6 +64,9 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
     ),
     MetaMethod::new_static(
         METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, "s:api_token", "b:was_deleted", &[], "",
+    ),
+    MetaMethod::new_static(
+        METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Read, "[s:api_token,x:compressed_data]", "n", &[], "",
     ),
     MetaMethod::new_static(
         METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", "[{?}]", &[], "",
@@ -223,6 +227,16 @@ pub(crate) async fn request_handler(
                             let was_deleted = app_state.write().await.delete_event(event_id, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::from(was_deleted))
+                        }),
+                        METH_PUSH_EVENT_DB => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
+                            let params = rq.param().unwrap_or_default().as_list();
+                            let api_token = params.get(0).unwrap_or_default().as_str();
+                            let zdata = params.get(1).unwrap_or_default().as_blob();
+                            let event_id = app_state.read().await.api_token_to_event_id(api_token).await
+                                .map_err(anyhow_to_rpc_error)?;
+                            State::push_event_db(app_state, event_id, zdata, client_cmd_tx).await
+                                .map_err(anyhow_to_rpc_error)?;
+                            Ok(RpcValue::null())
                         }),
                         METH_LIST_EVENTS => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                             let events = app_state.write().await.list_events().await

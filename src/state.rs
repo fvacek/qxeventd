@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::{collections::BTreeMap, sync::Arc};
+use std::io::Read;
 
+use flate2::read::ZlibDecoder;
 use futures::StreamExt;
 use anyhow::bail;
 use anyhow::anyhow;
@@ -138,6 +140,44 @@ impl State {
         let record = qxsql.read_record("events", event_id, None).await?
             .ok_or_else(||anyhow!("Event id: {event_id} not found"))?;
         EventRecord::from_record(&record)
+    }
+
+    pub async fn push_event_db(app_state: SharedAppState, event_id: EventId, zdata: &[u8], client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
+        // Decode before closing the event so an invalid upload does not interrupt a
+        // currently running event.
+        let mut decoder = ZlibDecoder::new(zdata);
+        let mut db_data = Vec::new();
+        decoder.read_to_end(&mut db_data)
+            .map_err(|err| anyhow!("Failed to decompress event database: {err}"))?;
+
+        // An open SQLite pool would continue using the old database after the file
+        // is replaced. Close it first, then install the new file atomically.
+        let was_open = {
+            let was_open = {
+                let mut state = app_state.write().await;
+                let was_open = state.open_events.contains_key(&event_id);
+                state.close_event(event_id, client_command_sender.clone()).await?;
+                was_open
+            };
+
+            let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
+            let db_path = std::path::Path::new(&db_file);
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let tmp_file = format!("{db_file}.upload-tmp");
+            std::fs::write(&tmp_file, &db_data)?;
+            if let Err(err) = std::fs::rename(&tmp_file, db_path) {
+                let _ = std::fs::remove_file(&tmp_file);
+                return Err(err.into());
+            }
+            was_open
+        };
+
+        if was_open {
+            open_event(app_state, event_id, client_command_sender).await?;
+        }
+        Ok(())
     }
 
     pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
