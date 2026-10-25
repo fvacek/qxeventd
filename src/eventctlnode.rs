@@ -40,6 +40,7 @@ const METH_DELETE_EVENT: &str = "deleteEvent";
 const METH_LIST_EVENTS: &str = "listEvents";
 const METH_EVENT_DATA: &str = "eventData";
 const METH_PUSH_EVENT_DB: &str = "pushEventDb";
+const METH_PULL_EVENT_DB: &str = "pullEventDb";
 
 const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
@@ -67,6 +68,9 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
     ),
     MetaMethod::new_static(
         METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Read, "[s:api_token,x:compressed_data]", "n", &[], "",
+    ),
+    MetaMethod::new_static(
+        METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Read, "i:event_id", "[i:uncompressed_data_size,x:compressed_data]", &[], "",
     ),
     MetaMethod::new_static(
         METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", "[{?}]", &[], "",
@@ -170,7 +174,7 @@ pub(crate) async fn request_handler(
                 }),
                 Method::Other(m) => {
                     let method = m.method();
-                    let get_read_event_record_event_id = |rq: &RpcMessage| {
+                    let get_single_param_event_id = |rq: &RpcMessage| {
                         let event_id = rq.param().map(|p| p.as_int());
                         if event_id.is_none() {
                             warn!("Event id must be set");
@@ -207,7 +211,7 @@ pub(crate) async fn request_handler(
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_shv_path)]))
                         }),
-                        METH_READ_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), get_read_event_record_event_id(&rq), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
+                        METH_READ_EVENT_RECORD => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), get_single_param_event_id(&rq), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                             let event_id = rq.param().unwrap_or_default().as_int();
                             let res = app_state.read().await.load_event_record(event_id).await;
                             res.map_err(anyhow_to_rpc_error)
@@ -237,6 +241,13 @@ pub(crate) async fn request_handler(
                             State::push_event_db(app_state, event_id, zdata, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::null())
+                        }),
+                        METH_PULL_EVENT_DB => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
+                            let event_id = rq.param().unwrap_or_default().as_int();
+                            let (len, zdata) = State::pull_event_db(app_state, event_id, client_cmd_tx).await
+                                .map_err(anyhow_to_rpc_error)?;
+                                let ret = vec![RpcValue::from(len as i64), RpcValue::from(zdata)];
+                            Ok(RpcValue::from(ret))
                         }),
                         METH_LIST_EVENTS => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                             let events = app_state.write().await.list_events().await

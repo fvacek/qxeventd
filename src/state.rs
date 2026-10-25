@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::{collections::BTreeMap, sync::Arc};
-use std::io::Read;
+use std::io::{Read, Write};
 
 use flate2::read::ZlibDecoder;
+use flate2::{Compression, write::ZlibEncoder};
 use futures::StreamExt;
 use anyhow::bail;
 use anyhow::anyhow;
@@ -178,6 +179,28 @@ impl State {
             open_event(app_state, event_id, client_command_sender).await?;
         }
         Ok(())
+    }
+
+    pub async fn pull_event_db(app_state: SharedAppState, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<(usize, Vec<u8>)> {
+        let was_open = {
+            let mut state = app_state.write().await;
+            let was_open = state.open_events.contains_key(&event_id);
+            if was_open {
+                state.close_event(event_id, client_command_sender.clone()).await?;
+            }
+            was_open
+        };
+
+        let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
+        let db_data = std::fs::read(&db_file)?;
+        let db_data_size = db_data.len();
+        if was_open {
+            open_event(app_state, event_id, client_command_sender).await?;
+        }
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&db_data)?;
+        Ok((db_data_size, encoder.finish()?))
     }
 
     pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
