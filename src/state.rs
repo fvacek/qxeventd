@@ -110,6 +110,19 @@ impl State {
         ret
     }
 
+    pub async fn set_event_db_mode(&mut self, event_id: EventId, db_mode: EventDbMode, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
+        let event_record = self.load_event_record(event_id).await?;
+        if matches!(db_mode, EventDbMode::Replica) {
+            Self::register_event_mount_point(event_id, &event_record.api_token, rpc_client.clone()).await?;
+        }
+        let mut record = Record::new();
+        record.insert("db_mode".to_string(), db_mode.as_record_value().into());
+        let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client);
+        let result = qxsql.update_record_with_recchng("events", event_id, &record, None).await;
+        self.forget_event_record(event_id).await?;
+        result
+    }
+
     pub async fn opened_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
         let event = self.open_events.get(&event_id)
             .ok_or_else(|| anyhow!("Invalid event id: {event_id}"))?

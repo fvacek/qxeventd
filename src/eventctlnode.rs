@@ -36,6 +36,7 @@ const METH_OPEN_EVENT: &str = "openEvent";
 const METH_OPEN_EVENT_API_KEY: &str = "openEventApiKey";
 const METH_READ_EVENT_RECORD: &str = "readEventRecord";
 const METH_UPDATE_EVENT_RECORD: &str = "updateEventRecord";
+const METH_SET_EVENT_DB_MODE: &str = "setEventDbMode";
 const METH_DELETE_EVENT: &str = "deleteEvent";
 const METH_LIST_EVENTS: &str = "listEvents";
 const METH_EVENT_DATA: &str = "eventData";
@@ -62,6 +63,10 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can update event records
         METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, "[i:event_id,{?}:event_record]", "b", &[], "",
+    ),
+    MetaMethod::new_static(
+        // user with Service access or user_id == event_owner can change the database mode
+        METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, "[i:event_id,s:db_mode]", "b", &[], "",
     ),
     MetaMethod::new_static(
         METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, "s:api_token", "b:was_deleted", &[], "",
@@ -107,6 +112,10 @@ const QX_API_TOKEN: &str = "qx_api_token";
 struct UpdateEventRecordParams(i64, EventRecordChange);
 impl_rpcvalue_conversions!(UpdateEventRecordParams);
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SetEventDbModeParams(i64, crate::state::EventDbMode);
+impl_rpcvalue_conversions!(SetEventDbModeParams);
+
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
     // log::info!("escalate_event_owner_rights, method_name: {method_name}, event id: {event_id:?}");
     if let Some(event_id) = event_id {
@@ -121,18 +130,18 @@ async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState,
                     warn!("User: {user_id:?} is banned");
                     return vec![];
                 }
-                let called_by_event_owner = api_token.map(|t| t == event_record.api_token).unwrap_or(false)
+                let called_by_event_organizer = api_token.map(|t| t == event_record.api_token).unwrap_or(false)
                     || user_id.map(|u| u == event_record.owner).unwrap_or(false)
                     || user_role == Some(&Role::Organizer);
-                if !called_by_event_owner && mm.flags.contains(Flags::UserIDRequired) {
-                    warn!("Method: {method_name} not called by event owner");
+                if !called_by_event_organizer && mm.flags.contains(Flags::UserIDRequired) {
+                    warn!("Method: {method_name} not called by event organizer");
                     warn!("User id: {:?}", user_id);
                 }
                 return vec![
                     MetaMethod::new_static(
                         &mm.name,
                         mm.flags,
-                        if called_by_event_owner { AccessLevel::Read } else { mm.access },
+                        if called_by_event_organizer { AccessLevel::Read } else { mm.access },
                         mm.param.as_ref(),
                         mm.result.as_ref(),
                         &[],
@@ -190,6 +199,15 @@ pub(crate) async fn request_handler(
                             }
                         }
                     };
+                    let get_set_event_db_mode_event_id = |rq: &RpcMessage| {
+                        match SetEventDbModeParams::try_from(rq.param()) {
+                            Ok(p) => Some(p.0),
+                            Err(err) => {
+                                warn!("Failed to parse set event db mode params: {err}");
+                                None
+                            }
+                        }
+                    };
                     match method {
                         METH_CREATE_EVENT => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                             let owner = rq.param().unwrap_or_default().as_str().to_owned();
@@ -221,6 +239,13 @@ pub(crate) async fn request_handler(
                                 .map_err(anyhow_to_rpc_error)?;
                             let (event_id, change) = (p.0, p.1);
                             let res = app_state.write().await.update_event_record(event_id, change, client_cmd_tx).await
+                                .map_err(anyhow_to_rpc_error)?;
+                            Ok(res)
+                        }),
+                        METH_SET_EVENT_DB_MODE => m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), get_set_event_db_mode_event_id(&rq), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
+                            let p = SetEventDbModeParams::try_from(rq.param())
+                                .map_err(anyhow_to_rpc_error)?;
+                            let res = app_state.write().await.set_event_db_mode(p.0, p.1, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(res)
                         }),
@@ -370,7 +395,7 @@ mod tests {
 
     #[test]
     fn update_event_record_params_try_from_rpcvalue() {
-        let value = RpcValue::from_cpon(r#"[2,{"api_token":"gubosinori","config":{"members":{"member@example.com":"Organizer"}},"stage":3}]"#).unwrap();
+        let value = RpcValue::from_cpon(r#"[2,{"api_token":"gubosinori","config":{"members":{"member@example.com":"Organizer"}},"stage_count":3}]"#).unwrap();
         let params = UpdateEventRecordParams::try_from(&value).unwrap();
 
         assert_eq!(params.0, 2);
@@ -378,5 +403,14 @@ mod tests {
         assert_eq!(params.1.api_token.as_deref(), Some("gubosinori"));
         let config = params.1.config.unwrap();
         assert!(matches!(config.members.get("member@example.com"), Some(Role::Organizer)));
+    }
+
+    #[test]
+    fn set_event_db_mode_params_try_from_rpcvalue() {
+        let value = RpcValue::from_cpon(r#"[2,"Replica"]"#).unwrap();
+        let params = SetEventDbModeParams::try_from(&value).unwrap();
+
+        assert_eq!(params.0, 2);
+        assert_eq!(params.1, crate::state::EventDbMode::Replica);
     }
 }
