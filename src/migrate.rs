@@ -22,6 +22,10 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up(
         "ALTER TABLE events RENAME COLUMN is_local TO master_db_mode",
     ),
+    M::up(
+        "ALTER TABLE events ADD COLUMN db_mode TEXT NOT NULL DEFAULT 'ReadOnly';
+         ALTER TABLE events DROP COLUMN master_db_mode;",
+    ),
 ];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 

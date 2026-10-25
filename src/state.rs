@@ -11,7 +11,7 @@ use chrono::DateTime;
 use chrono::Local;
 use log::*;
 use qxsql::{QxSqlApiRecChng, RecChng, RecOp};
-use qxsql::{Record};
+use qxsql::{DbValue, Record};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
@@ -58,7 +58,7 @@ impl State {
 
     pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
         let qxsql = LocalDbSqlApi::new_without_recchng(self.db_pool.clone());
-        let records = qxsql.list_records("events", Some(vec!["id", "name", "stage_count", "date", "owner", "master_db_mode"]), None, None).await?;
+        let records = qxsql.list_records("events", Some(vec!["id", "name", "stage_count", "date", "owner", "db_mode"]), None, None).await?;
         Ok(records)
     }
 
@@ -68,7 +68,7 @@ impl State {
         }
         let api_token = generate_api_token();
         let event_data = EventRecord {
-            master_db_mode: false,
+            db_mode: EventDbMode::Replica,
             name: String::new(),
             date: chrono::Local::now().fixed_offset(),
             owner: owner.clone(),
@@ -81,7 +81,7 @@ impl State {
         let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client.clone());
         let event_id = qxsql.create_record_with_recchng("events", &rec, Some(owner)).await?;
         info!("Created event {event_id}");
-        if !event_data.master_db_mode {
+        if matches!(event_data.db_mode, EventDbMode::Replica) {
             Self::register_event_mount_point(event_id, &api_token, rpc_client).await?;
         }
         Ok((event_id, api_token))
@@ -100,9 +100,9 @@ impl State {
 
     pub async fn update_event_record(&mut self, event_id: EventId, record: EventRecordChange, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
         // always update the mount point, for case than shvbroker config is reloaded from file
-        let event_data = self.load_event_record(event_id).await?;
-        if event_data.is_replica_db_mode() {
-            Self::register_event_mount_point(event_id, &event_data.api_token, rpc_client.clone()).await?;
+        let event_record = self.load_event_record(event_id).await?;
+        if matches!(event_record.db_mode, EventDbMode::Replica) {
+            Self::register_event_mount_point(event_id, &event_record.api_token, rpc_client.clone()).await?;
         }
         let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client.clone());
         let ret = qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await;
@@ -116,7 +116,7 @@ impl State {
             .clone();
         let event = event.read().await;
         Ok(EventStatus {
-            master_db_mode: false,
+            master_db_mode: EventDbMode::ReadOnly,
             open_at: event.open_at.with_timezone(&Local).fixed_offset(),
             expires_at: event.expires_at().with_timezone(&Local).fixed_offset(),
         })
@@ -381,9 +381,43 @@ fn rechng_from_rpcvalue(value: Option<&RpcValue>) -> anyhow::Result<RecChng> {
         .map_err(|err| anyhow!("invalid recchng value: {err}"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum EventDbMode {
+    ReadOnly,
+    Master,
+    Replica,
+}
+
+impl EventDbMode {
+    fn from_record_value(value: &DbValue) -> Self {
+        let mode = value.as_str();
+        match mode {
+            Some("ReadOnly") => Self::ReadOnly,
+            Some("Master") => Self::Master,
+            Some("Replica") => Self::Replica,
+            _ => {
+                // Rows created before EventDbMode was introduced stored this as a bool.
+                if value.to_bool() {
+                    Self::Master
+                } else {
+                    Self::Replica
+                }
+            }
+        }
+    }
+
+    fn as_record_value(self) -> String {
+        match self {
+            Self::ReadOnly => "ReadOnly",
+            Self::Master => "Master",
+            Self::Replica => "Replica",
+        }.to_string()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventStatus {
-    pub master_db_mode: bool,
+    pub master_db_mode: EventDbMode,
     pub open_at: DateTime<chrono::FixedOffset>,
     pub expires_at: DateTime<chrono::FixedOffset>,
 }
@@ -400,7 +434,7 @@ pub(crate) struct EventRecord {
     pub owner: String,
     pub api_token: String,
     pub config: QxEventConfig,
-    pub master_db_mode: bool,
+    pub db_mode: EventDbMode,
 }
 
 fn default_stage_count() -> i64 { 1 }
@@ -414,7 +448,7 @@ impl EventRecord {
             date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Local::now().fixed_offset()),
             stage_count: get_field("stage_count")?.to_int().unwrap_or(default_stage_count()),
             owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
-            master_db_mode: get_field("master_db_mode")?.to_bool(),
+            db_mode: EventDbMode::from_record_value(get_field("db_mode")?),
             api_token: get_field("api_token")?.as_str().unwrap_or_default().to_string(),
             config: get_field("config")?.as_str()
                 .and_then(|config| serde_json::from_str(config).ok())
@@ -429,11 +463,8 @@ impl EventRecord {
         record.insert("owner".to_string(), self.owner.clone().into());
         record.insert("api_token".to_string(), self.api_token.clone().into());
         record.insert("config".to_string(), serde_json::to_string(&self.config)?.into());
-        record.insert("master_db_mode".to_string(), self.master_db_mode.into());
+        record.insert("db_mode".to_string(), self.db_mode.as_record_value().into());
         Ok(record)
-    }
-    fn is_replica_db_mode(&self) -> bool {
-        !self.master_db_mode
     }
 }
 
@@ -458,7 +489,7 @@ pub(crate) struct EventRecordChange {
     pub api_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub master_db_mode: Option<bool>,
+    pub master_db_mode: Option<EventDbMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<QxEventConfig>,
 }
@@ -481,8 +512,8 @@ impl EventRecordChange {
         if let Some(api_token) = &self.api_token {
             record.insert("api_token".to_string(), api_token.clone().into());
         }
-        if let Some(master_db_mode) = &self.master_db_mode {
-            record.insert("master_db_mode".to_string(), (*master_db_mode).into());
+        if let Some(master_db_mode) = self.master_db_mode {
+            record.insert("db_mode".to_string(), master_db_mode.as_record_value().into());
         }
         if let Some(config) = &self.config {
             record.insert("config".to_string(), serde_json::to_string(config).expect("config to json should not fail").into());
