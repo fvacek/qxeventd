@@ -360,6 +360,14 @@ async fn setup_remote_db_connection(app_state: SharedAppState, event_id: EventId
 }
 
 async fn reply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) -> anyhow::Result<()> {
+    let db_mode = {
+        let state = app_state.read().await;
+        state.load_event_record(event_id).await?.db_mode
+    };
+    if !matches!(db_mode, EventDbMode::Replica) {
+        return Ok(());
+    }
+
     let sql_api = EventSqlApi::new(event_id, app_state, rpc_client);
 
     match &recchng.op {
