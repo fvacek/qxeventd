@@ -131,43 +131,74 @@ impl_rpcvalue_conversions!(DeleteEventParams);
 
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
     // log::info!("escalate_event_owner_rights, method_name: {method_name}, event id: {event_id:?}");
-    if let Some(event_id) = event_id {
-        if let Ok(event_record) = app_state.write().await.event_record(event_id).await {
-            let api_token = rq.meta().get(QX_API_TOKEN).map(|v| v.as_str());
-            let user_id = sanitize_user_id(rq);
-            // info!("event_id: {event_id}, user_id: {user_id:?}");
-            if let Some(mm) = methods.iter().find(|&m| m.name == method_name) {
-                let event_record = event_record.read().await;
-                let user_role = user_id.map(|u| event_record.config.members.get(u)).flatten();
-                if user_role == Some(&Role::Banned) {
-                    warn!("User: {user_id:?} is banned");
-                    return vec![];
-                }
-                let called_by_event_organizer = api_token.map(|t| t == event_record.api_token).unwrap_or(false)
-                    || user_id.map(|u| u == event_record.owner).unwrap_or(false)
-                    || user_role == Some(&Role::Organizer);
-                if !called_by_event_organizer && mm.flags.contains(Flags::UserIDRequired) {
-                    warn!("Method: {method_name} not called by event organizer");
-                    warn!("User id: {:?}", user_id);
-                }
-                return vec![
-                    MetaMethod::new_static(
-                        &mm.name,
-                        mm.flags,
-                        if called_by_event_organizer { AccessLevel::Read } else { mm.access },
-                        mm.param.as_ref(),
-                        mm.result.as_ref(),
-                        &[],
-                        mm.description.as_ref(),
-                    )
-                ]
-            }
-        }
-        methods.to_vec()
-    } else {
+    let Some(mm) = methods.iter().find(|&m| m.name == method_name) else {
+        warn!("Unknown method: {method_name}");
+        return vec![];
+    };
+
+    if !mm.flags.contains(Flags::UserIDRequired) {
+        warn!("Method: {method_name} should require a user id, if it uses user rights escalation");
         return vec![];
     }
+
+    let Some(event_id) = event_id else {
+        warn!("Event id not provided for method: {method_name}");
+        return vec![];
+    };
+
+    // 1. Resolve the event; reject if unavailable.
+    let Ok(event_record) = app_state.write().await.event_record(event_id).await else {
+        warn!("Invalid event id: {event_id} for method: {method_name}");
+        return vec![];
+    };
+    let event_record = event_record.read().await;
+
+    // 2. Identify the user and reject if banned, regardless of API token.
+    let user_id = sanitize_user_id(rq);
+    let user_role = user_id.and_then(|u| event_record.config.members.get(u));
+    if user_role == Some(&Role::Banned) {
+        warn!("User: {user_id:?} is banned");
+        return vec![];
+    }
+
+    // 3. Validate the API token if supplied.
+    let api_token = rq.meta().get(QX_API_TOKEN).map(|v| v.as_str());
+    let valid_api_token = match api_token {
+        Some(api_token) if api_token == event_record.api_token => true,
+        Some(_) => {
+            warn!("API token does not match event_id: {event_id}");
+            return vec![];
+        }
+        None => false,
+    };
+
+
+    // 4. Allow access if either the token is valid or the user is an organizer.
+    let is_organizer = user_id.map(|u| u == event_record.owner).unwrap_or(false)
+        || user_role == Some(&Role::Organizer);
+    let called_by_event_organizer = valid_api_token || is_organizer;
+
+    // 5. Apply the method's access-level logic.
+    if !called_by_event_organizer {
+        warn!("Method: {method_name} not called by event organizer");
+        warn!("User id: {:?}", user_id);
+    }
+
+    vec![
+        MetaMethod::new_static(
+            &mm.name,
+            mm.flags,
+            if called_by_event_organizer { AccessLevel::Read } else { mm.access },
+            mm.param.as_ref(),
+            mm.result.as_ref(),
+            &[],
+            mm.description.as_ref(),
+        )
+    ]
 }
+
+
+
 
 pub(crate) async fn request_handler(
     rq: RpcMessage,
