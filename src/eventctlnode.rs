@@ -312,7 +312,8 @@ pub(crate) async fn request_handler(
                             to_rpcvalue(&events).map_err(|e| string_to_rpc_error(e.to_string()))
                         }),
                         METH_EVENT_DATA => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                            let event_id = rq.param().unwrap_or_default().as_int();
+                            let JustEventIdParam(event_id) = JustEventIdParam::try_from(rq.param())
+                                .map_err(anyhow_to_rpc_error)?;
                             let res = app_state.read().await.load_event_record(event_id).await;
                             res.map(|mut rec| {
                                 rec.api_token = "".into();
