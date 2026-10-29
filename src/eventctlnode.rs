@@ -125,6 +125,10 @@ impl_rpcvalue_conversions!(SetEventDbModeParams);
 struct PushEventDbParams(EventId, Vec<u8>);
 impl_rpcvalue_conversions!(PushEventDbParams);
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeleteEventParams(String);
+impl_rpcvalue_conversions!(DeleteEventParams);
+
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
     // log::info!("escalate_event_owner_rights, method_name: {method_name}, event id: {event_id:?}");
     if let Some(event_id) = event_id {
@@ -241,14 +245,17 @@ pub(crate) async fn request_handler(
                                 Ok(res)
                             })
                         }
-                        METH_DELETE_EVENT => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                            let api_token = rq.param().unwrap_or_default().as_str();
-                            let event_id = app_state.read().await.api_token_to_event_id(api_token).await
-                                .map_err(anyhow_to_rpc_error)?;
-                            let was_deleted = app_state.write().await.delete_event(event_id, client_cmd_tx).await
-                                .map_err(anyhow_to_rpc_error)?;
-                            Ok(RpcValue::from(was_deleted))
-                        }),
+                        METH_DELETE_EVENT => {
+                            let DeleteEventParams(api_token) = DeleteEventParams::try_from(rq.param())
+                                .map_err(|_| UnresolvedRequest)?;
+                            m.resolve(EVENTCTL_ROOT_METHODS, async move || {
+                                let event_id = app_state.read().await.api_token_to_event_id(&api_token).await
+                                    .map_err(anyhow_to_rpc_error)?;
+                                let was_deleted = app_state.write().await.delete_event(event_id, client_cmd_tx).await
+                                    .map_err(anyhow_to_rpc_error)?;
+                                Ok(RpcValue::from(was_deleted))
+                            })
+                        },
                         METH_PUSH_EVENT_DB => {
                             let PushEventDbParams(event_id, zdata) = PushEventDbParams::try_from(rq.param())
                                 .map_err(|_| UnresolvedRequest)?;
