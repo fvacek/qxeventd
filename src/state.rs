@@ -144,6 +144,11 @@ impl State {
         Ok(record)
     }
 
+    pub async fn event_db_mode(&mut self, event_id: EventId) -> anyhow::Result<EventDbMode> {
+        let record = self.event_record(event_id).await?;
+        Ok(record.read().await.db_mode.clone())
+    }
+
     async fn forget_event_record(&mut self, event_id: EventId) -> anyhow::Result<()> {
         self.event_records.remove(&event_id);
         Ok(())
@@ -349,10 +354,20 @@ async fn setup_remote_db_connection(app_state: SharedAppState, event_id: EventId
                     let remote_sql_path = remote_event_sql_path(event_id);
                     if let Some(path) = message.shv_path() && path == &remote_sql_path {
                         info!("Received event {event_id} subscription message: {:?}", message.shv_path());
+                        let db_mode = match app_state.write().await.event_db_mode(event_id).await {
+                            Ok(db_mode) => db_mode,
+                            Err(err) => {
+                                error!("Failed to load event {event_id} record: {err}");
+                                continue;
+                            }
+                        };
+                        if !matches!(db_mode, EventDbMode::Replica) {
+                            continue;
+                        }
                         match rechng_from_rpcvalue(message.param()) {
-                            Ok(recchng) => match reply_remote_db_recchng(app_state.clone(), event_id, &recchng, rpc_client.clone()).await {
+                            Ok(recchng) => match apply_remote_db_recchng(app_state.clone(), event_id, &recchng, rpc_client.clone()).await {
                                 Ok(()) => {}
-                                Err(err) => error!("Failed to reply remote db recchng for event {event_id}: {err}"),
+                                Err(err) => error!("Failed to apply remote db recchng for event {event_id}: {err}"),
                             },
                             Err(err) => {
                                 error!("Failed to decode event {event_id} recchng signal: {err}");
@@ -371,15 +386,7 @@ async fn setup_remote_db_connection(app_state: SharedAppState, event_id: EventId
     }
 }
 
-async fn reply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) -> anyhow::Result<()> {
-    let db_mode = {
-        let state = app_state.read().await;
-        state.load_event_record(event_id).await?.db_mode
-    };
-    if !matches!(db_mode, EventDbMode::Replica) {
-        return Ok(());
-    }
-
+async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) -> anyhow::Result<()> {
     let sql_api = EventSqlApi::new(event_id, app_state, rpc_client);
 
     match &recchng.op {
