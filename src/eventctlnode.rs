@@ -288,18 +288,15 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_PUSH_EVENT_DB => {
-                            match PushEventDbParams::try_from(rq.param()) {
-                                Ok(PushEventDbParams(event_id, zdata)) => {
-                                    m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
-                                        State::push_event_db(app_state, event_id, &zdata, client_cmd_tx).await
-                                            .map_err(anyhow_to_rpc_error)?;
-                                        Ok(RpcValue::null())
-                                    })
-                                }
-                                Err(err) => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                                    Err::<RpcValue, _>(anyhow_to_rpc_error(err))
-                                }),
-                            }
+                            let PushEventDbParams(event_id, zdata) = match PushEventDbParams::try_from(rq.param()) {
+                                Ok(params) => params,
+                                Err(err) => return m.resolve(EVENTCTL_ROOT_METHODS, async move || { Err::<RpcValue, _>(anyhow_to_rpc_error(err)) }),
+                            };
+                            m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
+                                State::push_event_db(app_state, event_id, &zdata, client_cmd_tx).await
+                                    .map_err(anyhow_to_rpc_error)?;
+                                Ok(RpcValue::null())
+                            })
                         }
                         METH_PULL_EVENT_DB => {
                             let JustEventIdParam(event_id) = JustEventIdParam::try_from(rq.param())
