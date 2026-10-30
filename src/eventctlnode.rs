@@ -250,8 +250,10 @@ pub(crate) async fn request_handler(
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_shv_path)]))
                         }),
                         METH_READ_EVENT_RECORD => {
-                            let JustEventIdParam(event_id) = JustEventIdParam::try_from(rq.param())
-                                .map_err(|_| UnresolvedRequest)?;
+                            let JustEventIdParam(event_id) = match JustEventIdParam::try_from(rq.param()) {
+                                Ok(params) => params,
+                                Err(err) => return m.resolve(EVENTCTL_ROOT_METHODS, async move || { Err::<RpcValue, _>(anyhow_to_rpc_error(err)) }),
+                            };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                                 let res = app_state.read().await.load_event_record(event_id).await
                                     .map_err(anyhow_to_rpc_error)?;
@@ -259,8 +261,10 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_UPDATE_EVENT_RECORD => {
-                            let UpdateEventRecordParams(event_id, change) = UpdateEventRecordParams::try_from(rq.param())
-                                .map_err(|_| UnresolvedRequest)?;
+                            let UpdateEventRecordParams(event_id, change) = match UpdateEventRecordParams::try_from(rq.param()) {
+                                Ok(params) => params,
+                                Err(err) => return m.resolve(EVENTCTL_ROOT_METHODS, async move || { Err::<RpcValue, _>(anyhow_to_rpc_error(err)) }),
+                            };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                                 let res = app_state.write().await.update_event_record(event_id, change, client_cmd_tx).await
                                     .map_err(anyhow_to_rpc_error)?;
@@ -268,8 +272,10 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_SET_EVENT_DB_MODE => {
-                            let SetEventDbModeParams(event_id, mode) = SetEventDbModeParams::try_from(rq.param())
-                                .map_err(|_| UnresolvedRequest)?;
+                            let SetEventDbModeParams(event_id, mode) = match SetEventDbModeParams::try_from(rq.param()) {
+                                Ok(params) => params,
+                                Err(err) => return m.resolve(EVENTCTL_ROOT_METHODS, async move || { Err::<RpcValue, _>(anyhow_to_rpc_error(err)) }),
+                            };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                                 let res = app_state.write().await.set_event_db_mode(event_id, mode, client_cmd_tx).await
                                     .map_err(anyhow_to_rpc_error)?;
@@ -299,8 +305,10 @@ pub(crate) async fn request_handler(
                             })
                         }
                         METH_PULL_EVENT_DB => {
-                            let JustEventIdParam(event_id) = JustEventIdParam::try_from(rq.param())
-                                .map_err(|_| UnresolvedRequest)?;
+                            let JustEventIdParam(event_id) = match JustEventIdParam::try_from(rq.param()) {
+                                Ok(params) => params,
+                                Err(err) => return m.resolve(EVENTCTL_ROOT_METHODS, async move || { Err::<RpcValue, _>(anyhow_to_rpc_error(err)) }),
+                            };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                                 let (len, zdata) = State::pull_event_db(app_state, event_id, client_cmd_tx).await
                                     .map_err(anyhow_to_rpc_error)?;
@@ -341,8 +349,10 @@ pub(crate) async fn request_handler(
                             res.map_err(anyhow_to_rpc_error)
                         }),
                         METH_EVENT_UPDATE_LATE_ENTRY => {
-                            let params = LateEntryParams::try_from(rq.param().unwrap_or_default())
-                                .map_err(|_| UnresolvedRequest)?;
+                            let params = match LateEntryParams::try_from(rq.param().unwrap_or_default()) {
+                                Ok(params) => params,
+                                Err(err) => return m.resolve(EVENTCTL_NODE_METHODS, async move || { Err::<RpcValue, _>(string_to_rpc_error(err)) }),
+                            };
                             let methods = escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_NODE_METHODS).await;
                             m.resolve(methods, async move || {
                                 let Some(user_id) = sanitize_user_id(&rq).map(str::to_string) else {
