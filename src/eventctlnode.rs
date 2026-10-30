@@ -310,7 +310,7 @@ pub(crate) async fn request_handler(
                                 Err(err) => return m.resolve(EVENTCTL_ROOT_METHODS, async move || { Err::<RpcValue, _>(anyhow_to_rpc_error(err)) }),
                             };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
-                                let (len, zdata) = State::pull_event_db(app_state, event_id, client_cmd_tx).await
+                                let (len, zdata) = State::pull_event_db(app_state, event_id).await
                                     .map_err(anyhow_to_rpc_error)?;
                                 let ret = vec![RpcValue::from(len as i64), RpcValue::from(zdata)];
                                 Ok(RpcValue::from(ret))

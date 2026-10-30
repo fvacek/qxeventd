@@ -194,22 +194,34 @@ impl State {
         Ok(())
     }
 
-    pub async fn pull_event_db(app_state: SharedAppState, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<(usize, Vec<u8>)> {
-        let was_open = {
-            let mut state = app_state.write().await;
-            let was_open = state.open_events.contains_key(&event_id);
-            if was_open {
-                state.close_event(event_id, client_command_sender.clone()).await?;
+    pub async fn pull_event_db(app_state: SharedAppState, event_id: EventId) -> anyhow::Result<(usize, Vec<u8>)> {
+        let open_event_db = {
+            let state = app_state.read().await;
+            match state.open_events.get(&event_id).cloned() {
+                Some(event) => Some(event.read().await.db.clone()),
+                None => None,
             }
-            was_open
         };
 
         let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-        let db_data = std::fs::read(&db_file)?;
+        let db_data = if let Some(db) = open_event_db {
+            // Event is open, make consistent snapshot using SQLite online backup API
+            let backup_file = format!("{db_file}.backup-{:016x}", rand::random::<u64>());
+            let backup_result = db.conn({
+                let backup_file = backup_file.clone();
+                move |conn| conn.backup(async_sqlite::rusqlite::MAIN_DB, &backup_file, None)
+            }).await;
+            let read_result = backup_result
+                .map_err(|e| anyhow!("Failed to backup event {event_id} DB: {e}"))
+                .and_then(|_| std::fs::read(&backup_file).map_err(anyhow::Error::from));
+            if let Err(err) = std::fs::remove_file(&backup_file) && err.kind() != std::io::ErrorKind::NotFound {
+                warn!("Failed to remove event DB backup file {backup_file}: {err}");
+            }
+            read_result?
+        } else {
+            std::fs::read(&db_file)?
+        };
         let db_data_size = db_data.len();
-        if was_open {
-            open_event(app_state, event_id, client_command_sender).await?;
-        }
 
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&db_data)?;
