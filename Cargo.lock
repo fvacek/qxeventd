@@ -2014,6 +2014,7 @@ dependencies = [
  "async-broadcast",
  "async-trait",
  "duration-str 0.21.0",
+ "event-listener 5.4.1",
  "futures",
  "futures-rustls",
  "futures-time",

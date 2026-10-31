@@ -32,6 +32,8 @@ mod eventctlnode;
 mod eventdb;
 mod qxchange;
 mod qxeventconfig;
+#[cfg(test)]
+mod tests;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -214,17 +216,21 @@ async fn async_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let ret = shvclient::Client::new()
-        .device(DotDeviceNode::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), Some("00000".into())))
-        .mount_static(".app", AppNode::new(env!("CARGO_PKG_NAME"), app_state.clone()))
-        // .mount_static("sql", SqlNode { app_state: app_state.clone() })
-        .mount_dynamic("eventctl", move |rq, client_cmd_tx| {
-                        eventctlnode::request_handler(rq, client_cmd_tx, app_state2.clone())
-        })
+    let ret = build_client(app_state)
         .run_with_init(&config.client, app_tasks)
         .await;
 
     ret.map_err(|e| -> Box<dyn std::error::Error> { e })
+}
+
+fn build_client(app_state: SharedAppState) -> shvclient::Client<shvclient::client::Full> {
+    shvclient::Client::new()
+        .device(DotDeviceNode::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), Some("00000".into())))
+        .mount_static(".app", AppNode::new(env!("CARGO_PKG_NAME"), app_state.clone()))
+        // .mount_static("sql", SqlNode { app_state: app_state.clone() })
+        .mount_dynamic("eventctl", move |rq, client_cmd_tx| {
+                        eventctlnode::request_handler(rq, client_cmd_tx, app_state.clone())
+        })
 }
 
 async fn app_task(

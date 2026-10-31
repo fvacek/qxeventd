@@ -34,6 +34,7 @@ rand = "0.8.5"
 flate2 = "1"
 
 [dev-dependencies]
+shvclient = { git = "https://github.com/silicon-heaven/libshvclient-rs", branch = "main", default-features = false, features = ["smol", "mocking"]}
 tempfile = "3.0"
 futures-lite = "2.0"
 smol-potat = "1.1.2"

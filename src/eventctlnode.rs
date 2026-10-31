@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::rpcvalueext::RpcValueExt;
 use crate::rpctype::RpcType;
 use shvclient::ClientCommandSender;
-use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, MethodResolver, RequestHandlerResult, UnresolvedRequest, err_unresolved_request};
+use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, MethodResolver, RequestHandlerResult, err_unresolved_request};
 use shvproto::{RpcValue, from_rpcvalue, to_rpcvalue};
 use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
@@ -34,7 +34,6 @@ impl EventCtlNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
-// #[serde(transparent)]
 struct EventIdParam {
     event_id: EventId,
 }
@@ -111,7 +110,7 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
         METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", "[{?}]", &[], "",
     ),
     MetaMethod::new_static(
-        METH_EVENT_DATA, Flags::None, AccessLevel::Read, "n", "{?}", &[], "",
+        METH_EVENT_DATA, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, "{?}", &[], "",
     ),
 ];
 
@@ -154,12 +153,6 @@ struct SetEventDbModeParams {
 struct PushEventDbParams {
     event_id: EventId,
     compressed_data: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-struct DeleteEventParams {
-    api_token: String,
 }
 
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
@@ -274,20 +267,30 @@ pub(crate) async fn request_handler(
                                 Ok(CreateEventResult { event_id, api_token }.to_rpcvalue())
                             })
                         },
-                        METH_OPEN_EVENT => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                            let event_id = rq.param().unwrap_or_default().as_int();
-                            let event_shv_path = open_event(app_state, event_id, client_cmd_tx).await
-                                .map_err(anyhow_to_rpc_error)?;
-                            Ok(RpcValue::from(event_shv_path))
-                        }),
-                        METH_OPEN_EVENT_API_KEY => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                            let api_token = rq.param().unwrap_or_default().as_str();
-                            let event_id = app_state.read().await.api_token_to_event_id(api_token).await
-                                .map_err(anyhow_to_rpc_error)?;
-                            let event_shv_path = open_event(app_state, event_id, client_cmd_tx).await
-                                .map_err(anyhow_to_rpc_error)?;
-                            Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_shv_path)]))
-                        }),
+                        METH_OPEN_EVENT => {
+                            let p = match EventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
+                                Ok(params) => params,
+                                Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
+                            };
+                            m.resolve(EVENTCTL_ROOT_METHODS, async move || {
+                                let mount_point = open_event(app_state, p.event_id, client_cmd_tx).await
+                                    .map_err(anyhow_to_rpc_error)?;
+                                Ok(OpenEventResult { event_id: p.event_id, mount_point }.to_rpcvalue())
+                            })
+                        },
+                        METH_OPEN_EVENT_API_KEY => {
+                            let p = match ApiTokenParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
+                                Ok(params) => params,
+                                Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
+                            };
+                            m.resolve(EVENTCTL_ROOT_METHODS, async move || {
+                                let event_id = app_state.read().await.api_token_to_event_id(&p.api_token).await
+                                    .map_err(anyhow_to_rpc_error)?;
+                                let mount_point = open_event(app_state, event_id, client_cmd_tx).await
+                                    .map_err(anyhow_to_rpc_error)?;
+                                Ok(OpenEventResult { event_id, mount_point }.to_rpcvalue())
+                            })
+                        },
                         METH_READ_EVENT_RECORD => {
                             let p = match EventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
@@ -322,8 +325,10 @@ pub(crate) async fn request_handler(
                             })
                         }
                         METH_DELETE_EVENT => {
-                            let p = DeleteEventParams::try_from_rpcvalue(rq.param().unwrap_or_default())
-                                .map_err(|_| UnresolvedRequest)?;
+                            let p = match ApiTokenParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
+                                Ok(params) => params,
+                                Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
+                            };
                             m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                                 let event_id = app_state.read().await.api_token_to_event_id(&p.api_token).await
                                     .map_err(anyhow_to_rpc_error)?;
@@ -519,13 +524,15 @@ mod tests {
     }
 
     #[test]
-    fn single_field_param_is_transparent() {
-        let params = EventIdParam::try_from_rpcvalue(&RpcValue::from_cpon("42").unwrap()).unwrap();
+    fn single_field_param_is_map() {
+        let params = EventIdParam::try_from_rpcvalue(&RpcValue::from_cpon(r#"{"event_id":42}"#).unwrap()).unwrap();
         assert_eq!(params.event_id, 42);
-        assert_eq!(params.to_rpcvalue().to_cpon(), "42");
+        assert_eq!(params.to_rpcvalue().to_cpon(), r#"{"event_id":42}"#);
+        assert!(EventIdParam::try_from_rpcvalue(&RpcValue::from_cpon("42").unwrap()).is_err());
+        assert_eq!(EventIdParam::RPC_TYPE, "{i:event_id}");
 
-        let params = DeleteEventParams::try_from_rpcvalue(&RpcValue::from_cpon(r#""tok""#).unwrap()).unwrap();
+        let params = ApiTokenParam::try_from_rpcvalue(&RpcValue::from_cpon(r#"{"api_token":"tok"}"#).unwrap()).unwrap();
         assert_eq!(params.api_token, "tok");
-        assert_eq!(params.to_rpcvalue().to_cpon(), r#""tok""#);
+        assert_eq!(params.to_rpcvalue().to_cpon(), r#"{"api_token":"tok"}"#);
     }
 }

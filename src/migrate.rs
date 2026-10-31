@@ -31,12 +31,17 @@ const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub async fn create_db_connection() -> Result<Pool> {
     let config = GLOBAL_CONFIG.get().expect("Global config should be initialized");
-    let (db_file, journal_mode) = if config.data_dir.is_empty() {
+    open_app_db(&config.data_dir).await
+}
+
+/// Open app DB in `data_dir`, in-memory DB is used if `data_dir` is empty
+pub async fn open_app_db(data_dir: &str) -> Result<Pool> {
+    let (db_file, journal_mode) = if data_dir.is_empty() {
         (":memory:".to_string(), JournalMode::Memory)
     } else {
-        std::fs::create_dir_all(&config.data_dir)?;
+        std::fs::create_dir_all(data_dir)?;
         const DB_FILE: &str = "qxevent.sqlite";
-        (format!("{}/{DB_FILE}", config.data_dir), JournalMode::Wal)
+        (format!("{data_dir}/{DB_FILE}"), JournalMode::Wal)
     };
     info!("Opening db {db_file} in journal mode: {journal_mode:?}");
     let pool = PoolBuilder::new()

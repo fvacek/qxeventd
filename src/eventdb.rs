@@ -53,9 +53,6 @@ pub async fn migrate_db(db_file: &str, event_data: &EventRecord, client_command_
                 ("cvalue", value.into()),
             ]))).await?;
         }
-        qxsql.create_record("stages", &record_from_slice(&[
-            ("startdatetime", event_data.date.into()),
-        ])).await?;
     }
     info!("Migration of: {db_file} OK");
 
