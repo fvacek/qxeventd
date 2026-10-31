@@ -1,0 +1,252 @@
+use std::{backtrace::Backtrace, sync::OnceLock};
+use log::{error, info, warn};
+// use qxsql::{QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecListParam, RecReadParam, RecUpdateParam, string_list_to_ref_vec};
+// use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, LIST_PARAMS, LIST_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
+use shvclient::clientapi::CallRpcMethodError;
+use shvclient::{ClientCommandSender, ClientEvent, ClientEventsReceiver};
+use shvclient::appnodes::{DotDeviceNode};
+use shvrpc::rpcmessage::{RpcError, RpcErrorCode};
+use smol::{lock::RwLock, channel};
+use futures::{select, FutureExt};
+
+use crate::appnode::AppNode;
+use crate::state::SharedAppState;
+use crate::{
+    state::{State},
+    config::Config,
+    migrate::{create_db_connection, open_app_db},
+};
+
+mod rpcvalueext;
+mod rpctype;
+mod state;
+pub mod config;
+mod migrate;
+mod localdbsqlapi;
+mod remotedbsqlapi;
+mod eventsqlapi;
+mod appnode;
+mod eventctlnode;
+mod eventdb;
+mod qxchange;
+mod qxeventconfig;
+
+pub(crate) static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
+
+fn global_config() -> &'static Config {
+    GLOBAL_CONFIG.get().expect("Global config should be initialized")
+}
+
+/// Set process wide config, must be called once before any other qxeventd function.
+pub fn set_global_config(config: Config) {
+    GLOBAL_CONFIG
+        .set(config)
+        .expect("Global config should only be set once");
+}
+
+// struct SqlNode {
+//     app_state: SharedAppState,
+// }
+
+// shvclient::impl_static_node! {
+//     SqlNode(&self, request, rpc_client) {
+//         "query" [None, Read, QUERY_PARAMS, QUERY_RESULT] (query: QueryAndParams) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let result = qxsql.query(query.query(), query.params()).await;
+//             Some(res_to_rpcvalue(result))
+//         }
+//         "exec" [None, Read, EXEC_PARAMS, EXEC_RESULT] (query: QueryAndParams) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let result = qxsql.exec(query.query(), query.params()).await;
+//             Some(res_to_rpcvalue(result))
+//         }
+//         "list" [None, Read, LIST_PARAMS, LIST_RESULT] (param: RecListParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let fields = string_list_to_ref_vec(&param.fields);
+//             let result = qxsql.list_records(&param.table, fields, param.ids_above, param.limit).await;
+//             Some(res_to_rpcvalue(result))
+//         }
+//         "create" [None, Write, CREATE_PARAMS, CREATE_RESULT] (param: RecInsertParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let insert_id = qxsql.create_record_with_recchng(&param.table, &param.record, issuer(&request)).await;
+//             Some(res_to_rpcvalue(insert_id))
+//         }
+//         "read" [None, Read, READ_PARAMS, READ_RESULT] (param: RecReadParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let fields = string_list_to_ref_vec(&param.fields);
+//             let result = qxsql.read_record(&param.table, param.id, fields).await;
+//             Some(res_to_rpcvalue(result))
+//         }
+//         "update" [None, Write, UPDATE_PARAMS, UPDATE_RESULT] (param: RecUpdateParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let update_success = qxsql.update_record_with_recchng(&param.table, param.id, &param.record, issuer(&request)).await;
+//             Some(res_to_rpcvalue(update_success))
+//         }
+//         "delete" [None, Write, DELETE_PARAMS, DELETE_RESULT] (param: RecDeleteParam) => {
+//             let qxsql = LocalDbSqlApi::new(self.app_state.read().await.db_pool.clone(), rpc_client.clone());
+//             let was_deleted = qxsql.delete_record_with_recchng(&param.table, param.id, issuer(&request)).await;
+//             Some(res_to_rpcvalue(was_deleted))
+//         }
+//     }
+// }
+
+/// Run qxeventd, connects to broker specified in global config.
+pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let db_pool = create_db_connection().await?;
+    let (shutdown_sender, shutdown_receiver) = channel::bounded(1);
+    let app_state = SharedAppState::new(RwLock::new(State {
+        db_pool,
+        open_events: Default::default(),
+        shutdown_sender: Some(shutdown_sender),
+        event_records: Default::default(),
+    }));
+    let config = GLOBAL_CONFIG
+        .get()
+        .expect("Global config should be initialized");
+
+    let app_state2 = app_state.clone();
+    let app_tasks = {
+        let app_state = app_state2.clone();
+        move |client_cmd_tx, client_evt_rx| {
+            smol::spawn(app_task(client_cmd_tx, client_evt_rx, app_state, shutdown_receiver)).detach();
+        }
+    };
+
+    let ret = build_client(app_state)
+        .run_with_init(&config.client, app_tasks)
+        .await;
+
+    ret.map_err(|e| -> Box<dyn std::error::Error> { e })
+}
+
+/// Create qxeventd SHV client with app DB in `app_db_dir` (in-memory DB if empty).
+/// Background app task is not started, this is intended for tests with mocked broker connection.
+pub async fn create_client(app_db_dir: &str) -> anyhow::Result<shvclient::Client<shvclient::client::Full>> {
+    let db_pool = open_app_db(app_db_dir).await?;
+    let app_state = SharedAppState::new(RwLock::new(State {
+        db_pool,
+        open_events: Default::default(),
+        shutdown_sender: None,
+        event_records: Default::default(),
+    }));
+    Ok(build_client(app_state))
+}
+
+fn build_client(app_state: SharedAppState) -> shvclient::Client<shvclient::client::Full> {
+    shvclient::Client::new()
+        .device(DotDeviceNode::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), Some("00000".into())))
+        .mount_static(".app", AppNode::new(env!("CARGO_PKG_NAME"), app_state.clone()))
+        // .mount_static("sql", SqlNode { app_state: app_state.clone() })
+        .mount_dynamic("eventctl", move |rq, client_cmd_tx| {
+                        eventctlnode::request_handler(rq, client_cmd_tx, app_state.clone())
+        })
+}
+
+async fn app_task(
+    client_cmd_tx: ClientCommandSender,
+    mut client_evt_rx: ClientEventsReceiver,
+    app_state: SharedAppState,
+    shutdown_receiver: channel::Receiver<()>,
+) -> shvrpc::Result<()> {
+    info!("app task started");
+
+    let mut is_connected = false;
+    let client_cmd_tx2 = client_cmd_tx.clone();
+    loop {
+        select! {
+            rx_event = client_evt_rx.recv_event().fuse() => match rx_event {
+                Ok(ClientEvent::ConnectionFailed(_)) => {
+                    warn!("Connection failed");
+                }
+                Ok(ClientEvent::Connected(api)) => {
+                    is_connected = true;
+                    info!("Device connected to broker API: {:?}", api);
+                },
+                Ok(ClientEvent::Disconnected) => {
+                    is_connected = false;
+                    info!("Device disconnected from shvbroker");
+                },
+                Err(err) => {
+                    error!("Device event error: {err}");
+                    break;
+                },
+            },
+            _ = shutdown_receiver.recv().fuse() => {
+                info!("Shutdown signal received");
+                client_cmd_tx.terminate_client();
+                break;
+            }
+            _ = futures_time::task::sleep(futures_time::time::Duration::from_secs(60)).fuse() => { }
+
+        }
+        if is_connected {
+            let _ = app_state.write().await.gc_expired_events(client_cmd_tx2.clone()).await;
+        }
+    }
+    info!("App task finished");
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn call_rpc_error_to_anyhow(err: CallRpcMethodError) -> anyhow::Error {
+    anyhow::anyhow!("{}", err)
+}
+
+fn anyhow_to_rpc_error(err: anyhow::Error) -> RpcError {
+    error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
+    RpcError::new(RpcErrorCode::MethodCallException, format!("Error: {err}"))
+}
+
+fn string_to_rpc_error(err: String) -> RpcError {
+    error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
+    RpcError::new(RpcErrorCode::MethodCallException, err)
+}
+
+fn str_to_rpc_error(err: &str) -> RpcError {
+    error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
+    RpcError::new(RpcErrorCode::MethodCallException, err.to_string())
+}
+
+// fn res_to_rpcvalue<T: serde::Serialize>(res: anyhow::Result<T>) -> Result<RpcValue, RpcError> {
+//     res.and_then(|value| {
+//         to_rpcvalue(&value)
+//             .map_err(|err| anyhow::anyhow!("Serialization error: {}", err))
+//     })
+//     .map_err(anyhow_to_rpc_error)
+// }
+
+fn generate_api_token() -> String {
+    use rand::Rng;
+    const LEN: usize = 10;
+    const VOWELS: &str = "aeiouy";
+    const CONSONANTS: &str = "bcdfghjklmnpqrstvwxz";
+    let mut rng = rand::thread_rng();
+    (0..LEN)
+        .map(|n| {
+            let charset = if n % 2 == 0 { CONSONANTS } else { VOWELS };
+            let idx = rng.gen_range(0..charset.len());
+            charset.chars().nth(idx).unwrap()
+        })
+        .collect()
+}
+
+// fn issuer(rq: &RpcMessage) -> Option<String> {
+//     rq.user_id().and_then(|uid| {
+//         let (issuer, _) = split_first_fragment(uid, ';');
+//         if issuer.is_empty() {
+//             Some(issuer.to_string())
+//         } else {
+//             None
+//         }
+//     })
+// }
+
+// fn split_first_fragment(path: &str, sep: char) -> (&str, &str) {
+//     if let Some(ix) = path.find(sep) {
+//         let dir = &path[0 .. ix];
+//         let rest = &path[ix + 1..];
+//         (dir, rest)
+//     } else {
+//         (path, "")
+//     }
+// }

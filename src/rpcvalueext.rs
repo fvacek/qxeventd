@@ -6,7 +6,7 @@ use shvproto::RpcValue;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// #[derive(Serialize, Deserialize)]
 /// struct MyParams {
 ///     event_id: i64,
