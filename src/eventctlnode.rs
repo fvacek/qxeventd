@@ -3,6 +3,7 @@ use log::warn;
 use serde::{Serialize};
 use serde::Deserialize;
 use crate::rpcvalueext::RpcValueExt;
+use crate::rpctype::RpcType;
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, MethodResolver, RequestHandlerResult, UnresolvedRequest, err_unresolved_request};
 use shvproto::{RpcValue, from_rpcvalue, to_rpcvalue};
@@ -73,7 +74,7 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
         METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, "s:api_token", "b:was_deleted", &[], "",
     ),
     MetaMethod::new_static(
-        METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, "{i:event_id,x:compressed_data}", "n", &[], "",
+        METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, PushEventDbParams::RPC_TYPE, "n", &[], "",
     ),
     MetaMethod::new_static(
         METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, "i:event_id", "[i:uncompressed_data_size,x:compressed_data]", &[], "",
@@ -128,7 +129,7 @@ struct SetEventDbModeParams {
     db_mode: crate::state::EventDbMode,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
 struct PushEventDbParams {
     event_id: EventId,
     compressed_data: Vec<u8>,
@@ -484,6 +485,11 @@ mod tests {
 
         assert_eq!(params.event_id, 2);
         assert_eq!(params.compressed_data, b"abc");
+    }
+
+    #[test]
+    fn push_event_db_params_rpc_type() {
+        assert_eq!(PushEventDbParams::RPC_TYPE, "{i:event_id,x:compressed_data}");
     }
 
     #[test]

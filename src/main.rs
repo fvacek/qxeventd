@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod rpcvalueext;
+mod rpctype;
 mod state;
 mod config;
 mod migrate;
