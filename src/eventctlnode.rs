@@ -33,6 +33,34 @@ impl EventCtlNode {
 
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+// #[serde(transparent)]
+struct EventIdParam {
+    event_id: EventId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+struct ApiTokenParam {
+    api_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+struct CreateEventParam {
+    owner: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+struct CreateEventResult {
+    event_id: EventId,
+    api_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+struct OpenEventResult {
+    event_id: EventId,
+    mount_point: String,
+}
+
 const METH_CREATE_EVENT: &str = "createEvent";
 const METH_OPEN_EVENT: &str = "openEvent";
 const METH_OPEN_EVENT_API_KEY: &str = "openEventApiKey";
@@ -49,18 +77,18 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
     MetaMethod::new_static(
-        METH_CREATE_EVENT, Flags::None, AccessLevel::Write, "s:owner", "[i:event_id,s:api_token]", &[], "",
+        METH_CREATE_EVENT, Flags::None, AccessLevel::Write, CreateEventParam::RPC_TYPE, CreateEventResult::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
-        METH_OPEN_EVENT, Flags::None, AccessLevel::Read, "i:event_id", "s:mount_point", &[], "",
+        METH_OPEN_EVENT, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, OpenEventResult::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
-        METH_OPEN_EVENT_API_KEY, Flags::None, AccessLevel::Read, "s:api_token", "[i:event_id,s:mount_point]", &[], "",
+        METH_OPEN_EVENT_API_KEY, Flags::None, AccessLevel::Read, ApiTokenParam::RPC_TYPE, OpenEventResult::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can read event records
         // read event record is privileged operation, because it exposes api_key
-        METH_READ_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, "i:event_id", "{?}", &[], "",
+        METH_READ_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, "{?}", &[], "",
     ),
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can update event records
@@ -71,13 +99,13 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
         METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, "{i:event_id,s:db_mode}", "b", &[], "",
     ),
     MetaMethod::new_static(
-        METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, "s:api_token", "b:was_deleted", &[], "",
+        METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE, "b:was_deleted", &[], "",
     ),
     MetaMethod::new_static(
         METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, PushEventDbParams::RPC_TYPE, "n", &[], "",
     ),
     MetaMethod::new_static(
-        METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, "i:event_id", "[i:uncompressed_data_size,x:compressed_data]", &[], "",
+        METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, "[i:uncompressed_data_size,x:compressed_data]", &[], "",
     ),
     MetaMethod::new_static(
         METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", "[{?}]", &[], "",
@@ -109,13 +137,6 @@ fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
 }
 
 const QX_API_TOKEN: &str = "qx_api_token";
-
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-struct JustEventIdParam {
-    event_id: EventId,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UpdateEventRecordParams {
@@ -242,12 +263,17 @@ pub(crate) async fn request_handler(
                     let method = m.method();
 
                     match method {
-                        METH_CREATE_EVENT => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                            let owner = rq.param().unwrap_or_default().as_str().to_owned();
-                            let (event_id, api_token) = app_state.write().await.create_event(owner, client_cmd_tx.clone()).await
-                                .map_err(anyhow_to_rpc_error)?;
-                            Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(api_token)]))
-                        }),
+                        METH_CREATE_EVENT => {
+                            let p = match CreateEventParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
+                                Ok(params) => params,
+                                Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
+                            };
+                            m.resolve(EVENTCTL_ROOT_METHODS, async move || {
+                                let (event_id, api_token) = app_state.write().await.create_event(p.owner, client_cmd_tx.clone()).await
+                                    .map_err(anyhow_to_rpc_error)?;
+                                Ok(CreateEventResult { event_id, api_token }.to_rpcvalue())
+                            })
+                        },
                         METH_OPEN_EVENT => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                             let event_id = rq.param().unwrap_or_default().as_int();
                             let event_shv_path = open_event(app_state, event_id, client_cmd_tx).await
@@ -263,7 +289,7 @@ pub(crate) async fn request_handler(
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_shv_path)]))
                         }),
                         METH_READ_EVENT_RECORD => {
-                            let p = match JustEventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
+                            let p = match EventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -318,7 +344,7 @@ pub(crate) async fn request_handler(
                             })
                         }
                         METH_PULL_EVENT_DB => {
-                            let p = match JustEventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
+                            let p = match EventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -335,7 +361,7 @@ pub(crate) async fn request_handler(
                             to_rpcvalue(&events).map_err(|e| string_to_rpc_error(e.to_string()))
                         }),
                         METH_EVENT_DATA => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                            let p = JustEventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default())
+                            let p = EventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default())
                                 .map_err(anyhow_to_rpc_error)?;
                             let res = app_state.read().await.load_event_record(p.event_id).await;
                             res.map(|mut rec| {
@@ -494,7 +520,7 @@ mod tests {
 
     #[test]
     fn single_field_param_is_transparent() {
-        let params = JustEventIdParam::try_from_rpcvalue(&RpcValue::from_cpon("42").unwrap()).unwrap();
+        let params = EventIdParam::try_from_rpcvalue(&RpcValue::from_cpon("42").unwrap()).unwrap();
         assert_eq!(params.event_id, 42);
         assert_eq!(params.to_rpcvalue().to_cpon(), "42");
 
