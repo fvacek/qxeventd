@@ -508,9 +508,6 @@ impl EventRecord {
     }
 }
 
-impl_rpcvalue_conversions!(EventStatus);
-impl_rpcvalue_conversions!(EventRecord);
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct EventRecordChange {
     #[serde(skip_serializing_if = "Option::is_none")]

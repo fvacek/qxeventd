@@ -3,6 +3,7 @@ use log::warn;
 use serde::{Serialize};
 use serde::Deserialize;
 use rpc_pos_params::RpcPosParams;
+use crate::rpcvalueext::RpcValueExt;
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, MethodResolver, RequestHandlerResult, UnresolvedRequest, err_unresolved_request};
 use shvproto::{RpcValue, from_rpcvalue, to_rpcvalue};
@@ -114,34 +115,29 @@ const QX_API_TOKEN: &str = "qx_api_token";
 struct JustEventIdParam {
     event_id: EventId,
 }
-impl_rpcvalue_conversions!(JustEventIdParam);
 
 #[derive(Debug, Clone, RpcPosParams)]
 struct UpdateEventRecordParams {
     event_id: EventId,
     change: EventRecordChange,
 }
-impl_rpcvalue_conversions!(UpdateEventRecordParams);
 
 #[derive(Debug, Clone, RpcPosParams)]
 struct SetEventDbModeParams {
     event_id: EventId,
     db_mode: crate::state::EventDbMode,
 }
-impl_rpcvalue_conversions!(SetEventDbModeParams);
 
 #[derive(Debug, Clone, RpcPosParams)]
 struct PushEventDbParams {
     event_id: EventId,
     compressed_data: Vec<u8>,
 }
-impl_rpcvalue_conversions!(PushEventDbParams);
 
 #[derive(Debug, Clone, RpcPosParams)]
 struct DeleteEventParams {
     api_token: String,
 }
-impl_rpcvalue_conversions!(DeleteEventParams);
 
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
     // log::info!("escalate_event_owner_rights, method_name: {method_name}, event id: {event_id:?}");
@@ -265,18 +261,18 @@ pub(crate) async fn request_handler(
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_shv_path)]))
                         }),
                         METH_READ_EVENT_RECORD => {
-                            let JustEventIdParam { event_id } = match JustEventIdParam::try_from(rq.param()) {
+                            let JustEventIdParam { event_id } = match JustEventIdParam::from_rpc_param(rq.param()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                                 let res = app_state.read().await.load_event_record(event_id).await
                                     .map_err(anyhow_to_rpc_error)?;
-                                Ok(res)
+                                Ok(res.to_rpcvalue())
                             })
                         },
                         METH_UPDATE_EVENT_RECORD => {
-                            let UpdateEventRecordParams { event_id, change } = match UpdateEventRecordParams::try_from(rq.param()) {
+                            let UpdateEventRecordParams { event_id, change } = match UpdateEventRecordParams::from_rpc_param(rq.param()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -287,7 +283,7 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_SET_EVENT_DB_MODE => {
-                            let SetEventDbModeParams { event_id, db_mode: mode } = match SetEventDbModeParams::try_from(rq.param()) {
+                            let SetEventDbModeParams { event_id, db_mode: mode } = match SetEventDbModeParams::from_rpc_param(rq.param()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -298,7 +294,7 @@ pub(crate) async fn request_handler(
                             })
                         }
                         METH_DELETE_EVENT => {
-                            let DeleteEventParams { api_token } = DeleteEventParams::try_from(rq.param())
+                            let DeleteEventParams { api_token } = DeleteEventParams::from_rpc_param(rq.param())
                                 .map_err(|_| UnresolvedRequest)?;
                             m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                                 let event_id = app_state.read().await.api_token_to_event_id(&api_token).await
@@ -309,7 +305,7 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_PUSH_EVENT_DB => {
-                            let PushEventDbParams { event_id, compressed_data: zdata } = match PushEventDbParams::try_from(rq.param()) {
+                            let PushEventDbParams { event_id, compressed_data: zdata } = match PushEventDbParams::from_rpc_param(rq.param()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -320,7 +316,7 @@ pub(crate) async fn request_handler(
                             })
                         }
                         METH_PULL_EVENT_DB => {
-                            let JustEventIdParam { event_id } = match JustEventIdParam::try_from(rq.param()) {
+                            let JustEventIdParam { event_id } = match JustEventIdParam::from_rpc_param(rq.param()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -337,12 +333,12 @@ pub(crate) async fn request_handler(
                             to_rpcvalue(&events).map_err(|e| string_to_rpc_error(e.to_string()))
                         }),
                         METH_EVENT_DATA => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                            let JustEventIdParam { event_id } = JustEventIdParam::try_from(rq.param())
+                            let JustEventIdParam { event_id } = JustEventIdParam::from_rpc_param(rq.param())
                                 .map_err(anyhow_to_rpc_error)?;
                             let res = app_state.read().await.load_event_record(event_id).await;
                             res.map(|mut rec| {
                                 rec.api_token = "".into();
-                                rec
+                                rec.to_rpcvalue()
                             }).map_err(anyhow_to_rpc_error)
                         }),
                         _ => err_unresolved_request(),
@@ -361,7 +357,7 @@ pub(crate) async fn request_handler(
                     match method {
                         METH_EVENT_STATUS => m.resolve(EVENTCTL_NODE_METHODS, async move || {
                             let res = app_state.read().await.opened_event_status(event_id).await;
-                            res.map_err(anyhow_to_rpc_error)
+                            res.map(|status| status.to_rpcvalue()).map_err(anyhow_to_rpc_error)
                         }),
                         METH_EVENT_UPDATE_LATE_ENTRY => {
                             let params = match LateEntryParams::try_from(rq.param().unwrap_or_default()) {
@@ -456,7 +452,7 @@ mod tests {
     #[test]
     fn update_event_record_params_try_from_rpcvalue() {
         let value = RpcValue::from_cpon(r#"[2,{"api_token":"gubosinori","config":{"members":{"member@example.com":"Organizer"}},"stage_count":3}]"#).unwrap();
-        let params = UpdateEventRecordParams::try_from(&value).unwrap();
+        let params = UpdateEventRecordParams::try_from_rpcvalue(&value).unwrap();
 
         assert_eq!(params.event_id, 2);
         assert_eq!(params.change.stage_count, Some(3));
@@ -468,23 +464,23 @@ mod tests {
     #[test]
     fn set_event_db_mode_params_try_from_rpcvalue() {
         let value = RpcValue::from_cpon(r#"[2,"Replica"]"#).unwrap();
-        let params = SetEventDbModeParams::try_from(&value).unwrap();
+        let params = SetEventDbModeParams::try_from_rpcvalue(&value).unwrap();
 
         assert_eq!(params.event_id, 2);
         assert_eq!(params.db_mode, crate::state::EventDbMode::Replica);
-        assert_eq!(RpcValue::from(params).to_cpon(), r#"[2,"Replica"]"#);
+        assert_eq!(params.to_rpcvalue().to_cpon(), r#"[2,"Replica"]"#);
     }
 
     #[test]
     fn pos_params_reject_wrong_param_count() {
-        assert!(SetEventDbModeParams::try_from(&RpcValue::from_cpon("[2]").unwrap()).is_err());
-        assert!(SetEventDbModeParams::try_from(&RpcValue::from_cpon(r#"[2,"Replica",3]"#).unwrap()).is_err());
+        assert!(SetEventDbModeParams::try_from_rpcvalue(&RpcValue::from_cpon("[2]").unwrap()).is_err());
+        assert!(SetEventDbModeParams::try_from_rpcvalue(&RpcValue::from_cpon(r#"[2,"Replica",3]"#).unwrap()).is_err());
     }
 
     #[test]
     fn push_event_db_params_try_from_rpcvalue() {
         let value = RpcValue::from_cpon(r#"[2,b"abc"]"#).unwrap();
-        let params = PushEventDbParams::try_from(&value).unwrap();
+        let params = PushEventDbParams::try_from_rpcvalue(&value).unwrap();
 
         assert_eq!(params.event_id, 2);
         assert_eq!(params.compressed_data, b"abc");
@@ -492,12 +488,12 @@ mod tests {
 
     #[test]
     fn single_pos_param_is_transparent() {
-        let params = JustEventIdParam::try_from(&RpcValue::from_cpon("42").unwrap()).unwrap();
+        let params = JustEventIdParam::try_from_rpcvalue(&RpcValue::from_cpon("42").unwrap()).unwrap();
         assert_eq!(params.event_id, 42);
-        assert_eq!(RpcValue::from(params).to_cpon(), "42");
+        assert_eq!(params.to_rpcvalue().to_cpon(), "42");
 
-        let params = DeleteEventParams::try_from(&RpcValue::from_cpon(r#""tok""#).unwrap()).unwrap();
+        let params = DeleteEventParams::try_from_rpcvalue(&RpcValue::from_cpon(r#""tok""#).unwrap()).unwrap();
         assert_eq!(params.api_token, "tok");
-        assert_eq!(RpcValue::from(params).to_cpon(), r#""tok""#);
+        assert_eq!(params.to_rpcvalue().to_cpon(), r#""tok""#);
     }
 }

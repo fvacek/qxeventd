@@ -19,8 +19,7 @@ use crate::{
     migrate::create_db_connection,
 };
 
-#[macro_use]
-mod macros;
+mod rpcvalueext;
 mod state;
 mod config;
 mod migrate;
