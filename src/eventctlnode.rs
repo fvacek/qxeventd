@@ -2,7 +2,6 @@
 use log::warn;
 use serde::{Serialize};
 use serde::Deserialize;
-use rpc_pos_params::RpcPosParams;
 use crate::rpcvalueext::RpcValueExt;
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, MethodResolver, RequestHandlerResult, UnresolvedRequest, err_unresolved_request};
@@ -64,17 +63,17 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
     ),
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can update event records
-        METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, "[i:event_id,{?}:event_record]", "b", &[], "",
+        METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, "{i:event_id,{?}:change}", "b", &[], "",
     ),
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can change the database mode
-        METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, "[i:event_id,s:db_mode]", "b", &[], "",
+        METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, "{i:event_id,s:db_mode}", "b", &[], "",
     ),
     MetaMethod::new_static(
         METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, "s:api_token", "b:was_deleted", &[], "",
     ),
     MetaMethod::new_static(
-        METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, "[i:event_id,x:compressed_data]", "n", &[], "",
+        METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, "{i:event_id,x:compressed_data}", "n", &[], "",
     ),
     MetaMethod::new_static(
         METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, "i:event_id", "[i:uncompressed_data_size,x:compressed_data]", &[], "",
@@ -111,30 +110,32 @@ fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
 const QX_API_TOKEN: &str = "qx_api_token";
 
 
-#[derive(Debug, Clone, RpcPosParams)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
 struct JustEventIdParam {
     event_id: EventId,
 }
 
-#[derive(Debug, Clone, RpcPosParams)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct UpdateEventRecordParams {
     event_id: EventId,
     change: EventRecordChange,
 }
 
-#[derive(Debug, Clone, RpcPosParams)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SetEventDbModeParams {
     event_id: EventId,
     db_mode: crate::state::EventDbMode,
 }
 
-#[derive(Debug, Clone, RpcPosParams)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PushEventDbParams {
     event_id: EventId,
     compressed_data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, RpcPosParams)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
 struct DeleteEventParams {
     api_token: String,
 }
@@ -451,7 +452,7 @@ mod tests {
 
     #[test]
     fn update_event_record_params_try_from_rpcvalue() {
-        let value = RpcValue::from_cpon(r#"[2,{"api_token":"gubosinori","config":{"members":{"member@example.com":"Organizer"}},"stage_count":3}]"#).unwrap();
+        let value = RpcValue::from_cpon(r#"{"event_id":2,"change":{"api_token":"gubosinori","config":{"members":{"member@example.com":"Organizer"}},"stage_count":3}}"#).unwrap();
         let params = UpdateEventRecordParams::try_from_rpcvalue(&value).unwrap();
 
         assert_eq!(params.event_id, 2);
@@ -463,23 +464,22 @@ mod tests {
 
     #[test]
     fn set_event_db_mode_params_try_from_rpcvalue() {
-        let value = RpcValue::from_cpon(r#"[2,"Replica"]"#).unwrap();
+        let value = RpcValue::from_cpon(r#"{"event_id":2,"db_mode":"Replica"}"#).unwrap();
         let params = SetEventDbModeParams::try_from_rpcvalue(&value).unwrap();
 
         assert_eq!(params.event_id, 2);
         assert_eq!(params.db_mode, crate::state::EventDbMode::Replica);
-        assert_eq!(params.to_rpcvalue().to_cpon(), r#"[2,"Replica"]"#);
+        assert_eq!(params.to_rpcvalue().to_cpon(), r#"{"db_mode":"Replica","event_id":2}"#);
     }
 
     #[test]
-    fn pos_params_reject_wrong_param_count() {
-        assert!(SetEventDbModeParams::try_from_rpcvalue(&RpcValue::from_cpon("[2]").unwrap()).is_err());
-        assert!(SetEventDbModeParams::try_from_rpcvalue(&RpcValue::from_cpon(r#"[2,"Replica",3]"#).unwrap()).is_err());
+    fn params_reject_missing_field() {
+        assert!(SetEventDbModeParams::try_from_rpcvalue(&RpcValue::from_cpon(r#"{"event_id":2}"#).unwrap()).is_err());
     }
 
     #[test]
     fn push_event_db_params_try_from_rpcvalue() {
-        let value = RpcValue::from_cpon(r#"[2,b"abc"]"#).unwrap();
+        let value = RpcValue::from_cpon(r#"{"event_id":2,"compressed_data":b"abc"}"#).unwrap();
         let params = PushEventDbParams::try_from_rpcvalue(&value).unwrap();
 
         assert_eq!(params.event_id, 2);
@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn single_pos_param_is_transparent() {
+    fn single_field_param_is_transparent() {
         let params = JustEventIdParam::try_from_rpcvalue(&RpcValue::from_cpon("42").unwrap()).unwrap();
         assert_eq!(params.event_id, 42);
         assert_eq!(params.to_rpcvalue().to_cpon(), "42");

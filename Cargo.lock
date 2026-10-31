@@ -1541,7 +1541,6 @@ dependencies = [
  "log",
  "qxsql",
  "rand",
- "rpc-pos-params",
  "rusqlite_migration",
  "serde",
  "serde_json",
@@ -1660,15 +1659,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rpc-pos-params"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
 ]
 
 [[package]]
