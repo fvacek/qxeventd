@@ -13,23 +13,17 @@ use shvproto::RpcValue;
 ///     name: String,
 /// }
 ///
-/// let params = MyParams::from_rpc_param(rq.param())?;
+/// let params = MyParams::try_from_rpcvalue(rq.param().unwrap_or_default())?;
 /// let rpc_value: RpcValue = params.to_rpcvalue();
 /// ```
 pub trait RpcValueExt: Sized {
     fn try_from_rpcvalue(value: &RpcValue) -> anyhow::Result<Self>;
-    fn from_rpc_param(param: Option<&RpcValue>) -> anyhow::Result<Self>;
     fn to_rpcvalue(&self) -> RpcValue;
 }
 
 impl<T: Serialize + DeserializeOwned> RpcValueExt for T {
     fn try_from_rpcvalue(value: &RpcValue) -> anyhow::Result<Self> {
         shvproto::from_rpcvalue(value).map_err(|e| anyhow::anyhow!(e))
-    }
-
-    fn from_rpc_param(param: Option<&RpcValue>) -> anyhow::Result<Self> {
-        let value = param.ok_or_else(|| anyhow::anyhow!("RpcValue is None"))?;
-        Self::try_from_rpcvalue(value)
     }
 
     fn to_rpcvalue(&self) -> RpcValue {

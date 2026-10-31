@@ -261,7 +261,7 @@ pub(crate) async fn request_handler(
                             Ok(RpcValue::from(vec![RpcValue::from(event_id), RpcValue::from(event_shv_path)]))
                         }),
                         METH_READ_EVENT_RECORD => {
-                            let JustEventIdParam { event_id } = match JustEventIdParam::from_rpc_param(rq.param()) {
+                            let JustEventIdParam { event_id } = match JustEventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -272,7 +272,7 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_UPDATE_EVENT_RECORD => {
-                            let UpdateEventRecordParams { event_id, change } = match UpdateEventRecordParams::from_rpc_param(rq.param()) {
+                            let UpdateEventRecordParams { event_id, change } = match UpdateEventRecordParams::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -283,7 +283,7 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_SET_EVENT_DB_MODE => {
-                            let SetEventDbModeParams { event_id, db_mode: mode } = match SetEventDbModeParams::from_rpc_param(rq.param()) {
+                            let SetEventDbModeParams { event_id, db_mode: mode } = match SetEventDbModeParams::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -294,7 +294,7 @@ pub(crate) async fn request_handler(
                             })
                         }
                         METH_DELETE_EVENT => {
-                            let DeleteEventParams { api_token } = DeleteEventParams::from_rpc_param(rq.param())
+                            let DeleteEventParams { api_token } = DeleteEventParams::try_from_rpcvalue(rq.param().unwrap_or_default())
                                 .map_err(|_| UnresolvedRequest)?;
                             m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                                 let event_id = app_state.read().await.api_token_to_event_id(&api_token).await
@@ -305,7 +305,7 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_PUSH_EVENT_DB => {
-                            let PushEventDbParams { event_id, compressed_data: zdata } = match PushEventDbParams::from_rpc_param(rq.param()) {
+                            let PushEventDbParams { event_id, compressed_data: zdata } = match PushEventDbParams::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -316,7 +316,7 @@ pub(crate) async fn request_handler(
                             })
                         }
                         METH_PULL_EVENT_DB => {
-                            let JustEventIdParam { event_id } = match JustEventIdParam::from_rpc_param(rq.param()) {
+                            let JustEventIdParam { event_id } = match JustEventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
@@ -333,7 +333,7 @@ pub(crate) async fn request_handler(
                             to_rpcvalue(&events).map_err(|e| string_to_rpc_error(e.to_string()))
                         }),
                         METH_EVENT_DATA => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                            let JustEventIdParam { event_id } = JustEventIdParam::from_rpc_param(rq.param())
+                            let JustEventIdParam { event_id } = JustEventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default())
                                 .map_err(anyhow_to_rpc_error)?;
                             let res = app_state.read().await.load_event_record(event_id).await;
                             res.map(|mut rec| {
