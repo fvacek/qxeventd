@@ -22,6 +22,8 @@ impl_rpc_type!("f": f32, f64);
 impl_rpc_type!("s": String, &str);
 impl_rpc_type!("x": Vec<u8>);
 impl_rpc_type!("t": shvproto::DateTime);
+// chrono serializes itself as an RFC 3339 string, not as SHV DateTime
+impl_rpc_type!("s": chrono::DateTime<chrono::FixedOffset>);
 impl_rpc_type!("?": shvproto::RpcValue);
 
 #[cfg(test)]
@@ -29,6 +31,7 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use shvproto::{DateTime, RpcValue};
+    use std::collections::{BTreeMap, HashMap};
 
     #[derive(Serialize, Deserialize, RpcType)]
     struct AllScalars {
@@ -68,6 +71,27 @@ mod tests {
     struct OptionalParam {
         run_id: RunId,
         user_id: Option<String>
+    }
+
+    #[derive(Serialize, Deserialize, RpcType)]
+    struct Maps {
+        names: BTreeMap<String, String>,
+        counts: Option<HashMap<String, i64>>,
+        nested: BTreeMap<String, Option<RunId>>,
+    }
+
+    #[derive(Serialize, Deserialize, RpcType)]
+    struct Lists {
+        ids: Vec<i64>,
+        data: Vec<u8>,
+        runs: Option<Vec<Option<RunId>>>,
+        matrix: Vec<Vec<String>>,
+    }
+
+    #[derive(Serialize, Deserialize, RpcType)]
+    #[serde(transparent)]
+    struct RenamedList {
+        items: Vec<Renamed>,
     }
 
     #[test]
@@ -112,6 +136,17 @@ mod tests {
     #[test]
     fn optional_param() {
         assert_eq!(OptionalParam::RPC_TYPE, "{i:run_id,s|n:user_id}");
+    }
+
+    #[test]
+    fn lists() {
+        assert_eq!(Lists::RPC_TYPE, "{[i]:ids,x:data,[i|n]|n:runs,[[s]]:matrix}");
+        assert_eq!(RenamedList::RPC_TYPE, "[{i:eventId,s:note}]");
+    }
+
+    #[test]
+    fn maps() {
+        assert_eq!(Maps::RPC_TYPE, "{{s}:names,{i}|n:counts,{i|n}:nested}");
     }
 
 }

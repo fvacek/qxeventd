@@ -13,7 +13,9 @@
 //!
 //! The description mirrors serde's map serialization (KeyStruct), honouring
 //! `#[serde(transparent)]` on the struct and `#[serde(rename = "...")]` on fields.
-//! `Option<T>` fields are described as `T|n`; every other field type has to implement
+//! `Option<T>` fields are described as `T|n`, `Vec<T>` as `[T]` (except `Vec<u8>`, which is
+//! a Blob `x`), `BTreeMap<K, V>` and `HashMap<K, V>` fields as `{V}`; every other field
+//! type has to implement
 //! `RpcType` itself.
 //!
 //! The generated code refers to `crate::rpctype::RpcType` and `::const_format`.
@@ -58,20 +60,43 @@ fn serde_attrs(attrs: &[Attribute]) -> syn::Result<SerdeAttrs> {
     Ok(res)
 }
 
+fn is_u8(ty: &Type) -> bool {
+    matches!(ty, Type::Path(TypePath { qself: None, path }) if path.is_ident("u8"))
+}
+
 /// Const string pieces describing `ty`.
 ///
-/// `Option<T>` is expanded here as `T|n`, because a generic `impl RpcType for Option<T>`
-/// cannot concatenate `T::RPC_TYPE` into a `&'static str` on stable Rust.
+/// `Option<T>` is expanded here as `T|n`, `Vec<T>` as `[T]` and `BTreeMap<K, V>` /
+/// `HashMap<K, V>` as `{V}`,
+/// because a generic `impl RpcType` for them cannot concatenate the inner `RPC_TYPE`
+/// into a `&'static str` on stable Rust.
 fn type_parts(ty: &Type) -> Vec<proc_macro2::TokenStream> {
     if let Type::Path(TypePath { qself: None, path }) = ty
         && let Some(seg) = path.segments.last()
-        && seg.ident == "Option"
         && let PathArguments::AngleBracketed(args) = &seg.arguments
-        && let [GenericArgument::Type(inner)] = &args.args.iter().collect::<Vec<_>>()[..]
     {
-        let mut parts = type_parts(inner);
-        parts.push(quote! { "|n" });
-        return parts;
+        let args = args.args.iter().collect::<Vec<_>>();
+        match (seg.ident.to_string().as_str(), &args[..]) {
+            ("Option", [GenericArgument::Type(inner)]) => {
+                let mut parts = type_parts(inner);
+                parts.push(quote! { "|n" });
+                return parts;
+            }
+            // Vec<u8> is a Blob, left to its RpcType impl
+            ("Vec", [GenericArgument::Type(item)]) if !is_u8(item) => {
+                let mut parts = vec![quote! { "[" }];
+                parts.extend(type_parts(item));
+                parts.push(quote! { "]" });
+                return parts;
+            }
+            ("BTreeMap" | "HashMap", [GenericArgument::Type(_), GenericArgument::Type(value)]) => {
+                let mut parts = vec![quote! { "{" }];
+                parts.extend(type_parts(value));
+                parts.push(quote! { "}" });
+                return parts;
+            }
+            _ => {}
+        }
     }
     vec![quote! { <#ty as crate::rpctype::RpcType>::RPC_TYPE }]
 }

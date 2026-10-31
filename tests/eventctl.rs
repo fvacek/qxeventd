@@ -70,3 +70,21 @@ fn delete_event() {
         assert_eq!(res.to_cpon(), "[]");
     });
 }
+
+#[test]
+fn list_events_returns_typed_items() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event(&mut client, "fanda").await;
+        let res = client.call(request("eventctl", "listEvents", "", "fanda", AccessLevel::Read)).await.unwrap();
+        let events = res.as_list();
+        assert_eq!(events.len(), 1, "{}", res.to_cpon());
+        let event = events[0].as_map();
+        assert_eq!(event["id"].as_int(), event_id);
+        assert_eq!(event["owner"].as_str(), "fanda");
+        assert_eq!(event["stage_count"].as_int(), 1);
+        assert_eq!(event["db_mode"].as_str(), "Replica");
+        assert!(event["date"].is_string(), "{}", res.to_cpon());
+        assert!(!event.contains_key("api_token"));
+    });
+}

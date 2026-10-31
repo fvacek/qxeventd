@@ -6,14 +6,14 @@ use crate::rpcvalueext::RpcValueExt;
 use crate::rpctype::RpcType;
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, MethodResolver, RequestHandlerResult, err_unresolved_request};
-use shvproto::{RpcValue, from_rpcvalue, to_rpcvalue};
+use shvproto::{RpcValue, from_rpcvalue};
 use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use crate::qxchange::{self, Data, LateEntry, QxChangeRecord};
 use crate::qxeventconfig::Role;
 use crate::remotedbsqlapi::RemoteEventSqlApi;
-use crate::{anyhow_to_rpc_error, str_to_rpc_error, string_to_rpc_error};
-use crate::state::{open_event, EventId, EventRecordChange, SharedAppState, State};
+use crate::{anyhow_to_rpc_error, str_to_rpc_error};
+use crate::state::{open_event, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
 
 
 #[derive(Debug)]
@@ -87,30 +87,30 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can read event records
         // read event record is privileged operation, because it exposes api_key
-        METH_READ_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, "{?}", &[], "",
+        METH_READ_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, EventRecord::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can update event records
-        METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, "{i:event_id,{?}:change}", "b", &[], "",
+        METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, UpdateEventRecordParams::RPC_TYPE, bool::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
         // user with Service access or user_id == event_owner can change the database mode
-        METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, "{i:event_id,s:db_mode}", "b", &[], "",
+        METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, SetEventDbModeParams::RPC_TYPE, bool::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
-        METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE, "b:was_deleted", &[], "",
+        METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE, bool::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
         METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, PushEventDbParams::RPC_TYPE, "n", &[], "",
     ),
     MetaMethod::new_static(
-        METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, "[i:uncompressed_data_size,x:compressed_data]", &[], "",
+        METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, PullEventDbResult::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
-        METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", "[{?}]", &[], "",
+        METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", ListEventsResult::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
-        METH_EVENT_DATA, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, "{?}", &[], "",
+        METH_EVENT_DATA, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, EventRecord::RPC_TYPE, &[], "",
     ),
 ];
 
@@ -137,13 +137,13 @@ fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
 
 const QX_API_TOKEN: &str = "qx_api_token";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
 struct UpdateEventRecordParams {
     event_id: EventId,
     change: EventRecordChange,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
 struct SetEventDbModeParams {
     event_id: EventId,
     db_mode: crate::state::EventDbMode,
@@ -153,6 +153,18 @@ struct SetEventDbModeParams {
 struct PushEventDbParams {
     event_id: EventId,
     compressed_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+struct PullEventDbResult {
+    uncompressed_data_size: i64,
+    compressed_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[serde(transparent)]
+struct ListEventsResult {
+    events: Vec<EventListItem>,
 }
 
 async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
@@ -354,16 +366,15 @@ pub(crate) async fn request_handler(
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(p.event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
-                                let (len, zdata) = State::pull_event_db(app_state, p.event_id).await
+                                let (len, compressed_data) = State::pull_event_db(app_state, p.event_id).await
                                     .map_err(anyhow_to_rpc_error)?;
-                                let ret = vec![RpcValue::from(len as i64), RpcValue::from(zdata)];
-                                Ok(RpcValue::from(ret))
+                                Ok(PullEventDbResult { uncompressed_data_size: len as i64, compressed_data }.to_rpcvalue())
                             })
                         },
                         METH_LIST_EVENTS => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                             let events = app_state.write().await.list_events().await
                                 .map_err(anyhow_to_rpc_error)?;
-                            to_rpcvalue(&events).map_err(|e| string_to_rpc_error(e.to_string()))
+                            Ok(ListEventsResult { events }.to_rpcvalue())
                         }),
                         METH_EVENT_DATA => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                             let p = EventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default())
@@ -521,6 +532,38 @@ mod tests {
     #[test]
     fn push_event_db_params_rpc_type() {
         assert_eq!(PushEventDbParams::RPC_TYPE, "{i:event_id,x:compressed_data}");
+    }
+
+    #[test]
+    fn event_record_rpc_types() {
+        assert_eq!(
+            EventRecord::RPC_TYPE,
+            "{i|n:id,s:name,s:date,i:stage_count,s:owner,s:api_token,{{s}:members}:config,s:db_mode}"
+        );
+        assert_eq!(
+            UpdateEventRecordParams::RPC_TYPE,
+            "{i:event_id,{s|n:name,s|n:date,i|n:stage_count,s|n:owner,s|n:api_token,s|n:master_db_mode,{{s}:members}|n:config}:change}"
+        );
+        assert_eq!(SetEventDbModeParams::RPC_TYPE, "{i:event_id,s:db_mode}");
+        assert_eq!(PullEventDbResult::RPC_TYPE, "{i:uncompressed_data_size,x:compressed_data}");
+        assert_eq!(ListEventsResult::RPC_TYPE, "[{i:id,s:name,i:stage_count,s:date,s:owner,s:db_mode}]");
+
+        let record = EventRecord {
+            id: Some(1),
+            name: "ev".into(),
+            date: chrono::DateTime::parse_from_rfc3339("2026-10-31T10:00:00+01:00").unwrap(),
+            stage_count: 2,
+            owner: "owner".into(),
+            api_token: "tok".into(),
+            config: crate::qxeventconfig::QxEventConfig {
+                members: [("member".to_string(), Role::Organizer)].into(),
+            },
+            db_mode: crate::state::EventDbMode::Master,
+        };
+        let value = record.to_rpcvalue();
+        assert!(value.get("date").unwrap().is_string());
+        assert_eq!(value.get("db_mode").unwrap().as_str(), "Master");
+        assert_eq!(value.get("config").unwrap().get("members").unwrap().get("member").unwrap().as_str(), "Organizer");
     }
 
     #[test]

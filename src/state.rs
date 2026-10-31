@@ -29,6 +29,7 @@ use crate::eventsqlapi::EventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
 use crate::qxeventconfig::QxEventConfig;
+use crate::rpctype::RpcType;
 
 
 pub type EventId = i64;
@@ -56,10 +57,10 @@ impl State {
         Ok(())
     }
 
-    pub async fn list_events(&self) -> anyhow::Result<Vec<Record>> {
+    pub async fn list_events(&self) -> anyhow::Result<Vec<EventListItem>> {
         let qxsql = LocalDbSqlApi::new_without_recchng(self.db_pool.clone());
         let records = qxsql.list_records("events", Some(vec!["id", "name", "stage_count", "date", "owner", "db_mode"]), None, None).await?;
-        Ok(records)
+        records.iter().map(EventListItem::from_record).collect()
     }
 
     pub async fn create_event(&self, owner: String, rpc_client: ClientCommandSender) -> anyhow::Result<(EventId, String)> {
@@ -428,6 +429,10 @@ pub(crate) enum EventDbMode {
     Replica,
 }
 
+impl RpcType for EventDbMode {
+    const RPC_TYPE: &'static str = "s";
+}
+
 impl EventDbMode {
     fn from_record_value(value: &DbValue) -> Self {
         let mode = value.as_str();
@@ -462,7 +467,7 @@ pub(crate) struct EventStatus {
     pub expires_at: DateTime<chrono::FixedOffset>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
 pub(crate) struct EventRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -478,6 +483,30 @@ pub(crate) struct EventRecord {
 }
 
 fn default_stage_count() -> i64 { 1 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+pub(crate) struct EventListItem {
+    pub id: EventId,
+    pub name: String,
+    pub stage_count: i64,
+    pub date: DateTime<chrono::FixedOffset>,
+    pub owner: String,
+    pub db_mode: EventDbMode,
+}
+
+impl EventListItem {
+    fn from_record(record: &Record) -> anyhow::Result<Self> {
+        let get_field = |name| record.get(name).ok_or_else(||anyhow!("Cannot get field '{}'.", name));
+        Ok(Self {
+            id: get_field("id")?.to_int().ok_or_else(|| anyhow!("Event id is not an integer"))?,
+            name: get_field("name")?.as_str().unwrap_or_default().to_string(),
+            stage_count: get_field("stage_count")?.to_int().unwrap_or(default_stage_count()),
+            date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Local::now().fixed_offset()),
+            owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
+            db_mode: EventDbMode::from_record_value(get_field("db_mode")?),
+        })
+    }
+}
 
 impl EventRecord {
     fn from_record(record: &Record) -> anyhow::Result<Self> {
@@ -508,7 +537,7 @@ impl EventRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, RpcType)]
 pub(crate) struct EventRecordChange {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
