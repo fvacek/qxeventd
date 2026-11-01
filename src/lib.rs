@@ -17,7 +17,7 @@ use crate::{
     migrate::{create_db_connection, open_app_db},
 };
 
-mod rpcvalueext;
+pub mod rpcvalueext;
 mod rpctype;
 mod state;
 pub mod config;
@@ -31,7 +31,7 @@ mod eventdb;
 mod qxchange;
 mod qxeventconfig;
 
-pub use eventctlnode::QX_API_TOKEN;
+pub use eventctlnode::{PushEventDbParam, QX_API_TOKEN};
 
 pub(crate) static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
 

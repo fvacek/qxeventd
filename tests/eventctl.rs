@@ -3,17 +3,17 @@
 mod common;
 
 use std::io::{Read, Write};
-
+use qxeventd::rpcvalueext::RpcValueExt;
 use async_sqlite::rusqlite::Connection;
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
-use shvproto::{RpcValue, make_map};
+use shvproto::RpcValue;
 use shvrpc::RpcMessage;
 use shvrpc::metamethod::AccessLevel;
 
 use common::{TestClient, assert_permission_denied, create_event, create_event_with_own_db, data_dir, request};
-use qxeventd::QX_API_TOKEN;
+use qxeventd::{PushEventDbParam, QX_API_TOKEN};
 
 fn compress(data: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -22,11 +22,8 @@ fn compress(data: &[u8]) -> Vec<u8> {
 }
 
 fn push_event_db_request(event_id: i64, compressed_data: Vec<u8>, user: &str, access: AccessLevel) -> RpcMessage {
-    let param = make_map!(
-        "event_id".to_string() => RpcValue::from(event_id),
-        "compressed_data".to_string() => RpcValue::from(compressed_data),
-    );
-    request("eventctl", "pushEventDb", "", user, access).with_param(RpcValue::from(param))
+    let param = PushEventDbParam { event_id: event_id, zdata: compressed_data };
+    request("eventctl", "pushEventDb", "", user, access).with_param(param.to_rpcvalue())
 }
 
 fn pull_event_db_request(event_id: i64, user: &str, access: AccessLevel) -> RpcMessage {
@@ -47,7 +44,7 @@ async fn pull_event_db(client: &mut TestClient, event_id: i64) -> Vec<u8> {
     let res = client.call(pull_event_db_request(event_id, "fanda", AccessLevel::Read)).await.expect("pullEventDb");
     let res = res.as_map();
     let mut data = Vec::new();
-    ZlibDecoder::new(res["compressed_data"].as_blob()).read_to_end(&mut data).expect("valid zlib data");
+    ZlibDecoder::new(res["zdata"].as_blob()).read_to_end(&mut data).expect("valid zlib data");
     assert_eq!(res["uncompressed_data_size"].as_int(), data.len() as i64);
     data
 }
@@ -171,7 +168,7 @@ fn pull_event_db_returns_compressed_data_as_blob() {
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
         push_event_db(&mut client, event_id, b"database").await;
         let res = client.call(pull_event_db_request(event_id, "fanda", AccessLevel::Read)).await.unwrap();
-        assert_eq!(res.as_map()["compressed_data"].type_name(), "Blob");
+        assert_eq!(res.as_map()["zdata"].type_name(), "Blob");
     });
 }
 

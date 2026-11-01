@@ -101,7 +101,7 @@ const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
         METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE, bool::RPC_TYPE, &[], "",
     ),
     MetaMethod::new_static(
-        METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, PushEventDbParams::RPC_TYPE, "n", &[], "",
+        METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, PushEventDbParam::RPC_TYPE, "n", &[], "",
     ),
     MetaMethod::new_static(
         METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, PullEventDbResult::RPC_TYPE, &[], "",
@@ -138,29 +138,29 @@ fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
 pub const QX_API_TOKEN: &str = "qx_api_token";
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
-struct UpdateEventRecordParams {
+pub struct UpdateEventRecordParams {
     event_id: EventId,
     change: EventRecordChange,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
-struct SetEventDbModeParams {
+pub struct SetEventDbModeParams {
     event_id: EventId,
     db_mode: crate::state::EventDbMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
-struct PushEventDbParams {
-    event_id: EventId,
+pub struct PushEventDbParam {
+    pub event_id: EventId,
     #[serde(serialize_with = "crate::rpctype::blob::serialize")]
-    compressed_data: Vec<u8>,
+    pub zdata: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
 struct PullEventDbResult {
     uncompressed_data_size: i64,
     #[serde(serialize_with = "crate::rpctype::blob::serialize")]
-    compressed_data: Vec<u8>,
+    zdata: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
@@ -352,12 +352,12 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_PUSH_EVENT_DB => {
-                            let p = match PushEventDbParams::try_from_rpcvalue(rq.param().unwrap_or_default()) {
+                            let p = match PushEventDbParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(p.event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
-                                State::push_event_db(app_state, p.event_id, &p.compressed_data, client_cmd_tx).await
+                                State::push_event_db(app_state, p.event_id, &p.zdata, client_cmd_tx).await
                                     .map_err(anyhow_to_rpc_error)?;
                                 Ok(RpcValue::null())
                             })
@@ -370,7 +370,7 @@ pub(crate) async fn request_handler(
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(p.event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
                                 let (len, compressed_data) = State::pull_event_db(app_state, p.event_id).await
                                     .map_err(anyhow_to_rpc_error)?;
-                                Ok(PullEventDbResult { uncompressed_data_size: len as i64, compressed_data }.to_rpcvalue())
+                                Ok(PullEventDbResult { uncompressed_data_size: len as i64, zdata: compressed_data }.to_rpcvalue())
                             })
                         },
                         METH_LIST_EVENTS => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
@@ -524,16 +524,16 @@ mod tests {
 
     #[test]
     fn push_event_db_params_try_from_rpcvalue() {
-        let value = RpcValue::from_cpon(r#"{"event_id":2,"compressed_data":b"abc"}"#).unwrap();
-        let params = PushEventDbParams::try_from_rpcvalue(&value).unwrap();
+        let value = RpcValue::from_cpon(r#"{"event_id":2,"zdata":b"abc"}"#).unwrap();
+        let params = PushEventDbParam::try_from_rpcvalue(&value).unwrap();
 
         assert_eq!(params.event_id, 2);
-        assert_eq!(params.compressed_data, b"abc");
+        assert_eq!(params.zdata, b"abc");
     }
 
     #[test]
     fn push_event_db_params_rpc_type() {
-        assert_eq!(PushEventDbParams::RPC_TYPE, "{i:event_id,x:compressed_data}");
+        assert_eq!(PushEventDbParam::RPC_TYPE, "{i:event_id,x:zdata}");
     }
 
     #[test]
@@ -547,7 +547,7 @@ mod tests {
             "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,s|n:master_db_mode,{{s}:members}|n:config}:change}"
         );
         assert_eq!(SetEventDbModeParams::RPC_TYPE, "{i:event_id,s:db_mode}");
-        assert_eq!(PullEventDbResult::RPC_TYPE, "{i:uncompressed_data_size,x:compressed_data}");
+        assert_eq!(PullEventDbResult::RPC_TYPE, "{i:uncompressed_data_size,x:zdata}");
         assert_eq!(ListEventsResult::RPC_TYPE, "[{i:id,s:name,i:stage_count,t:date,s:owner,s:db_mode}]");
 
         let record = EventRecord {
