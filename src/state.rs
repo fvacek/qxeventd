@@ -445,6 +445,7 @@ fn rechng_from_rpcvalue(value: Option<&RpcValue>) -> anyhow::Result<RecChng> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum EventDbMode {
+    Archived,
     ReadOnly,
     Master,
     Replica,
@@ -458,6 +459,7 @@ impl EventDbMode {
     fn from_record_value(value: &DbValue) -> Self {
         let mode = value.as_str();
         match mode {
+            Some("Archived") => Self::Archived,
             Some("ReadOnly") => Self::ReadOnly,
             Some("Master") => Self::Master,
             Some("Replica") => Self::Replica,
@@ -474,6 +476,7 @@ impl EventDbMode {
 
     fn as_record_value(self) -> String {
         match self {
+            Self::Archived => "Archived",
             Self::ReadOnly => "ReadOnly",
             Self::Master => "Master",
             Self::Replica => "Replica",
