@@ -7,6 +7,7 @@ use shvrpc::RpcMessage;
 use shvrpc::metamethod::AccessLevel;
 
 use common::{TestClient, assert_permission_denied, create_event, request};
+use qxeventd::QX_API_TOKEN;
 
 #[test]
 fn eventctl_ls_and_dir() {
@@ -38,7 +39,7 @@ fn create_event_and_read_record_by_owner_only() {
         // stranger with valid api token is
         let rq = request("eventctl", "readEventRecord", &format!(r#"{{"event_id":{event_id}}}"#), "eve", AccessLevel::Read);
         let mut meta = rq.meta().clone();
-        meta.insert("qx_api_token", api_token.as_str().into());
+        meta.insert(QX_API_TOKEN, api_token.as_str().into());
         let rq = RpcMessage::from_meta(meta).with_param(rq.param().cloned());
         client.call(rq).await.expect("api token holder can read event record");
     });
@@ -49,7 +50,7 @@ fn open_event_returns_event_id_and_mount_point() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
         let (event_id, api_token) = create_event(&mut client, "fanda").await;
-        let expected =format!(r#"{{"event_id":{event_id},"mount_point":"test/qx/qxeventd/eventctl/{event_id}"}}"#);
+        let expected = format!(r#"{{"event_id":{event_id},"mount_point":"test/qx/qxeventd/eventctl/{event_id}"}}"#);
 
         let res = client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
         assert_eq!(res.to_cpon(), expected);

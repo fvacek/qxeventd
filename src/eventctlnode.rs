@@ -135,7 +135,7 @@ fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
     rq.user_id().map(|user_id| user_id.split(':').next().unwrap_or(user_id))
 }
 
-const QX_API_TOKEN: &str = "qx_api_token";
+pub const QX_API_TOKEN: &str = "qx_api_token";
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
 struct UpdateEventRecordParams {

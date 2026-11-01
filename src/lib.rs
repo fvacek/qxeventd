@@ -31,6 +31,8 @@ mod eventdb;
 mod qxchange;
 mod qxeventconfig;
 
+pub use eventctlnode::QX_API_TOKEN;
+
 pub(crate) static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();
 
 fn global_config() -> &'static Config {
