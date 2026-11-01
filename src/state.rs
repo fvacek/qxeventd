@@ -187,6 +187,13 @@ impl State {
             }
             let tmp_file = format!("{db_file}.upload-tmp");
             std::fs::write(&tmp_file, &db_data)?;
+            // SQLite would replay WAL left over from the old database over the new one.
+            for stale_file in [format!("{db_file}-wal"), format!("{db_file}-shm")] {
+                if let Err(err) = std::fs::remove_file(&stale_file) && err.kind() != std::io::ErrorKind::NotFound {
+                    let _ = std::fs::remove_file(&tmp_file);
+                    return Err(err.into());
+                }
+            }
             if let Err(err) = std::fs::rename(&tmp_file, db_path) {
                 let _ = std::fs::remove_file(&tmp_file);
                 return Err(err.into());
@@ -235,12 +242,15 @@ impl State {
     }
 
     pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
-        if let Some(_event) = self.open_events.remove(&event_id) {
+        if let Some(event) = self.open_events.remove(&event_id) {
             // let mount_point = event_mount_point(event_id);
+
+            let close_result = close_event_db(&event.read().await.db).await;
 
             let message = RpcMessage::new_signal("event", "lsmod").with_param(false);
             client_command_sender.send_message(message)
             .map_err(|e| anyhow!("Failed to send message {}", e))?;
+            close_result.map_err(|e| e.context(format!("Failed to close event {event_id} DB")))?;
 
             // log::info!("Sending quit RPC message to qxsql of event {event_id} mounted at {mount_point}");
             // let _: () = client_command_sender.call_rpc_method(format!("{mount_point}/.app"), "quit", None, None, None::<fn(_)>).await
@@ -282,6 +292,18 @@ impl State {
         event_id.ok_or_else(|| anyhow::anyhow!("API token not found"))
     }
 
+}
+
+/// Checkpoint WAL and close connections, so the whole database is stored in the main DB file.
+/// The checkpoint has to be explicit, the pool closes its connections concurrently and
+/// SQLite does not checkpoint on close in that case, leaving the data in the WAL file.
+async fn close_event_db(db: &async_sqlite::Pool) -> anyhow::Result<()> {
+    let checkpoint_busy = db.conn(|conn| conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0))).await;
+    db.close().await?;
+    if checkpoint_busy? != 0 {
+        bail!("WAL checkpoint was blocked");
+    }
+    Ok(())
 }
 
 pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<String> {

@@ -152,12 +152,14 @@ struct SetEventDbModeParams {
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
 struct PushEventDbParams {
     event_id: EventId,
+    #[serde(serialize_with = "crate::rpctype::blob::serialize")]
     compressed_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
 struct PullEventDbResult {
     uncompressed_data_size: i64,
+    #[serde(serialize_with = "crate::rpctype::blob::serialize")]
     compressed_data: Vec<u8>,
 }
 

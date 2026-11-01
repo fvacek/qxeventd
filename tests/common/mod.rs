@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -74,6 +75,9 @@ impl TestClient {
     fn mock_broker_response(rq: &RpcMessage) -> Result<RpcValue, RpcError> {
         match (rq.shv_path().unwrap_or_default(), rq.method().unwrap_or_default()) {
             (".broker/access/mounts", "setValue") => Ok(true.into()),
+            (".broker", "ls") => Ok(vec![RpcValue::from("client")].into()),
+            (".broker/currentClient", "subscribe") => Ok(true.into()),
+            (path, "ping") if path.ends_with("/.app") => Ok(RpcValue::null()),
             (path, method) => Err(RpcError::new(RpcErrorCode::MethodNotFound, format!("mock broker: {path}:{method}"))),
         }
     }
@@ -123,4 +127,19 @@ pub async fn create_event(client: &mut TestClient, owner: &str) -> (i64, String)
         .expect("createEvent");
     let map = res.as_map();
     (map["event_id"].as_int(), map["api_token"].as_str().to_string())
+}
+
+/// Create event with ID unique in the test binary.
+/// Every `TestClient` numbers events from 1, but event DB files in the shared data dir are
+/// identified by event ID only, so tests reading or writing them cannot share IDs.
+/// ID 1 is left to tests calling `create_event`.
+pub async fn create_event_with_own_db(client: &mut TestClient, owner: &str) -> (i64, String) {
+    static NEXT_EVENT_ID: AtomicI64 = AtomicI64::new(2);
+    let event_id = NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed);
+    loop {
+        let (id, api_token) = create_event(client, owner).await;
+        if id == event_id {
+            return (id, api_token);
+        }
+    }
 }

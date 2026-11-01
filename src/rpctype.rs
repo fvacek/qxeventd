@@ -26,6 +26,16 @@ impl_rpc_type!("x": Vec<u8>);
 impl_rpc_type!("t": shvproto::DateTime, chrono::DateTime<chrono::FixedOffset>);
 impl_rpc_type!("?": shvproto::RpcValue);
 
+/// Serde serializes `Vec<u8>` as a list of numbers, fields sent over RPC have to use
+/// `#[serde(serialize_with = "blob::serialize")]` to be SHV Blob
+pub(crate) mod blob {
+    use serde::Serializer;
+
+    pub(crate) fn serialize<S: Serializer>(data: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(data)
+    }
+}
+
 pub(crate) mod chrono_datetime {
     use chrono::{DateTime, FixedOffset};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
