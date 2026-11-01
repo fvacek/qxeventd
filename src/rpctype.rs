@@ -21,10 +21,36 @@ impl_rpc_type!("u": u16, u32, u64, usize);
 impl_rpc_type!("f": f32, f64);
 impl_rpc_type!("s": String, &str);
 impl_rpc_type!("x": Vec<u8>);
-impl_rpc_type!("t": shvproto::DateTime);
-// chrono serializes itself as an RFC 3339 string, not as SHV DateTime
-impl_rpc_type!("s": chrono::DateTime<chrono::FixedOffset>);
+// chrono serializes itself as an RFC 3339 string, fields sent over RPC have to use
+// `#[serde(with = "chrono_datetime")]` or `chrono_datetime_opt` to be SHV DateTime
+impl_rpc_type!("t": shvproto::DateTime, chrono::DateTime<chrono::FixedOffset>);
 impl_rpc_type!("?": shvproto::RpcValue);
+
+pub(crate) mod chrono_datetime {
+    use chrono::{DateTime, FixedOffset};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(dt: &DateTime<FixedOffset>, serializer: S) -> Result<S::Ok, S::Error> {
+        shvproto::DateTime::from_datetime(dt).serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<DateTime<FixedOffset>, D::Error> {
+        Ok(shvproto::DateTime::deserialize(deserializer)?.to_chrono_datetime())
+    }
+}
+
+pub(crate) mod chrono_datetime_opt {
+    use chrono::{DateTime, FixedOffset};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(dt: &Option<DateTime<FixedOffset>>, serializer: S) -> Result<S::Ok, S::Error> {
+        dt.as_ref().map(shvproto::DateTime::from_datetime).serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<DateTime<FixedOffset>>, D::Error> {
+        Ok(Option::<shvproto::DateTime>::deserialize(deserializer)?.map(|dt| dt.to_chrono_datetime()))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -42,6 +68,7 @@ mod tests {
         name: String,
         data: Vec<u8>,
         created: DateTime,
+        modified: chrono::DateTime<chrono::FixedOffset>,
     }
 
     #[derive(Serialize, Deserialize, RpcType)]
@@ -98,7 +125,7 @@ mod tests {
     fn scalars() {
         assert_eq!(
             AllScalars::RPC_TYPE,
-            "{b:flag,i:count,u:size,f:ratio,s:name,x:data,t:created}"
+            "{b:flag,i:count,u:size,f:ratio,s:name,x:data,t:created,t:modified}"
         );
     }
 
@@ -147,6 +174,38 @@ mod tests {
     #[test]
     fn maps() {
         assert_eq!(Maps::RPC_TYPE, "{{s}:names,{i}|n:counts,{i|n}:nested}");
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize, RpcType)]
+    struct ChronoDates {
+        #[serde(with = "chrono_datetime")]
+        date: chrono::DateTime<chrono::FixedOffset>,
+        #[serde(default, with = "chrono_datetime_opt")]
+        opt_date: Option<chrono::DateTime<chrono::FixedOffset>>,
+    }
+
+    #[test]
+    fn chrono_datetime_is_shv_datetime() {
+        assert_eq!(ChronoDates::RPC_TYPE, "{t:date,t|n:opt_date}");
+
+        let date = chrono::DateTime::parse_from_rfc3339("2026-10-31T10:00:00.123+01:00").unwrap();
+        let dates = ChronoDates { date, opt_date: Some(date) };
+        let value = shvproto::to_rpcvalue(&dates).unwrap();
+        assert_eq!(value.get("date").unwrap().type_name(), "DateTime");
+        assert_eq!(value.get("opt_date").unwrap().type_name(), "DateTime");
+        assert_eq!(shvproto::from_rpcvalue::<ChronoDates>(&value).unwrap(), dates);
+
+        let none = ChronoDates { date, opt_date: None };
+        let value = shvproto::to_rpcvalue(&none).unwrap();
+        assert_eq!(shvproto::from_rpcvalue::<ChronoDates>(&value).unwrap(), none);
+    }
+
+    #[test]
+    fn chrono_datetime_accepts_rfc3339_string() {
+        let value = RpcValue::from_cpon(r#"{"date":"2026-10-31T10:00:00+01:00","opt_date":"2026-10-31T09:00:00Z"}"#).unwrap();
+        let dates = shvproto::from_rpcvalue::<ChronoDates>(&value).unwrap();
+        assert_eq!(dates.date, chrono::DateTime::parse_from_rfc3339("2026-10-31T10:00:00+01:00").unwrap());
+        assert_eq!(dates.opt_date, Some(chrono::DateTime::parse_from_rfc3339("2026-10-31T09:00:00Z").unwrap()));
     }
 
 }

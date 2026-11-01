@@ -84,7 +84,7 @@ fn list_events_returns_typed_items() {
         assert_eq!(event["owner"].as_str(), "fanda");
         assert_eq!(event["stage_count"].as_int(), 1);
         assert_eq!(event["db_mode"].as_str(), "Replica");
-        assert!(event["date"].is_string(), "{}", res.to_cpon());
+        assert_eq!(event["date"].type_name(), "DateTime", "{}", res.to_cpon());
         assert!(!event.contains_key("api_token"));
     });
 }

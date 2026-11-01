@@ -473,6 +473,7 @@ pub(crate) struct EventRecord {
     #[serde(default)]
     pub id: Option<i64>,
     pub name: String,
+    #[serde(with = "crate::rpctype::chrono_datetime")]
     pub date: DateTime<chrono::FixedOffset>,
     #[serde(default = "default_stage_count")]
     pub stage_count: i64,
@@ -489,6 +490,7 @@ pub(crate) struct EventListItem {
     pub id: EventId,
     pub name: String,
     pub stage_count: i64,
+    #[serde(with = "crate::rpctype::chrono_datetime")]
     pub date: DateTime<chrono::FixedOffset>,
     pub owner: String,
     pub db_mode: EventDbMode,
@@ -543,7 +545,7 @@ pub(crate) struct EventRecordChange {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
+    #[serde(default, with = "crate::rpctype::chrono_datetime_opt")]
     pub date: Option<DateTime<chrono::FixedOffset>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stage_count: Option<i64>,

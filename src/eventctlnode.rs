@@ -538,15 +538,15 @@ mod tests {
     fn event_record_rpc_types() {
         assert_eq!(
             EventRecord::RPC_TYPE,
-            "{i|n:id,s:name,s:date,i:stage_count,s:owner,s:api_token,{{s}:members}:config,s:db_mode}"
+            "{i|n:id,s:name,t:date,i:stage_count,s:owner,s:api_token,{{s}:members}:config,s:db_mode}"
         );
         assert_eq!(
             UpdateEventRecordParams::RPC_TYPE,
-            "{i:event_id,{s|n:name,s|n:date,i|n:stage_count,s|n:owner,s|n:api_token,s|n:master_db_mode,{{s}:members}|n:config}:change}"
+            "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,s|n:master_db_mode,{{s}:members}|n:config}:change}"
         );
         assert_eq!(SetEventDbModeParams::RPC_TYPE, "{i:event_id,s:db_mode}");
         assert_eq!(PullEventDbResult::RPC_TYPE, "{i:uncompressed_data_size,x:compressed_data}");
-        assert_eq!(ListEventsResult::RPC_TYPE, "[{i:id,s:name,i:stage_count,s:date,s:owner,s:db_mode}]");
+        assert_eq!(ListEventsResult::RPC_TYPE, "[{i:id,s:name,i:stage_count,t:date,s:owner,s:db_mode}]");
 
         let record = EventRecord {
             id: Some(1),
@@ -561,7 +561,7 @@ mod tests {
             db_mode: crate::state::EventDbMode::Master,
         };
         let value = record.to_rpcvalue();
-        assert!(value.get("date").unwrap().is_string());
+        assert_eq!(value.get("date").unwrap().type_name(), "DateTime");
         assert_eq!(value.get("db_mode").unwrap().as_str(), "Master");
         assert_eq!(value.get("config").unwrap().get("members").unwrap().get("member").unwrap().as_str(), "Organizer");
     }
