@@ -170,38 +170,36 @@ impl State {
         decoder.read_to_end(&mut db_data)
             .map_err(|err| anyhow!("Failed to decompress event database: {err}"))?;
 
-        // An open SQLite pool would continue using the old database after the file
-        // is replaced. Close it first, then install the new file atomically.
-        let was_open = {
-            let was_open = {
-                let mut state = app_state.write().await;
-                let was_open = state.open_events.contains_key(&event_id);
-                state.close_event(event_id, client_command_sender.clone()).await?;
-                was_open
-            };
+        let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
+        let db_path = std::path::Path::new(&db_file);
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp_file = format!("{db_file}.upload-tmp-{:016x}", rand::random::<u64>());
 
-            let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-            let db_path = std::path::Path::new(&db_file);
-            if let Some(parent) = db_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let tmp_file = format!("{db_file}.upload-tmp");
+        let was_open_before_install_result: anyhow::Result<bool> = async {
             std::fs::write(&tmp_file, &db_data)?;
+
+            // An open SQLite pool would continue using the old database after the file
+            // is replaced. Close it first, then install the new file atomically. The lock
+            // is held until the file is replaced, so the event cannot be opened meanwhile.
+            let mut state = app_state.write().await;
+            let was_open = state.open_events.contains_key(&event_id);
+            state.close_event(event_id, client_command_sender.clone()).await?;
             // SQLite would replay WAL left over from the old database over the new one.
             for stale_file in [format!("{db_file}-wal"), format!("{db_file}-shm")] {
                 if let Err(err) = std::fs::remove_file(&stale_file) && err.kind() != std::io::ErrorKind::NotFound {
-                    let _ = std::fs::remove_file(&tmp_file);
                     return Err(err.into());
                 }
             }
-            if let Err(err) = std::fs::rename(&tmp_file, db_path) {
-                let _ = std::fs::remove_file(&tmp_file);
-                return Err(err.into());
-            }
-            was_open
-        };
+            std::fs::rename(&tmp_file, db_path)?;
+            Ok(was_open)
+        }.await;
+        if was_open_before_install_result.is_err() {
+            let _ = std::fs::remove_file(&tmp_file);
+        }
 
-        if was_open {
+        if was_open_before_install_result? {
             open_event(app_state, event_id, client_command_sender).await?;
         }
         Ok(())
@@ -308,23 +306,24 @@ async fn close_event_db(db: &async_sqlite::Pool) -> anyhow::Result<()> {
 
 pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<String> {
     let event_shv_path = event_api_shv_path(event_id);
-    {
-        let state = app_state.write().await;
-        if let Some(event) = state.open_events.get(&event_id).cloned() {
-            event.write().await.touched_at = chrono::Utc::now();
-            return Ok(event_shv_path);
-        }
+    // The lock is held until the event is registered, so the DB file cannot be replaced by
+    // push_event_db after the pool is opened, nor can the event be opened twice.
+    let mut state = app_state.write().await;
+    if let Some(event) = state.open_events.get(&event_id).cloned() {
+        event.write().await.touched_at = chrono::Utc::now();
+        return Ok(event_shv_path);
     }
 
-    let event_record = app_state.read().await.load_event_record(event_id).await?;
+    let event_record = state.load_event_record(event_id).await?;
     let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
     let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
     let now = chrono::Utc::now();
-    app_state.write().await.open_events.insert(event_id, Arc::new(RwLock::new(OpenEventCtl {
+    state.open_events.insert(event_id, Arc::new(RwLock::new(OpenEventCtl {
         db: pool,
         open_at: now,
         touched_at: now,
     })));
+    drop(state);
 
     let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
     rpc_client.send_message(message)
