@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail};
 use shvclient::clientnode::{MethodResolver, RequestHandlerResult, err_unresolved_request};
 use shvproto::RpcValue;
 use shvproto::rpcvalue::IMap;
-use shvrpc::metamethod::MetaMethod;
+use shvrpc::metamethod::{AccessLevel, Flags, MetaMethod};
 use shvrpc::RpcMessage;
 
 use crate::{anyhow_to_rpc_error, resolve_error};
@@ -33,6 +33,32 @@ pub const READ_RESULT: &str = "b";
 pub const WRITE_PARAM: &str = "[i(0,):offset,b:data]";
 pub const TRUNCATE_PARAM: &str = "i(0,)";
 pub const APPEND_PARAM: &str = "b";
+
+pub const USER_ID_GETTER: Flags = Flags::IsGetter.union(Flags::UserIDRequired);
+pub const USER_ID_LARGE_RESULT: Flags = Flags::LargeResultHint.union(Flags::UserIDRequired);
+
+pub const META_FILE_STAT: MetaMethod = MetaMethod::new_static(
+    METH_STAT, USER_ID_GETTER, AccessLevel::Service, "n", STAT_RESULT, &[], "",
+);
+pub const META_FILE_SIZE: MetaMethod = MetaMethod::new_static(
+    METH_SIZE, USER_ID_GETTER, AccessLevel::Service, "n", SIZE_RESULT, &[], "",
+);
+pub const META_FILE_CRC: MetaMethod = MetaMethod::new_static(
+    METH_CRC, Flags::UserIDRequired, AccessLevel::Service, CRC_PARAM, CRC_RESULT, &[], "",
+);
+pub const META_FILE_READ: MetaMethod = MetaMethod::new_static(
+    METH_READ, USER_ID_LARGE_RESULT, AccessLevel::Service, READ_PARAM, READ_RESULT, &[], "",
+);
+pub const META_FILE_WRITE: MetaMethod = MetaMethod::new_static(
+    METH_WRITE, Flags::UserIDRequired, AccessLevel::Service, WRITE_PARAM, "n", &[], "",
+);
+pub const META_FILE_TRUNCATE: MetaMethod = MetaMethod::new_static(
+    METH_TRUNCATE, Flags::UserIDRequired, AccessLevel::Service, TRUNCATE_PARAM, "n", &[], "",
+);
+pub const META_FILE_APPEND: MetaMethod = MetaMethod::new_static(
+    METH_APPEND, Flags::UserIDRequired, AccessLevel::Service, APPEND_PARAM, "n", &[], "",
+);
+
 
 const STAT_TYPE: i32 = 0;
 const STAT_SIZE: i32 = 1;

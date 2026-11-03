@@ -2,6 +2,7 @@
 use log::warn;
 use serde::{Serialize};
 use serde::Deserialize;
+use crate::filenode::{META_FILE_APPEND, META_FILE_CRC, META_FILE_READ, META_FILE_SIZE, META_FILE_STAT, META_FILE_TRUNCATE, META_FILE_WRITE};
 use crate::rpcvalueext::RpcValueExt;
 use crate::rpctype::RpcType;
 use shvclient::ClientCommandSender;
@@ -135,66 +136,6 @@ const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
     ),
     MetaMethod::new_static(
         METH_EVENT_CLOSE, Flags::None, AccessLevel::Read, "",  "", &[], "",
-    ),
-];
-
-const METH_PUSH_DB_COMMIT: &str = "commit";
-const USER_ID_GETTER: Flags = Flags::IsGetter.union(Flags::UserIDRequired);
-const USER_ID_LARGE_RESULT: Flags = Flags::LargeResultHint.union(Flags::UserIDRequired);
-
-const META_FILE_STAT: MetaMethod = MetaMethod::new_static(
-    filenode::METH_STAT, USER_ID_GETTER, AccessLevel::Service, "n", filenode::STAT_RESULT, &[], "",
-);
-const META_FILE_SIZE: MetaMethod = MetaMethod::new_static(
-    filenode::METH_SIZE, USER_ID_GETTER, AccessLevel::Service, "n", filenode::SIZE_RESULT, &[], "",
-);
-const META_FILE_CRC: MetaMethod = MetaMethod::new_static(
-    filenode::METH_CRC, Flags::UserIDRequired, AccessLevel::Service, filenode::CRC_PARAM, filenode::CRC_RESULT, &[], "",
-);
-const META_FILE_READ: MetaMethod = MetaMethod::new_static(
-    filenode::METH_READ, USER_ID_LARGE_RESULT, AccessLevel::Service, filenode::READ_PARAM, filenode::READ_RESULT, &[], "",
-);
-
-/// File node for an upload of event database in chunks, see the SHV file node specification.
-/// `commit` is an extension of the specification, it replaces the event database with the
-/// uploaded file. The file is not compressed. All the methods require the same rights as
-/// pushEventDb, access levels suggested by the specification are not sufficient here.
-const PUSH_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
-    META_METHOD_DIR,
-    META_METHOD_LS,
-    META_FILE_STAT,
-    META_FILE_SIZE,
-    META_FILE_CRC,
-    META_FILE_READ,
-    MetaMethod::new_static(
-        filenode::METH_WRITE, Flags::UserIDRequired, AccessLevel::Service, filenode::WRITE_PARAM, "n", &[], "",
-    ),
-    MetaMethod::new_static(
-        filenode::METH_TRUNCATE, Flags::UserIDRequired, AccessLevel::Service, filenode::TRUNCATE_PARAM, "n", &[], "",
-    ),
-    MetaMethod::new_static(
-        filenode::METH_APPEND, Flags::UserIDRequired, AccessLevel::Service, filenode::APPEND_PARAM, "n", &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_PUSH_DB_COMMIT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
-    ),
-];
-
-const METH_PULL_DB_SNAPSHOT: &str = "snapshot";
-
-/// Read only file node for a download of event database in chunks. The live database file can
-/// change between reads, so a snapshot is served. `snapshot` is an extension of the
-/// specification, it creates the snapshot. The other methods fail until it is called. The file
-/// is not compressed. All the methods require the same rights as pullEventDb.
-const PULL_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
-    META_METHOD_DIR,
-    META_METHOD_LS,
-    META_FILE_STAT,
-    META_FILE_SIZE,
-    META_FILE_CRC,
-    META_FILE_READ,
-    MetaMethod::new_static(
-        METH_PULL_DB_SNAPSHOT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
     ),
 ];
 
@@ -526,6 +467,14 @@ pub(crate) async fn request_handler(
             }
         }
         EventCtlNode::PushEventDbFileNode(event_id) => {
+            const METH_PUSH_DB_COMMIT: &str = "commit";
+            const PUSH_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
+                META_METHOD_DIR, META_METHOD_LS, META_FILE_STAT, META_FILE_SIZE, META_FILE_CRC, META_FILE_READ, META_FILE_WRITE, META_FILE_TRUNCATE, META_FILE_APPEND,
+                MetaMethod::new_static(
+                    METH_PUSH_DB_COMMIT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
+                ),
+            ];
+
             let methods = PUSH_EVENT_DB_FILE_NODE_METHODS;
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(methods),
@@ -550,6 +499,13 @@ pub(crate) async fn request_handler(
             }
         }
         EventCtlNode::PullEventDbFileNode(event_id) => {
+            const METH_PULL_DB_SNAPSHOT: &str = "snapshot";
+            const PULL_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
+                META_METHOD_DIR, META_METHOD_LS, META_FILE_STAT, META_FILE_SIZE, META_FILE_CRC, META_FILE_READ,
+                MetaMethod::new_static(
+                    METH_PULL_DB_SNAPSHOT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
+                ),
+            ];
             let methods = PULL_EVENT_DB_FILE_NODE_METHODS;
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(methods),
