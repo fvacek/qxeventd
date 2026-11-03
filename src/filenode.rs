@@ -8,8 +8,13 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{anyhow, bail};
+use shvclient::clientnode::{MethodResolver, RequestHandlerResult, err_unresolved_request};
 use shvproto::RpcValue;
 use shvproto::rpcvalue::IMap;
+use shvrpc::metamethod::MetaMethod;
+use shvrpc::RpcMessage;
+
+use crate::{anyhow_to_rpc_error, resolve_error};
 
 pub const METH_STAT: &str = "stat";
 pub const METH_SIZE: &str = "size";
@@ -50,6 +55,31 @@ pub enum FileOp {
     Write { offset: u64, data: Vec<u8> },
     Truncate { size: u64 },
     Append { data: Vec<u8> },
+}
+
+/// Resolves a file node method listed in `methods`, so a read only node just omits the methods
+/// modifying the file. `rights` is awaited only for a valid request.
+pub async fn resolve_op<F, Fut>(
+    m: &MethodResolver,
+    rq: &RpcMessage,
+    methods: &'static [MetaMethod],
+    rights: impl Future<Output = Vec<MetaMethod>>,
+    execute: F,
+) -> RequestHandlerResult
+where
+    F: FnOnce(FileOp) -> Fut + Send + 'static,
+    Fut: Future<Output = anyhow::Result<RpcValue>> + Send + 'static,
+{
+    let method = m.method();
+    if !methods.iter().any(|mm| mm.name == method) {
+        return err_unresolved_request();
+    }
+    let op = match FileOp::from_request(method, rq.param().unwrap_or_default()) {
+        Some(Ok(op)) => op,
+        Some(Err(err)) => return resolve_error(m, methods, err),
+        None => return err_unresolved_request(),
+    };
+    m.resolve(rights.await, async move || execute(op).await.map_err(anyhow_to_rpc_error))
 }
 
 fn to_unsigned(name: &str, value: i64) -> anyhow::Result<u64> {

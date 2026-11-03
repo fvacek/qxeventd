@@ -200,6 +200,14 @@ fn anyhow_to_rpc_error(err: anyhow::Error) -> RpcError {
     RpcError::new(RpcErrorCode::MethodCallException, format!("Error: {err}"))
 }
 
+fn resolve_error(
+    m: &shvclient::clientnode::MethodResolver,
+    methods: &'static [shvrpc::metamethod::MetaMethod],
+    err: anyhow::Error,
+) -> shvclient::clientnode::RequestHandlerResult {
+    m.resolve(methods, async move || { Err::<shvproto::RpcValue, _>(anyhow_to_rpc_error(err)) })
+}
+
 fn str_to_rpc_error(err: &str) -> RpcError {
     error!("Error: {err}\nbacktrace: {}", Backtrace::capture());
     RpcError::new(RpcErrorCode::MethodCallException, err.to_string())
