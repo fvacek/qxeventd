@@ -13,14 +13,15 @@ use crate::qxchange::{self, Data, LateEntry, QxChangeRecord};
 use crate::qxeventconfig::Role;
 use crate::remotedbsqlapi::RemoteEventSqlApi;
 use crate::{anyhow_to_rpc_error, filenode, split_first_fragment, str_to_rpc_error};
-use crate::state::{open_event, pushed_event_db_file, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
+use crate::state::{open_event, pulled_event_db_file, pushed_event_db_file, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
 
 
 #[derive(Debug)]
 enum EventCtlNode {
     Root,
     Event(EventId),
-    EventPushDbFileNode(EventId),
+    PushEventDbFileNode(EventId),
+    PullEventDbFileNode(EventId),
 }
 
 impl EventCtlNode {
@@ -32,7 +33,8 @@ impl EventCtlNode {
         let event_id = event_id_str.parse::<i64>()?;
         match dir {
             "" => Ok(Self::Event(event_id)),
-            "pushDb" => Ok(Self::EventPushDbFileNode(event_id)),
+            "pushDb" => Ok(Self::PushEventDbFileNode(event_id)),
+            "pullDb" => Ok(Self::PullEventDbFileNode(event_id)),
             _ => Err(anyhow::anyhow!("invalid path: {}", path))
         }
     }
@@ -140,25 +142,30 @@ const METH_PUSH_DB_COMMIT: &str = "commit";
 const USER_ID_GETTER: Flags = Flags::IsGetter.union(Flags::UserIDRequired);
 const USER_ID_LARGE_RESULT: Flags = Flags::LargeResultHint.union(Flags::UserIDRequired);
 
+const META_FILE_STAT: MetaMethod = MetaMethod::new_static(
+    filenode::METH_STAT, USER_ID_GETTER, AccessLevel::Service, "n", filenode::STAT_RESULT, &[], "",
+);
+const META_FILE_SIZE: MetaMethod = MetaMethod::new_static(
+    filenode::METH_SIZE, USER_ID_GETTER, AccessLevel::Service, "n", filenode::SIZE_RESULT, &[], "",
+);
+const META_FILE_CRC: MetaMethod = MetaMethod::new_static(
+    filenode::METH_CRC, Flags::UserIDRequired, AccessLevel::Service, filenode::CRC_PARAM, filenode::CRC_RESULT, &[], "",
+);
+const META_FILE_READ: MetaMethod = MetaMethod::new_static(
+    filenode::METH_READ, USER_ID_LARGE_RESULT, AccessLevel::Service, filenode::READ_PARAM, filenode::READ_RESULT, &[], "",
+);
+
 /// File node for an upload of event database in chunks, see the SHV file node specification.
 /// `commit` is an extension of the specification, it replaces the event database with the
 /// uploaded file. The file is not compressed. All the methods require the same rights as
 /// pushEventDb, access levels suggested by the specification are not sufficient here.
-const EVENT_PUSH_DB_FILE_METHODS: &[MetaMethod] = &[
+const PUSH_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
     META_METHOD_DIR,
     META_METHOD_LS,
-    MetaMethod::new_static(
-        filenode::METH_STAT, USER_ID_GETTER, AccessLevel::Service, "n", filenode::STAT_RESULT, &[], "",
-    ),
-    MetaMethod::new_static(
-        filenode::METH_SIZE, USER_ID_GETTER, AccessLevel::Service, "n", filenode::SIZE_RESULT, &[], "",
-    ),
-    MetaMethod::new_static(
-        filenode::METH_CRC, Flags::UserIDRequired, AccessLevel::Service, filenode::CRC_PARAM, filenode::CRC_RESULT, &[], "",
-    ),
-    MetaMethod::new_static(
-        filenode::METH_READ, USER_ID_LARGE_RESULT, AccessLevel::Service, filenode::READ_PARAM, filenode::READ_RESULT, &[], "",
-    ),
+    META_FILE_STAT,
+    META_FILE_SIZE,
+    META_FILE_CRC,
+    META_FILE_READ,
     MetaMethod::new_static(
         filenode::METH_WRITE, Flags::UserIDRequired, AccessLevel::Service, filenode::WRITE_PARAM, "n", &[], "",
     ),
@@ -170,6 +177,24 @@ const EVENT_PUSH_DB_FILE_METHODS: &[MetaMethod] = &[
     ),
     MetaMethod::new_static(
         METH_PUSH_DB_COMMIT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
+    ),
+];
+
+const METH_PULL_DB_SNAPSHOT: &str = "snapshot";
+
+/// Read only file node for a download of event database in chunks. The live database file can
+/// change between reads, so a snapshot is served. `snapshot` is an extension of the
+/// specification, it creates the snapshot. The other methods fail until it is called. The file
+/// is not compressed. All the methods require the same rights as pullEventDb.
+const PULL_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
+    META_METHOD_DIR,
+    META_METHOD_LS,
+    META_FILE_STAT,
+    META_FILE_SIZE,
+    META_FILE_CRC,
+    META_FILE_READ,
+    MetaMethod::new_static(
+        METH_PULL_DB_SNAPSHOT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
     ),
 ];
 
@@ -438,7 +463,7 @@ pub(crate) async fn request_handler(
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_NODE_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_NODE_METHODS, async move || {
-                    Ok(vec!["sql".into(), "pushDb".into()])
+                    Ok(vec!["sql".into(), "pushDb".into(), "pullDb".into()])
                 }),
                 Method::Other(m) => {
                     let method = m.method();
@@ -504,16 +529,16 @@ pub(crate) async fn request_handler(
                 }
             }
         }
-        EventCtlNode::EventPushDbFileNode(event_id) => {
+        EventCtlNode::PushEventDbFileNode(event_id) => {
             match Method::from_request(&rq) {
-                Method::Dir(dir) => dir.resolve(EVENT_PUSH_DB_FILE_METHODS),
-                Method::Ls(ls) => ls.resolve(EVENT_PUSH_DB_FILE_METHODS, async move || {
+                Method::Dir(dir) => dir.resolve(PUSH_EVENT_DB_FILE_NODE_METHODS),
+                Method::Ls(ls) => ls.resolve(PUSH_EVENT_DB_FILE_NODE_METHODS, async move || {
                     Ok(vec![])
                 }),
                 Method::Other(m) => {
                     let method = m.method();
                     if method == METH_PUSH_DB_COMMIT {
-                        return m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENT_PUSH_DB_FILE_METHODS).await, async move || {
+                        return m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), PUSH_EVENT_DB_FILE_NODE_METHODS).await, async move || {
                             State::commit_pushed_event_db(app_state, event_id, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::null())
@@ -521,15 +546,53 @@ pub(crate) async fn request_handler(
                     }
                     let op = match filenode::FileOp::from_request(method, rq.param().unwrap_or_default()) {
                         Some(Ok(op)) => op,
-                        Some(Err(err)) => return resolve_error(&m, EVENT_PUSH_DB_FILE_METHODS, err),
+                        Some(Err(err)) => return resolve_error(&m, PUSH_EVENT_DB_FILE_NODE_METHODS, err),
                         None => return err_unresolved_request(),
                     };
-                    m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENT_PUSH_DB_FILE_METHODS).await, async move || {
+                    m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), PUSH_EVENT_DB_FILE_NODE_METHODS).await, async move || {
                         // commit holds the write lock, so it cannot move the file under a running modification
                         let _commit_guard = if op.modifies_file() { Some(app_state.read().await) } else { None };
                         let file = pushed_event_db_file(event_id);
                         smol::unblock(move || op.execute(std::path::Path::new(&file))).await
                             .map_err(anyhow_to_rpc_error)
+                    })
+                }
+            }
+        }
+        EventCtlNode::PullEventDbFileNode(event_id) => {
+            match Method::from_request(&rq) {
+                Method::Dir(dir) => dir.resolve(PULL_EVENT_DB_FILE_NODE_METHODS),
+                Method::Ls(ls) => ls.resolve(PULL_EVENT_DB_FILE_NODE_METHODS, async move || {
+                    Ok(vec![])
+                }),
+                Method::Other(m) => {
+                    let method = m.method();
+                    if method == METH_PULL_DB_SNAPSHOT {
+                        return m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), PULL_EVENT_DB_FILE_NODE_METHODS).await, async move || {
+                            State::snapshot_event_db(app_state, event_id).await
+                                .map_err(anyhow_to_rpc_error)?;
+                            Ok(RpcValue::null())
+                        });
+                    }
+                    // the node is read only, file methods modifying the file must not be available
+                    if !PULL_EVENT_DB_FILE_NODE_METHODS.iter().any(|mm| mm.name == method) {
+                        return err_unresolved_request();
+                    }
+                    let op = match filenode::FileOp::from_request(method, rq.param().unwrap_or_default()) {
+                        Some(Ok(op)) => op,
+                        Some(Err(err)) => return resolve_error(&m, PULL_EVENT_DB_FILE_NODE_METHODS, err),
+                        None => return err_unresolved_request(),
+                    };
+                    m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), PULL_EVENT_DB_FILE_NODE_METHODS).await, async move || {
+                        let file = pulled_event_db_file(event_id);
+                        smol::unblock(move || {
+                            let path = std::path::Path::new(&file);
+                            // an empty file would look like a successfully downloaded empty database
+                            if !path.exists() {
+                                anyhow::bail!("Event {event_id} DB snapshot does not exist, call {METH_PULL_DB_SNAPSHOT} first");
+                            }
+                            op.execute(path)
+                        }).await.map_err(anyhow_to_rpc_error)
                     })
                 }
             }

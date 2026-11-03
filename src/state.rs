@@ -235,12 +235,7 @@ impl State {
         let db_data = if let Some(db) = open_event_db {
             // Event is open, make consistent snapshot using SQLite online backup API
             let backup_file = format!("{db_file}.backup-{:016x}", rand::random::<u64>());
-            let backup_result = db.conn({
-                let backup_file = backup_file.clone();
-                move |conn| conn.backup(async_sqlite::rusqlite::MAIN_DB, &backup_file, None)
-            }).await;
-            let read_result = backup_result
-                .map_err(|e| anyhow!("Failed to backup event {event_id} DB: {e}"))
+            let read_result = backup_open_event_db(&db, event_id, &backup_file).await
                 .and_then(|_| std::fs::read(&backup_file).map_err(anyhow::Error::from));
             if let Err(err) = std::fs::remove_file(&backup_file) && err.kind() != std::io::ErrorKind::NotFound {
                 warn!("Failed to remove event DB backup file {backup_file}: {err}");
@@ -254,6 +249,36 @@ impl State {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&db_data)?;
         Ok((db_data_size, encoder.finish()?))
+    }
+
+    /// Create the file served by the pullDb file node, it replaces the previous one atomically.
+    pub async fn snapshot_event_db(app_state: SharedAppState, event_id: EventId) -> anyhow::Result<()> {
+        let snapshot_file = pulled_event_db_file(event_id);
+        let tmp_file = format!("{snapshot_file}.tmp-{:016x}", rand::random::<u64>());
+        let create_result: anyhow::Result<()> = {
+            // The lock is held until the copy is done, so the event database cannot be
+            // replaced, nor the event opened or closed meanwhile.
+            let state = app_state.read().await;
+            let open_event_db = match state.open_events.get(&event_id).cloned() {
+                Some(event) => Some(event.read().await.db.clone()),
+                None => None,
+            };
+            match open_event_db {
+                Some(db) => backup_open_event_db(&db, event_id, &tmp_file).await,
+                None => {
+                    let db_file = event_db_file(event_id);
+                    let tmp_file = tmp_file.clone();
+                    smol::unblock(move || std::fs::copy(db_file, tmp_file)).await
+                        .map(|_| ())
+                        .map_err(|e| anyhow!("Failed to copy event {event_id} DB: {e}"))
+                }
+            }
+        };
+        let result = create_result.and_then(|_| std::fs::rename(&tmp_file, &snapshot_file).map_err(anyhow::Error::from));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp_file);
+        }
+        result
     }
 
     pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
@@ -307,6 +332,13 @@ impl State {
         event_id.ok_or_else(|| anyhow::anyhow!("API token not found"))
     }
 
+}
+
+/// Make consistent snapshot of an open event DB using SQLite online backup API
+async fn backup_open_event_db(db: &async_sqlite::Pool, event_id: EventId, backup_file: &str) -> anyhow::Result<()> {
+    let backup_file = backup_file.to_string();
+    db.conn(move |conn| conn.backup(async_sqlite::rusqlite::MAIN_DB, &backup_file, None)).await
+        .map_err(|e| anyhow!("Failed to backup event {event_id} DB: {e}"))
 }
 
 /// Checkpoint WAL and close connections, so the whole database is stored in the main DB file.
@@ -660,6 +692,11 @@ fn event_db_file(event_id: EventId) -> String {
 /// so it can be installed atomically.
 pub fn pushed_event_db_file(event_id: EventId) -> String {
     format!("{}.pushdb", event_db_file(event_id))
+}
+
+/// Snapshot served by the pullDb file node
+pub fn pulled_event_db_file(event_id: EventId) -> String {
+    format!("{}.pulldb", event_db_file(event_id))
 }
 
 pub fn event_api_shv_path(event_id: EventId) -> String {

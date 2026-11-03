@@ -418,6 +418,150 @@ fn push_db_access_rights() {
     });
 }
 
+fn pull_db_request(event_id: i64, method: &str, param: &str, user: &str, access: AccessLevel) -> RpcMessage {
+    request(&format!("eventctl/{event_id}/pullDb"), method, param, user, access)
+}
+
+async fn pull_db_call(client: &mut TestClient, event_id: i64, method: &str, param: &str) -> Result<RpcValue, shvrpc::rpcmessage::RpcError> {
+    client.call(pull_db_request(event_id, method, param, "fanda", AccessLevel::Read)).await
+}
+
+/// Download the snapshot in chunks
+async fn pull_db_read_all(client: &mut TestClient, event_id: i64) -> Vec<u8> {
+    let mut data = Vec::new();
+    loop {
+        let param = format!("[{},1000]", data.len());
+        let chunk = pull_db_call(client, event_id, "read", &param).await.unwrap();
+        if chunk.as_blob().is_empty() {
+            return data;
+        }
+        data.extend_from_slice(chunk.as_blob());
+    }
+}
+
+#[test]
+fn pull_db_node_ls_and_dir() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+
+        let res = client.call(request(&format!("eventctl/{event_id}"), "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert!(res.to_cpon().contains(r#""pullDb""#), "{}", res.to_cpon());
+
+        let res = pull_db_call(&mut client, event_id, "ls", "").await.unwrap();
+        assert_eq!(res.to_cpon(), "[]");
+        let res = pull_db_call(&mut client, event_id, "dir", "").await.unwrap().to_cpon();
+        for method in ["stat", "size", "crc", "read", "snapshot"] {
+            assert!(res.contains(&format!(r#""{method}""#)), "{method}: {res}");
+        }
+        for method in ["write", "truncate", "append"] {
+            assert!(!res.contains(&format!(r#""{method}""#)), "{method}: {res}");
+        }
+    });
+}
+
+#[test]
+fn pull_db_is_read_only() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        push_event_db(&mut client, event_id, b"database").await;
+        pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
+
+        for (method, param) in [("write", r#"[0,b"x"]"#), ("truncate", "0"), ("append", r#"b"x""#), ("commit", "")] {
+            pull_db_call(&mut client, event_id, method, param).await.expect_err(method);
+        }
+        assert_eq!(pull_db_read_all(&mut client, event_id).await, b"database");
+    });
+}
+
+#[test]
+fn pull_db_requires_snapshot() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        push_event_db(&mut client, event_id, b"database").await;
+
+        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("read", "[0,10]")] {
+            pull_db_call(&mut client, event_id, method, param).await.expect_err(method);
+        }
+    });
+}
+
+#[test]
+fn pull_db_snapshot_fails_if_there_is_no_db() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        pull_db_call(&mut client, event_id, "snapshot", "").await.expect_err("event DB does not exist");
+    });
+}
+
+#[test]
+fn pull_db_snapshot_is_stable_until_refreshed() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        push_event_db(&mut client, event_id, b"123456789").await;
+
+        pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
+        assert_eq!(pull_db_call(&mut client, event_id, "size", "").await.unwrap().as_int(), 9);
+        assert_eq!(pull_db_call(&mut client, event_id, "stat", "").await.unwrap().as_imap()[&1].as_int(), 9);
+        assert_eq!(pull_db_call(&mut client, event_id, "crc", "").await.unwrap().to_cpon(), "3421780262u");
+
+        // change of the database does not affect the running download
+        push_event_db(&mut client, event_id, b"new").await;
+        assert_eq!(pull_db_read_all(&mut client, event_id).await, b"123456789");
+
+        pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
+        assert_eq!(pull_db_read_all(&mut client, event_id).await, b"new");
+    });
+}
+
+#[test]
+fn pull_db_snapshot_of_opened_event() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+
+        pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
+        let data = pull_db_read_all(&mut client, event_id).await;
+        let (stage_count, _) = with_event_db_image(&data, |conn| read_config(conn, "event.stage_count"));
+        assert_eq!(stage_count, "1");
+
+        // event stays opened
+        let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
+    });
+}
+
+#[test]
+fn pull_db_access_rights() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        push_event_db(&mut client, event_id, b"database").await;
+        pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
+
+        // stranger with Read access is not allowed
+        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("read", "[0,1]"), ("snapshot", "")] {
+            assert_permission_denied(client.call(pull_db_request(event_id, method, param, "eve", AccessLevel::Read)).await);
+        }
+
+        // neither is one with invalid api token, the method is not even resolved then
+        client.call(with_api_token(pull_db_request(event_id, "read", "[0,1]", "eve", AccessLevel::Read), "invalid")).await
+            .expect_err("invalid api token cannot download");
+
+        // stranger with valid api token is
+        client.call(with_api_token(pull_db_request(event_id, "read", "[0,1]", "eve", AccessLevel::Read), &api_token)).await
+            .expect("api token holder can download");
+        // user with Service access is
+        client.call(pull_db_request(event_id, "read", "[0,1]", "admin", AccessLevel::Service)).await
+            .expect("service user can download");
+    });
+}
+
 #[test]
 fn pull_closed_event_db_contains_data_written_while_opened() {
     smol::block_on(async {
