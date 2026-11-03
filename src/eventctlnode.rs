@@ -68,77 +68,6 @@ struct OpenEventResult {
     mount_point: String,
 }
 
-const METH_CREATE_EVENT: &str = "createEvent";
-const METH_OPEN_EVENT: &str = "openEvent";
-const METH_OPEN_EVENT_API_KEY: &str = "openEventApiKey";
-const METH_READ_EVENT_RECORD: &str = "readEventRecord";
-const METH_UPDATE_EVENT_RECORD: &str = "updateEventRecord";
-const METH_SET_EVENT_DB_MODE: &str = "setEventDbMode";
-const METH_DELETE_EVENT: &str = "deleteEvent";
-const METH_LIST_EVENTS: &str = "listEvents";
-const METH_EVENT_DATA: &str = "eventData";
-const METH_PUSH_EVENT_DB: &str = "pushEventDb";
-const METH_PULL_EVENT_DB: &str = "pullEventDb";
-
-const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
-    META_METHOD_DIR,
-    META_METHOD_LS,
-    MetaMethod::new_static(
-        METH_CREATE_EVENT, Flags::None, AccessLevel::Write, CreateEventParam::RPC_TYPE, CreateEventResult::RPC_TYPE, &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_OPEN_EVENT, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, OpenEventResult::RPC_TYPE, &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_OPEN_EVENT_API_KEY, Flags::None, AccessLevel::Read, ApiTokenParam::RPC_TYPE, OpenEventResult::RPC_TYPE, &[], "",
-    ),
-    MetaMethod::new_static(
-        // user with Service access or user_id == event_owner can read event records
-        // read event record is privileged operation, because it exposes api_key
-        METH_READ_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, EventRecord::RPC_TYPE, &[], "",
-    ),
-    MetaMethod::new_static(
-        // user with Service access or user_id == event_owner can update event records
-        METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, UpdateEventRecordParams::RPC_TYPE, bool::RPC_TYPE, &[], "",
-    ),
-    MetaMethod::new_static(
-        // user with Service access or user_id == event_owner can change the database mode
-        METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, SetEventDbModeParams::RPC_TYPE, bool::RPC_TYPE, &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE, bool::RPC_TYPE, &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, PushEventDbParam::RPC_TYPE, "n", &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, PullEventDbResult::RPC_TYPE, &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", ListEventsResult::RPC_TYPE, &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_EVENT_DATA, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, EventRecord::RPC_TYPE, &[], "",
-    ),
-];
-
-const METH_EVENT_STATUS: &str = "status";
-const METH_EVENT_UPDATE_LATE_ENTRY: &str = "updateLateEntry";
-const METH_EVENT_CLOSE: &str = "close";
-const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
-    META_METHOD_DIR,
-    META_METHOD_LS,
-    MetaMethod::new_static(
-        METH_EVENT_UPDATE_LATE_ENTRY, Flags::UserIDRequired, AccessLevel::Write, "{i:run_id,{?}:record}", "b|i", &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_EVENT_STATUS, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
-    ),
-    MetaMethod::new_static(
-        METH_EVENT_CLOSE, Flags::None, AccessLevel::Read, "",  "", &[], "",
-    ),
-];
-
 fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
     rq.user_id().map(|user_id| user_id.split(':').next().unwrap_or(user_id))
 }
@@ -265,6 +194,59 @@ pub(crate) async fn request_handler(
     };
     match node_type {
         EventCtlNode::Root => {
+            const METH_CREATE_EVENT: &str = "createEvent";
+            const METH_OPEN_EVENT: &str = "openEvent";
+            const METH_OPEN_EVENT_API_KEY: &str = "openEventApiKey";
+            const METH_READ_EVENT_RECORD: &str = "readEventRecord";
+            const METH_UPDATE_EVENT_RECORD: &str = "updateEventRecord";
+            const METH_SET_EVENT_DB_MODE: &str = "setEventDbMode";
+            const METH_DELETE_EVENT: &str = "deleteEvent";
+            const METH_LIST_EVENTS: &str = "listEvents";
+            const METH_EVENT_DATA: &str = "eventData";
+            const METH_PUSH_EVENT_DB: &str = "pushEventDb";
+            const METH_PULL_EVENT_DB: &str = "pullEventDb";
+            const EVENTCTL_ROOT_METHODS: &[MetaMethod] = &[
+                META_METHOD_DIR,
+                META_METHOD_LS,
+                MetaMethod::new_static(
+                    METH_CREATE_EVENT, Flags::None, AccessLevel::Write, CreateEventParam::RPC_TYPE, CreateEventResult::RPC_TYPE, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_OPEN_EVENT, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, OpenEventResult::RPC_TYPE, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_OPEN_EVENT_API_KEY, Flags::None, AccessLevel::Read, ApiTokenParam::RPC_TYPE, OpenEventResult::RPC_TYPE, &[], "",
+                ),
+                MetaMethod::new_static(
+                    // user with Service access or user_id == event_owner can read event records
+                    // read event record is privileged operation, because it exposes api_key
+                    METH_READ_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, EventRecord::RPC_TYPE, &[], "",
+                ),
+                MetaMethod::new_static(
+                    // user with Service access or user_id == event_owner can update event records
+                    METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, UpdateEventRecordParams::RPC_TYPE, bool::RPC_TYPE, &[], "",
+                ),
+                MetaMethod::new_static(
+                    // user with Service access or user_id == event_owner can change the database mode
+                    METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, SetEventDbModeParams::RPC_TYPE, bool::RPC_TYPE, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE, bool::RPC_TYPE, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_PUSH_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, PushEventDbParam::RPC_TYPE, "n", &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_PULL_EVENT_DB, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, PullEventDbResult::RPC_TYPE, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", ListEventsResult::RPC_TYPE, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_EVENT_DATA, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, EventRecord::RPC_TYPE, &[], "",
+                ),
+            ];
+
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_ROOT_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_ROOT_METHODS, async move || {
@@ -397,6 +379,23 @@ pub(crate) async fn request_handler(
             }
         }
         EventCtlNode::Event(event_id) => {
+            const METH_EVENT_STATUS: &str = "status";
+            const METH_EVENT_UPDATE_LATE_ENTRY: &str = "updateLateEntry";
+            const METH_EVENT_CLOSE: &str = "close";
+            const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
+                META_METHOD_DIR,
+                META_METHOD_LS,
+                MetaMethod::new_static(
+                    METH_EVENT_UPDATE_LATE_ENTRY, Flags::UserIDRequired, AccessLevel::Write, "{i:run_id,{?}:record}", "b|i", &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_EVENT_STATUS, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_EVENT_CLOSE, Flags::None, AccessLevel::Read, "",  "", &[], "",
+                ),
+            ];
+
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_NODE_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_NODE_METHODS, async move || {
