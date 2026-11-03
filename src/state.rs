@@ -170,20 +170,40 @@ impl State {
         decoder.read_to_end(&mut db_data)
             .map_err(|err| anyhow!("Failed to decompress event database: {err}"))?;
 
-        let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-        let db_path = std::path::Path::new(&db_file);
-        if let Some(parent) = db_path.parent() {
+        let db_file = event_db_file(event_id);
+        if let Some(parent) = std::path::Path::new(&db_file).parent() {
             std::fs::create_dir_all(parent)?;
         }
         let tmp_file = format!("{db_file}.upload-tmp-{:016x}", rand::random::<u64>());
 
-        let was_open_before_install_result: anyhow::Result<bool> = async {
-            std::fs::write(&tmp_file, &db_data)?;
+        let install_result = match std::fs::write(&tmp_file, &db_data) {
+            Ok(()) => Self::install_event_db(app_state, event_id, &tmp_file, client_command_sender).await,
+            Err(err) => Err(err.into()),
+        };
+        if install_result.is_err() {
+            let _ = std::fs::remove_file(&tmp_file);
+        }
+        install_result
+    }
 
+    /// Install the database uploaded using the pushDb file node. The uploaded file is kept if
+    /// it cannot be installed, so the upload does not have to be repeated.
+    pub async fn commit_pushed_event_db(app_state: SharedAppState, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
+        Self::install_event_db(app_state, event_id, &pushed_event_db_file(event_id), client_command_sender).await
+    }
+
+    /// Replace the event database with `new_db_file`, the file is moved.
+    /// It must be located in the same file system as the event database.
+    async fn install_event_db(app_state: SharedAppState, event_id: EventId, new_db_file: &str, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
+        let db_file = event_db_file(event_id);
+        let was_open = {
             // An open SQLite pool would continue using the old database after the file
             // is replaced. Close it first, then install the new file atomically. The lock
             // is held until the file is replaced, so the event cannot be opened meanwhile.
             let mut state = app_state.write().await;
+            // Checked before closing, so missing file does not interrupt a running event.
+            std::fs::metadata(new_db_file)
+                .map_err(|err| anyhow!("Cannot install event {event_id} database {new_db_file}: {err}"))?;
             let was_open = state.open_events.contains_key(&event_id);
             state.close_event(event_id, client_command_sender.clone()).await?;
             // SQLite would replay WAL left over from the old database over the new one.
@@ -192,14 +212,11 @@ impl State {
                     return Err(err.into());
                 }
             }
-            std::fs::rename(&tmp_file, db_path)?;
-            Ok(was_open)
-        }.await;
-        if was_open_before_install_result.is_err() {
-            let _ = std::fs::remove_file(&tmp_file);
-        }
+            std::fs::rename(new_db_file, &db_file)?;
+            was_open
+        };
 
-        if was_open_before_install_result? {
+        if was_open {
             open_event(app_state, event_id, client_command_sender).await?;
         }
         Ok(())
@@ -633,6 +650,16 @@ impl OpenEventCtl {
     pub fn expires_at(&self) -> DateTime<chrono::Utc> {
         self.open_at + global_config().event_expire_duration
     }
+}
+
+fn event_db_file(event_id: EventId) -> String {
+    format!("{}/{event_id}/event.qbe", global_config().data_dir)
+}
+
+/// File backing the pushDb file node, it is located next to the event database,
+/// so it can be installed atomically.
+pub fn pushed_event_db_file(event_id: EventId) -> String {
+    format!("{}.pushdb", event_db_file(event_id))
 }
 
 pub fn event_api_shv_path(event_id: EventId) -> String {

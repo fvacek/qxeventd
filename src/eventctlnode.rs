@@ -12,14 +12,15 @@ use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use crate::qxchange::{self, Data, LateEntry, QxChangeRecord};
 use crate::qxeventconfig::Role;
 use crate::remotedbsqlapi::RemoteEventSqlApi;
-use crate::{anyhow_to_rpc_error, str_to_rpc_error};
-use crate::state::{open_event, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
+use crate::{anyhow_to_rpc_error, filenode, split_first_fragment, str_to_rpc_error};
+use crate::state::{open_event, pushed_event_db_file, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
 
 
 #[derive(Debug)]
 enum EventCtlNode {
     Root,
     Event(EventId),
+    EventPushDbFileNode(EventId),
 }
 
 impl EventCtlNode {
@@ -27,10 +28,14 @@ impl EventCtlNode {
         if path.is_empty() {
             return Ok(Self::Root);
         }
-        let event_id = path.parse::<i64>()?;
-        Ok(Self::Event(event_id))
+        let (event_id_str, dir) = split_first_fragment(path, '/');
+        let event_id = event_id_str.parse::<i64>()?;
+        match dir {
+            "" => Ok(Self::Event(event_id)),
+            "pushDb" => Ok(Self::EventPushDbFileNode(event_id)),
+            _ => Err(anyhow::anyhow!("invalid path: {}", path))
+        }
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
@@ -128,6 +133,43 @@ const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
     ),
     MetaMethod::new_static(
         METH_EVENT_CLOSE, Flags::None, AccessLevel::Read, "",  "", &[], "",
+    ),
+];
+
+const METH_PUSH_DB_COMMIT: &str = "commit";
+const USER_ID_GETTER: Flags = Flags::IsGetter.union(Flags::UserIDRequired);
+const USER_ID_LARGE_RESULT: Flags = Flags::LargeResultHint.union(Flags::UserIDRequired);
+
+/// File node for an upload of event database in chunks, see the SHV file node specification.
+/// `commit` is an extension of the specification, it replaces the event database with the
+/// uploaded file. The file is not compressed. All the methods require the same rights as
+/// pushEventDb, access levels suggested by the specification are not sufficient here.
+const EVENT_PUSH_DB_FILE_METHODS: &[MetaMethod] = &[
+    META_METHOD_DIR,
+    META_METHOD_LS,
+    MetaMethod::new_static(
+        filenode::METH_STAT, USER_ID_GETTER, AccessLevel::Service, "n", filenode::STAT_RESULT, &[], "",
+    ),
+    MetaMethod::new_static(
+        filenode::METH_SIZE, USER_ID_GETTER, AccessLevel::Service, "n", filenode::SIZE_RESULT, &[], "",
+    ),
+    MetaMethod::new_static(
+        filenode::METH_CRC, Flags::UserIDRequired, AccessLevel::Service, filenode::CRC_PARAM, filenode::CRC_RESULT, &[], "",
+    ),
+    MetaMethod::new_static(
+        filenode::METH_READ, USER_ID_LARGE_RESULT, AccessLevel::Service, filenode::READ_PARAM, filenode::READ_RESULT, &[], "",
+    ),
+    MetaMethod::new_static(
+        filenode::METH_WRITE, Flags::UserIDRequired, AccessLevel::Service, filenode::WRITE_PARAM, "n", &[], "",
+    ),
+    MetaMethod::new_static(
+        filenode::METH_TRUNCATE, Flags::UserIDRequired, AccessLevel::Service, filenode::TRUNCATE_PARAM, "n", &[], "",
+    ),
+    MetaMethod::new_static(
+        filenode::METH_APPEND, Flags::UserIDRequired, AccessLevel::Service, filenode::APPEND_PARAM, "n", &[], "",
+    ),
+    MetaMethod::new_static(
+        METH_PUSH_DB_COMMIT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
     ),
 ];
 
@@ -396,7 +438,7 @@ pub(crate) async fn request_handler(
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_NODE_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_NODE_METHODS, async move || {
-                    Ok(vec!["sql".into()])
+                    Ok(vec!["sql".into(), "pushDb".into()])
                 }),
                 Method::Other(m) => {
                     let method = m.method();
@@ -459,6 +501,36 @@ pub(crate) async fn request_handler(
                         }),
                         _ => err_unresolved_request(),
                     }
+                }
+            }
+        }
+        EventCtlNode::EventPushDbFileNode(event_id) => {
+            match Method::from_request(&rq) {
+                Method::Dir(dir) => dir.resolve(EVENT_PUSH_DB_FILE_METHODS),
+                Method::Ls(ls) => ls.resolve(EVENT_PUSH_DB_FILE_METHODS, async move || {
+                    Ok(vec![])
+                }),
+                Method::Other(m) => {
+                    let method = m.method();
+                    if method == METH_PUSH_DB_COMMIT {
+                        return m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENT_PUSH_DB_FILE_METHODS).await, async move || {
+                            State::commit_pushed_event_db(app_state, event_id, client_cmd_tx).await
+                                .map_err(anyhow_to_rpc_error)?;
+                            Ok(RpcValue::null())
+                        });
+                    }
+                    let op = match filenode::FileOp::from_request(method, rq.param().unwrap_or_default()) {
+                        Some(Ok(op)) => op,
+                        Some(Err(err)) => return resolve_error(&m, EVENT_PUSH_DB_FILE_METHODS, err),
+                        None => return err_unresolved_request(),
+                    };
+                    m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENT_PUSH_DB_FILE_METHODS).await, async move || {
+                        // commit holds the write lock, so it cannot move the file under a running modification
+                        let _commit_guard = if op.modifies_file() { Some(app_state.read().await) } else { None };
+                        let file = pushed_event_db_file(event_id);
+                        smol::unblock(move || op.execute(std::path::Path::new(&file))).await
+                            .map_err(anyhow_to_rpc_error)
+                    })
                 }
             }
         }

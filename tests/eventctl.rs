@@ -249,6 +249,175 @@ fn push_and_pull_event_db_access_rights() {
     });
 }
 
+fn push_db_request(event_id: i64, method: &str, param: RpcValue, user: &str, access: AccessLevel) -> RpcMessage {
+    let param = if param.is_null() { None } else { Some(param) };
+    request(&format!("eventctl/{event_id}/pushDb"), method, "", user, access).with_param(param)
+}
+
+async fn push_db_call(client: &mut TestClient, event_id: i64, method: &str, param: RpcValue) -> Result<RpcValue, shvrpc::rpcmessage::RpcError> {
+    client.call(push_db_request(event_id, method, param, "fanda", AccessLevel::Read)).await
+}
+
+fn chunk(offset: i64, data: &[u8]) -> RpcValue {
+    vec![RpcValue::from(offset), RpcValue::from(data)].into()
+}
+
+fn cpon(cpon: &str) -> RpcValue {
+    RpcValue::from_cpon(cpon).unwrap()
+}
+
+#[test]
+fn push_db_node_ls_and_dir() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+
+        let res = client.call(request(&format!("eventctl/{event_id}"), "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert!(res.to_cpon().contains(r#""pushDb""#), "{}", res.to_cpon());
+
+        let path = format!("eventctl/{event_id}/pushDb");
+        let res = client.call(request(&path, "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert_eq!(res.to_cpon(), "[]");
+        let res = client.call(request(&path, "dir", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
+        for method in ["stat", "size", "crc", "read", "write", "truncate", "append", "commit"] {
+            assert!(res.contains(&format!(r#""{method}""#)), "{method}: {res}");
+        }
+    });
+}
+
+#[test]
+fn push_db_upload_in_chunks_and_commit() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        push_event_db(&mut client, event_id, b"old").await;
+
+        // nothing uploaded yet
+        assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 0);
+
+        push_db_call(&mut client, event_id, "write", chunk(0, b"1234")).await.unwrap();
+        push_db_call(&mut client, event_id, "append", RpcValue::from(&b"56789"[..])).await.unwrap();
+        // overwrite does not change the rest of the file
+        push_db_call(&mut client, event_id, "write", chunk(1, b"2")).await.unwrap();
+
+        assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 9);
+        let stat = push_db_call(&mut client, event_id, "stat", RpcValue::null()).await.unwrap();
+        let stat = stat.as_imap();
+        assert_eq!(stat[&0].as_int(), 0);
+        assert_eq!(stat[&1].as_int(), 9);
+        assert_eq!(stat[&4].type_name(), "DateTime");
+        assert_eq!(push_db_call(&mut client, event_id, "crc", RpcValue::null()).await.unwrap().to_cpon(), "3421780262u");
+        assert_eq!(push_db_call(&mut client, event_id, "read", cpon("[7,100]")).await.unwrap().as_blob(), b"89");
+        assert_eq!(push_db_call(&mut client, event_id, "read", cpon("[100,1]")).await.unwrap().as_blob(), b"");
+
+        // upload does not affect the database until commit
+        assert_eq!(pull_event_db(&mut client, event_id).await, b"old");
+
+        push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.unwrap();
+        assert_eq!(pull_event_db(&mut client, event_id).await, b"123456789");
+        assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 0);
+    });
+}
+
+#[test]
+fn push_db_truncate_restarts_upload() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+
+        push_db_call(&mut client, event_id, "append", RpcValue::from(&b"abandoned upload"[..])).await.unwrap();
+        push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
+        assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 0);
+        push_db_call(&mut client, event_id, "truncate", cpon("3")).await.unwrap();
+        assert_eq!(push_db_call(&mut client, event_id, "read", cpon("[0,10]")).await.unwrap().as_blob(), b"\0\0\0");
+    });
+}
+
+#[test]
+fn push_db_invalid_param_is_rejected() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        push_db_call(&mut client, event_id, "write", cpon("[-1,b\"a\"]")).await.expect_err("negative offset");
+        push_db_call(&mut client, event_id, "unknown", RpcValue::null()).await.expect_err("unknown method");
+    });
+}
+
+#[test]
+fn push_db_commit_without_upload_keeps_event_opened() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+
+        push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.expect_err("nothing uploaded");
+
+        let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
+    });
+}
+
+#[test]
+fn push_db_commit_replaces_opened_event_db() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+
+        let snapshot = pull_event_db(&mut client, event_id).await;
+        let ((), modified) = with_event_db_image(&snapshot, |conn| {
+            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
+        });
+
+        for (ix, data) in modified.chunks(4096).enumerate() {
+            push_db_call(&mut client, event_id, "write", chunk(ix as i64 * 4096, data)).await.unwrap();
+        }
+        push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.unwrap();
+
+        let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
+        let snapshot = pull_event_db(&mut client, event_id).await;
+        let (event_name, _) = with_event_db_image(&snapshot, |conn| read_config(conn, "event.name"));
+        assert_eq!(event_name, "pushed");
+    });
+}
+
+#[test]
+fn push_db_access_rights() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        let data = || RpcValue::from(&b"data"[..]);
+
+        // stranger with Read access is not allowed
+        for (method, param) in [
+            ("stat", RpcValue::null()),
+            ("size", RpcValue::null()),
+            ("crc", RpcValue::null()),
+            ("read", cpon("[0,1]")),
+            ("write", chunk(0, b"eve")),
+            ("truncate", cpon("0")),
+            ("append", data()),
+            ("commit", RpcValue::null()),
+        ] {
+            assert_permission_denied(client.call(push_db_request(event_id, method, param, "eve", AccessLevel::Read)).await);
+        }
+
+        // neither is one with invalid api token, the method is not even resolved then
+        client.call(with_api_token(push_db_request(event_id, "append", data(), "eve", AccessLevel::Read), "invalid")).await
+            .expect_err("invalid api token cannot upload");
+        assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 0);
+
+        // stranger with valid api token is
+        client.call(with_api_token(push_db_request(event_id, "append", data(), "eve", AccessLevel::Read), &api_token)).await
+            .expect("api token holder can upload");
+        // user with Service access is
+        client.call(push_db_request(event_id, "append", data(), "admin", AccessLevel::Service)).await
+            .expect("service user can upload");
+        assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 8);
+    });
+}
+
 #[test]
 fn pull_closed_event_db_contains_data_written_while_opened() {
     smol::block_on(async {

@@ -28,6 +28,7 @@ mod eventsqlapi;
 mod appnode;
 mod eventctlnode;
 mod eventdb;
+mod filenode;
 mod qxchange;
 mod qxeventconfig;
 
@@ -238,12 +239,12 @@ fn generate_api_token() -> String {
 //     })
 // }
 
-// fn split_first_fragment(path: &str, sep: char) -> (&str, &str) {
-//     if let Some(ix) = path.find(sep) {
-//         let dir = &path[0 .. ix];
-//         let rest = &path[ix + 1..];
-//         (dir, rest)
-//     } else {
-//         (path, "")
-//     }
-// }
+fn split_first_fragment(path: &str, sep: char) -> (&str, &str) {
+    if let Some(ix) = path.find(sep) {
+        let dir = &path[0 .. ix];
+        let rest = &path[ix + 1..];
+        (dir, rest)
+    } else {
+        (path, "")
+    }
+}

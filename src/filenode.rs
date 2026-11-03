@@ -1,0 +1,310 @@
+//! Operations of the SHV file node, see https://silicon-heaven.github.io/shv-doc/rpcmethods/file.html
+//!
+//! A regular resizable file is provided. A file which does not exist yet is presented as an
+//! empty one, it is created by the first write.
+
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+
+use anyhow::{anyhow, bail};
+use shvproto::RpcValue;
+use shvproto::rpcvalue::IMap;
+
+pub const METH_STAT: &str = "stat";
+pub const METH_SIZE: &str = "size";
+pub const METH_CRC: &str = "crc";
+pub const METH_READ: &str = "read";
+pub const METH_WRITE: &str = "write";
+pub const METH_TRUNCATE: &str = "truncate";
+pub const METH_APPEND: &str = "append";
+
+pub const STAT_RESULT: &str = "!stat";
+pub const SIZE_RESULT: &str = "i(0,)";
+pub const CRC_PARAM: &str = "[i(0,):offset,i(0,)|n:size]|n";
+pub const CRC_RESULT: &str = "u(>32)";
+pub const READ_PARAM: &str = "[i(0,):offset,i(0,):size]";
+pub const READ_RESULT: &str = "b";
+pub const WRITE_PARAM: &str = "[i(0,):offset,b:data]";
+pub const TRUNCATE_PARAM: &str = "i(0,)";
+pub const APPEND_PARAM: &str = "b";
+
+const STAT_TYPE: i32 = 0;
+const STAT_SIZE: i32 = 1;
+const STAT_PAGE_SIZE: i32 = 2;
+const STAT_MOD_TIME: i32 = 4;
+const STAT_MAX_WRITE: i32 = 5;
+const STAT_MAX_READ: i32 = 6;
+
+const FILE_TYPE_REGULAR: i64 = 0;
+const PAGE_SIZE: u64 = 64 * 1024;
+const MAX_READ: u64 = 1024 * 1024;
+const MAX_WRITE: usize = 1024 * 1024;
+
+#[derive(Debug)]
+pub enum FileOp {
+    Stat,
+    Size,
+    Crc { offset: u64, size: Option<u64> },
+    Read { offset: u64, size: u64 },
+    Write { offset: u64, data: Vec<u8> },
+    Truncate { size: u64 },
+    Append { data: Vec<u8> },
+}
+
+fn to_unsigned(name: &str, value: i64) -> anyhow::Result<u64> {
+    u64::try_from(value).map_err(|_| anyhow!("{name} must not be negative, got: {value}"))
+}
+
+fn optional_unsigned(name: &str, value: &RpcValue) -> anyhow::Result<Option<u64>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = i64::try_from(value).map_err(|e| anyhow!("Invalid {name}: {e}"))?;
+    to_unsigned(name, value).map(Some)
+}
+
+fn pair_param<'a>(method: &str, param: &'a RpcValue) -> anyhow::Result<(&'a RpcValue, &'a RpcValue)> {
+    match param.as_list().as_slice() {
+        [first, second] => Ok((first, second)),
+        _ => bail!("Invalid {method} param, list of 2 items expected, got: {}", param.to_cpon()),
+    }
+}
+
+impl FileOp {
+    /// Returns `None` if `method` is not a file node method.
+    pub fn from_request(method: &str, param: &RpcValue) -> Option<anyhow::Result<Self>> {
+        Some(match method {
+            METH_STAT => Ok(Self::Stat),
+            METH_SIZE => Ok(Self::Size),
+            METH_CRC => Self::parse_crc(param),
+            METH_READ => Self::parse_read(param),
+            METH_WRITE => Self::parse_write(param),
+            METH_TRUNCATE => Self::parse_truncate(param),
+            METH_APPEND => Self::parse_append(param),
+            _ => return None,
+        })
+    }
+
+    fn parse_crc(param: &RpcValue) -> anyhow::Result<Self> {
+        if param.is_null() {
+            return Ok(Self::Crc { offset: 0, size: None });
+        }
+        let (offset, size) = pair_param(METH_CRC, param)?;
+        let offset = optional_unsigned("offset", offset)?;
+        let size = optional_unsigned("size", size)?;
+        Ok(Self::Crc { offset: offset.unwrap_or_default(), size })
+    }
+
+    fn parse_read(param: &RpcValue) -> anyhow::Result<Self> {
+        let (offset, size) = pair_param(METH_READ, param)?;
+        let offset = i64::try_from(offset).map_err(|e| anyhow!("Invalid read offset: {e}"))?;
+        let size = i64::try_from(size).map_err(|e| anyhow!("Invalid read size: {e}"))?;
+        Ok(Self::Read { offset: to_unsigned("offset", offset)?, size: to_unsigned("size", size)? })
+    }
+
+    fn parse_write(param: &RpcValue) -> anyhow::Result<Self> {
+        let (offset, data) = pair_param(METH_WRITE, param)?;
+        let offset = i64::try_from(offset).map_err(|e| anyhow!("Invalid write offset: {e}"))?;
+        let data = <&[u8]>::try_from(data).map_err(|e| anyhow!("Invalid write data: {e}"))?;
+        Ok(Self::Write { offset: to_unsigned("offset", offset)?, data: data.to_vec() })
+    }
+
+    fn parse_truncate(param: &RpcValue) -> anyhow::Result<Self> {
+        let size = i64::try_from(param).map_err(|e| anyhow!("Invalid truncate param: {e}"))?;
+        Ok(Self::Truncate { size: to_unsigned("size", size)? })
+    }
+
+    fn parse_append(param: &RpcValue) -> anyhow::Result<Self> {
+        let data = <&[u8]>::try_from(param).map_err(|e| anyhow!("Invalid append param: {e}"))?;
+        Ok(Self::Append { data: data.to_vec() })
+    }
+
+    pub fn modifies_file(&self) -> bool {
+        matches!(self, Self::Write { .. } | Self::Truncate { .. } | Self::Append { .. })
+    }
+
+    /// Blocking, run it outside of the async executor.
+    pub fn execute(self, path: &Path) -> anyhow::Result<RpcValue> {
+        match self {
+            Self::Stat => stat(path),
+            Self::Size => Ok(RpcValue::from(file_size(path)? as i64)),
+            Self::Crc { offset, size } => Ok(RpcValue::from(crc(path, offset, size)?)),
+            Self::Read { offset, size } => Ok(RpcValue::from(read(path, offset, size)?)),
+            Self::Write { offset, data } => {
+                check_write_size(&data)?;
+                let mut file = open_for_write(path, OpenOptions::new().write(true).create(true).truncate(false))?;
+                file.seek(SeekFrom::Start(offset))?;
+                file.write_all(&data)?;
+                Ok(RpcValue::null())
+            }
+            Self::Truncate { size } => {
+                let file = open_for_write(path, OpenOptions::new().write(true).create(true).truncate(false))?;
+                file.set_len(size)?;
+                Ok(RpcValue::null())
+            }
+            Self::Append { data } => {
+                check_write_size(&data)?;
+                let mut file = open_for_write(path, OpenOptions::new().append(true).create(true))?;
+                file.write_all(&data)?;
+                Ok(RpcValue::null())
+            }
+        }
+    }
+}
+
+fn check_write_size(data: &[u8]) -> anyhow::Result<()> {
+    if data.len() > MAX_WRITE {
+        bail!("Cannot write {} bytes at once, the limit is {MAX_WRITE}", data.len());
+    }
+    Ok(())
+}
+
+fn open_for_write(path: &Path, options: &OpenOptions) -> anyhow::Result<File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(options.open(path)?)
+}
+
+fn open_for_read(path: &Path) -> anyhow::Result<Option<File>> {
+    match File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn file_size(path: &Path) -> anyhow::Result<u64> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn stat(path: &Path) -> anyhow::Result<RpcValue> {
+    let mut result = IMap::new();
+    result.insert(STAT_TYPE, FILE_TYPE_REGULAR.into());
+    result.insert(STAT_SIZE, (file_size(path)? as i64).into());
+    result.insert(STAT_PAGE_SIZE, (PAGE_SIZE as i64).into());
+    result.insert(STAT_MAX_WRITE, (MAX_WRITE as i64).into());
+    result.insert(STAT_MAX_READ, (MAX_READ as i64).into());
+    if let Ok(mod_time) = std::fs::metadata(path).and_then(|metadata| metadata.modified()) {
+        let mod_time = chrono::DateTime::<chrono::Utc>::from(mod_time);
+        result.insert(STAT_MOD_TIME, RpcValue::try_from(mod_time).map_err(|e| anyhow!("Invalid file time: {e}"))?);
+    }
+    Ok(result.into())
+}
+
+/// CRC-32 of the part of the range which is in the file, the range can exceed the file.
+fn crc(path: &Path, offset: u64, size: Option<u64>) -> anyhow::Result<u32> {
+    let mut crc = flate2::Crc::new();
+    if let Some(mut file) = open_for_read(path)? {
+        file.seek(SeekFrom::Start(offset))?;
+        let mut reader = file.take(size.unwrap_or(u64::MAX));
+        let mut buffer = vec![0; PAGE_SIZE as usize];
+        loop {
+            let len = reader.read(&mut buffer)?;
+            if len == 0 {
+                break;
+            }
+            crc.update(&buffer[..len]);
+        }
+    }
+    Ok(crc.sum())
+}
+
+/// Reads at most `MAX_READ` bytes, data out of the file are not returned.
+fn read(path: &Path, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    if let Some(mut file) = open_for_read(path)? {
+        file.seek(SeekFrom::Start(offset))?;
+        file.take(size.min(MAX_READ)).read_to_end(&mut data)?;
+    }
+    Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(method: &str, param: &str) -> anyhow::Result<FileOp> {
+        let param = if param.is_empty() { RpcValue::null() } else { RpcValue::from_cpon(param).unwrap() };
+        FileOp::from_request(method, &param).expect("file node method")
+    }
+
+    #[test]
+    fn unknown_method_is_not_resolved() {
+        assert!(FileOp::from_request("foo", &RpcValue::null()).is_none());
+    }
+
+    #[test]
+    fn crc_param_forms() {
+        assert!(matches!(op(METH_CRC, "").unwrap(), FileOp::Crc { offset: 0, size: None }));
+        assert!(matches!(op(METH_CRC, "[1,2]").unwrap(), FileOp::Crc { offset: 1, size: Some(2) }));
+        assert!(matches!(op(METH_CRC, "[1,null]").unwrap(), FileOp::Crc { offset: 1, size: None }));
+        assert!(matches!(op(METH_CRC, "[null,2]").unwrap(), FileOp::Crc { offset: 0, size: Some(2) }));
+        assert!(op(METH_CRC, "[-1,2]").is_err());
+        assert!(op(METH_CRC, "\"foo\"").is_err());
+    }
+
+    #[test]
+    fn invalid_params_are_rejected() {
+        for (method, param) in [
+            (METH_READ, ""),
+            (METH_READ, "[0]"),
+            (METH_READ, "[-1,1]"),
+            (METH_READ, "[0,-1]"),
+            (METH_READ, "[\"a\",1]"),
+            (METH_WRITE, "[0,1]"),
+            (METH_WRITE, "[-1,b\"a\"]"),
+            (METH_TRUNCATE, ""),
+            (METH_TRUNCATE, "-1"),
+            (METH_APPEND, ""),
+            (METH_APPEND, "1"),
+        ] {
+            assert!(op(method, param).is_err(), "{method} {param}");
+        }
+    }
+
+    #[test]
+    fn missing_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        assert_eq!(file_size(&path).unwrap(), 0);
+        assert_eq!(read(&path, 0, 10).unwrap(), b"");
+        assert_eq!(crc(&path, 0, None).unwrap(), 0);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn read_and_crc_out_of_file_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"123456789").unwrap();
+        assert_eq!(read(&path, 7, 10).unwrap(), b"89");
+        assert_eq!(read(&path, 100, 10).unwrap(), b"");
+        assert_eq!(crc(&path, 0, None).unwrap(), 0xCBF43926);
+        assert_eq!(crc(&path, 0, Some(100)).unwrap(), 0xCBF43926);
+        assert_eq!(crc(&path, 100, None).unwrap(), 0);
+    }
+
+    #[test]
+    fn write_is_limited() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        let data = vec![0; MAX_WRITE + 1];
+        assert!(FileOp::Write { offset: 0, data: data.clone() }.execute(&path).is_err());
+        assert!(FileOp::Append { data }.execute(&path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn read_is_limited() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::File::create(&path).unwrap().set_len(MAX_READ + 1).unwrap();
+        assert_eq!(read(&path, 0, MAX_READ + 1).unwrap().len() as u64, MAX_READ);
+    }
+}
