@@ -186,10 +186,33 @@ impl State {
         install_result
     }
 
-    /// Install the database uploaded using the pushDb file node. The uploaded file is kept if
-    /// it cannot be installed, so the upload does not have to be repeated.
+    /// Install the zlib compressed database uploaded using the pushDb file node. The uploaded
+    /// file is kept if it cannot be installed, so the upload does not have to be repeated.
     pub async fn commit_pushed_event_db(app_state: SharedAppState, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
-        Self::install_event_db(app_state, event_id, &pushed_event_db_file(event_id), client_command_sender).await
+        let pushed_file = pushed_event_db_file(event_id);
+        let tmp_file = format!("{pushed_file}.inflate-tmp-{:016x}", rand::random::<u64>());
+
+        // Decode before closing the event so an invalid upload does not interrupt a
+        // currently running event.
+        let inflate_result = {
+            let pushed_file = pushed_file.clone();
+            let tmp_file = tmp_file.clone();
+            smol::unblock(move || inflate_file(&pushed_file, &tmp_file)).await
+                .map_err(|err| anyhow!("Failed to decompress event {event_id} database: {err}"))
+        };
+        let install_result = match inflate_result {
+            Ok(()) => Self::install_event_db(app_state, event_id, &tmp_file, client_command_sender).await,
+            Err(err) => Err(err),
+        };
+        if install_result.is_err() {
+            let _ = std::fs::remove_file(&tmp_file);
+        }
+        install_result?;
+
+        if let Err(err) = std::fs::remove_file(&pushed_file) {
+            warn!("Failed to remove pushed event DB file {pushed_file}: {err}");
+        }
+        Ok(())
     }
 
     /// Replace the event database with `new_db_file`, the file is moved.
@@ -682,6 +705,13 @@ impl OpenEventCtl {
     pub fn expires_at(&self) -> DateTime<chrono::Utc> {
         self.open_at + global_config().event_expire_duration
     }
+}
+
+fn inflate_file(zlib_file: &str, out_file: &str) -> std::io::Result<()> {
+    let mut decoder = ZlibDecoder::new(std::io::BufReader::new(std::fs::File::open(zlib_file)?));
+    let mut out = std::fs::File::create(out_file)?;
+    std::io::copy(&mut decoder, &mut out)?;
+    Ok(())
 }
 
 fn event_db_file(event_id: EventId) -> String {

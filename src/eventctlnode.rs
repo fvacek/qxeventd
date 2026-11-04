@@ -404,7 +404,7 @@ pub(crate) async fn request_handler(
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_NODE_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_NODE_METHODS, async move || {
-                    Ok(vec!["sqlApi".into(), "pushDb".into(), "pullDb".into()])
+                    Ok(vec!["sql".into(), "pushDb".into(), "pullDb".into()])
                 }),
                 Method::Other(m) => {
                     let method = m.method();

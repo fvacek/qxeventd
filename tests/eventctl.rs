@@ -319,9 +319,39 @@ fn push_db_upload_in_chunks_and_commit() {
         // upload does not affect the database until commit
         assert_eq!(pull_event_db(&mut client, event_id).await, b"old");
 
+        push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
+        for data in compress(b"123456789").chunks(4) {
+            push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
+        }
         push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.unwrap();
         assert_eq!(pull_event_db(&mut client, event_id).await, b"123456789");
         assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 0);
+    });
+}
+
+#[test]
+fn push_db_commit_rejects_invalid_compressed_data() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+        let snapshot = pull_event_db(&mut client, event_id).await;
+
+        let compressed = compress(&snapshot);
+        let truncated = &compressed[..compressed.len() / 2];
+        for data in [&b"not compressed"[..], truncated] {
+            push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
+            push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
+            push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.expect_err("invalid data");
+
+            // upload is kept, running event is not interrupted
+            assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), data.len() as i64);
+            let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+            assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
+            let (event_name, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, |conn| read_config(conn, "event.name"));
+            let (expected_name, _) = with_event_db_image(&snapshot, |conn| read_config(conn, "event.name"));
+            assert_eq!(event_name, expected_name);
+        }
     });
 }
 
@@ -375,7 +405,7 @@ fn push_db_commit_replaces_opened_event_db() {
             conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
         });
 
-        for (ix, data) in modified.chunks(4096).enumerate() {
+        for (ix, data) in compress(&modified).chunks(4096).enumerate() {
             push_db_call(&mut client, event_id, "write", chunk(ix as i64 * 4096, data)).await.unwrap();
         }
         push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.unwrap();
