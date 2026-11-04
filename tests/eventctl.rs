@@ -8,6 +8,7 @@ use async_sqlite::rusqlite::Connection;
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+use sha1::{Digest, Sha1};
 use shvproto::RpcValue;
 use shvrpc::RpcMessage;
 use shvrpc::metamethod::AccessLevel;
@@ -271,6 +272,11 @@ fn cpon(cpon: &str) -> RpcValue {
     RpcValue::from_cpon(cpon).unwrap()
 }
 
+/// Param of the pushDb commit method for an upload of `data`
+fn sha1_of(data: &[u8]) -> RpcValue {
+    RpcValue::from(&Sha1::digest(data).to_vec()[..])
+}
+
 #[test]
 fn push_db_node_ls_and_dir() {
     smol::block_on(async {
@@ -323,7 +329,7 @@ fn push_db_upload_in_chunks_and_commit() {
         for data in compress(b"123456789").chunks(4) {
             push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
         }
-        push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.unwrap();
+        push_db_call(&mut client, event_id, "commit", sha1_of(b"123456789")).await.unwrap();
         assert_eq!(pull_event_db(&mut client, event_id).await, b"123456789");
         assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 0);
     });
@@ -342,7 +348,7 @@ fn push_db_commit_rejects_invalid_compressed_data() {
         for data in [&b"not compressed"[..], truncated] {
             push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
             push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
-            push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.expect_err("invalid data");
+            push_db_call(&mut client, event_id, "commit", sha1_of(&snapshot)).await.expect_err("invalid data");
 
             // upload is kept, running event is not interrupted
             assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), data.len() as i64);
@@ -352,6 +358,53 @@ fn push_db_commit_rejects_invalid_compressed_data() {
             let (expected_name, _) = with_event_db_image(&snapshot, |conn| read_config(conn, "event.name"));
             assert_eq!(event_name, expected_name);
         }
+    });
+}
+
+#[test]
+fn push_db_commit_rejects_sha1_mismatch() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+        let snapshot = pull_event_db(&mut client, event_id).await;
+        let ((), modified) = with_event_db_image(&snapshot, |conn| {
+            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
+        });
+        let compressed = compress(&modified);
+        push_db_call(&mut client, event_id, "append", RpcValue::from(&compressed[..])).await.unwrap();
+
+        // SHA-1 of the compressed data is not accepted, it has to be the one of the original data
+        for sha1 in [sha1_of(&snapshot), sha1_of(&compressed)] {
+            let err = push_db_call(&mut client, event_id, "commit", sha1).await.expect_err("SHA-1 mismatch");
+            assert!(err.to_string().contains("SHA-1"), "{err}");
+
+            // upload is kept, running event is not interrupted
+            assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), compressed.len() as i64);
+            let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+            assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
+            assert_eq!(pull_event_db(&mut client, event_id).await, snapshot);
+        }
+
+        // upload can be committed with the correct SHA-1 then
+        push_db_call(&mut client, event_id, "commit", sha1_of(&modified)).await.unwrap();
+        let (event_name, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, |conn| read_config(conn, "event.name"));
+        assert_eq!(event_name, "pushed");
+    });
+}
+
+#[test]
+fn push_db_commit_requires_sha1_param() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        push_event_db(&mut client, event_id, b"old").await;
+        push_db_call(&mut client, event_id, "append", RpcValue::from(&compress(b"new")[..])).await.unwrap();
+
+        for param in [RpcValue::null(), cpon("1"), RpcValue::from(&b"short"[..])] {
+            push_db_call(&mut client, event_id, "commit", param).await.expect_err("invalid SHA-1 param");
+        }
+        assert_eq!(pull_event_db(&mut client, event_id).await, b"old");
     });
 }
 
@@ -386,7 +439,7 @@ fn push_db_commit_without_upload_keeps_event_opened() {
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
         client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
 
-        push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.expect_err("nothing uploaded");
+        push_db_call(&mut client, event_id, "commit", sha1_of(b"")).await.expect_err("nothing uploaded");
 
         let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
         assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
@@ -408,7 +461,7 @@ fn push_db_commit_replaces_opened_event_db() {
         for (ix, data) in compress(&modified).chunks(4096).enumerate() {
             push_db_call(&mut client, event_id, "write", chunk(ix as i64 * 4096, data)).await.unwrap();
         }
-        push_db_call(&mut client, event_id, "commit", RpcValue::null()).await.unwrap();
+        push_db_call(&mut client, event_id, "commit", sha1_of(&modified)).await.unwrap();
 
         let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
         assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
@@ -435,7 +488,7 @@ fn push_db_access_rights() {
             ("write", chunk(0, b"eve")),
             ("truncate", cpon("0")),
             ("append", data()),
-            ("commit", RpcValue::null()),
+            ("commit", sha1_of(b"eve")),
         ] {
             assert_permission_denied(client.call(push_db_request(event_id, method, param, "eve", AccessLevel::Read)).await);
         }

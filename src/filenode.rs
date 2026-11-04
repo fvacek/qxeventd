@@ -289,7 +289,7 @@ fn crc(path: &Path, offset: u64, size: Option<u64>) -> anyhow::Result<u32> {
 }
 
 /// SHA-1 of the part of the range which is in the file.
-fn sha1(path: &Path, offset: u64, size: Option<u64>) -> anyhow::Result<Vec<u8>> {
+pub fn sha1(path: &Path, offset: u64, size: Option<u64>) -> anyhow::Result<Vec<u8>> {
     let mut hasher = Sha1::new();
     for_each_chunk(path, offset, size, |chunk| hasher.update(chunk))?;
     Ok(hasher.finalize().to_vec())

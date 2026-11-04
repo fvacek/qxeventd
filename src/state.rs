@@ -188,17 +188,24 @@ impl State {
 
     /// Install the zlib compressed database uploaded using the pushDb file node. The uploaded
     /// file is kept if it cannot be installed, so the upload does not have to be repeated.
-    pub async fn commit_pushed_event_db(app_state: SharedAppState, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
+    /// `expected_sha1` is the SHA-1 of the uncompressed database.
+    pub async fn commit_pushed_event_db(app_state: SharedAppState, event_id: EventId, expected_sha1: Vec<u8>, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
         let pushed_file = pushed_event_db_file(event_id);
         let tmp_file = format!("{pushed_file}.inflate-tmp-{:016x}", rand::random::<u64>());
 
-        // Decode before closing the event so an invalid upload does not interrupt a
-        // currently running event.
+        // Decode and verify before closing the event so an invalid upload does not interrupt
+        // a currently running event.
         let inflate_result = {
             let pushed_file = pushed_file.clone();
             let tmp_file = tmp_file.clone();
-            smol::unblock(move || inflate_file(&pushed_file, &tmp_file)).await
-                .map_err(|err| anyhow!("Failed to decompress event {event_id} database: {err}"))
+            smol::unblock(move || {
+                inflate_file(&pushed_file, &tmp_file)
+                    .map_err(|err| anyhow!("Failed to decompress event {event_id} database: {err}"))?;
+                if crate::filenode::sha1(std::path::Path::new(&tmp_file), 0, None)? != expected_sha1 {
+                    bail!("Event {event_id} database does not match the expected SHA-1");
+                }
+                Ok(())
+            }).await
         };
         let install_result = match inflate_result {
             Ok(()) => Self::install_event_db(app_state, event_id, &tmp_file, client_command_sender).await,

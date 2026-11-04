@@ -566,7 +566,8 @@ pub(crate) async fn request_handler(
             const PUSH_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
                 META_METHOD_DIR, META_METHOD_LS, META_FILE_STAT, META_FILE_SIZE, META_FILE_CRC, META_FILE_SHA1, META_FILE_READ, META_FILE_WRITE, META_FILE_TRUNCATE, META_FILE_APPEND,
                 MetaMethod::new_static(
-                    METH_PUSH_DB_COMMIT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
+                    // param is SHA-1 of the uncompressed database
+                    METH_PUSH_DB_COMMIT, Flags::UserIDRequired, AccessLevel::Service, "b(20)", "n", &[], "",
                 ),
             ];
 
@@ -578,8 +579,12 @@ pub(crate) async fn request_handler(
                     let method = m.method();
                     let rights = escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), methods);
                     if method == METH_PUSH_DB_COMMIT {
+                        let expected_sha1 = match parse_sha1_param(rq.param().unwrap_or_default()) {
+                            Ok(expected_sha1) => expected_sha1,
+                            Err(err) => return resolve_error(&m, methods, err),
+                        };
                         return m.resolve(rights.await, async move || {
-                            State::commit_pushed_event_db(app_state, event_id, client_cmd_tx).await
+                            State::commit_pushed_event_db(app_state, event_id, expected_sha1, client_cmd_tx).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::null())
                         });
@@ -630,6 +635,14 @@ pub(crate) async fn request_handler(
             }
         }
     }
+}
+
+fn parse_sha1_param(param: &RpcValue) -> anyhow::Result<Vec<u8>> {
+    let sha1 = <&[u8]>::try_from(param).map_err(|e| anyhow::anyhow!("Invalid SHA-1 param: {e}"))?;
+    if sha1.len() != 20 {
+        anyhow::bail!("Invalid SHA-1 param, 20 bytes expected, got: {}", sha1.len());
+    }
+    Ok(sha1.to_vec())
 }
 
 async fn list_events(app_state: SharedAppState) -> Vec<String> {
