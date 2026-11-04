@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail};
 use shvclient::clientnode::{MethodResolver, RequestHandlerResult, err_unresolved_request};
-use shvproto::RpcValue;
+use shvproto::{DateTime, RpcValue};
 use shvproto::rpcvalue::IMap;
 use shvrpc::metamethod::{AccessLevel, Flags, MetaMethod};
 use shvrpc::RpcMessage;
@@ -74,9 +74,73 @@ const STAT_MAX_WRITE: i32 = 5;
 const STAT_MAX_READ: i32 = 6;
 
 const FILE_TYPE_REGULAR: i64 = 0;
-const PAGE_SIZE: u64 = 0;
+const PAGE_SIZE: u64 = 1024 * 64;
 const MAX_READ: u64 = 1024 * 4;
 const MAX_WRITE: usize = 1024 * 4;
+
+/// Result of the file node stat method
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStat {
+    pub file_type: i64,
+    pub size: u64,
+    pub page_size: u64,
+    /// `None` if the file does not exist yet
+    pub mod_time: Option<DateTime>,
+    pub max_write: u64,
+    pub max_read: u64,
+}
+
+impl Default for FileStat {
+    /// Stat of an empty regular file with the limits of this file node
+    fn default() -> Self {
+        Self {
+            file_type: FILE_TYPE_REGULAR,
+            size: 0,
+            page_size: PAGE_SIZE,
+            mod_time: None,
+            max_write: MAX_WRITE as u64,
+            max_read: MAX_READ,
+        }
+    }
+}
+
+impl From<FileStat> for RpcValue {
+    fn from(stat: FileStat) -> Self {
+        let mut result = IMap::new();
+        result.insert(STAT_TYPE, stat.file_type.into());
+        result.insert(STAT_SIZE, (stat.size as i64).into());
+        result.insert(STAT_PAGE_SIZE, (stat.page_size as i64).into());
+        result.insert(STAT_MAX_WRITE, (stat.max_write as i64).into());
+        result.insert(STAT_MAX_READ, (stat.max_read as i64).into());
+        if let Some(mod_time) = stat.mod_time {
+            result.insert(STAT_MOD_TIME, mod_time.into());
+        }
+        result.into()
+    }
+}
+
+impl TryFrom<&RpcValue> for FileStat {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &RpcValue) -> anyhow::Result<Self> {
+        let map = value.as_imap();
+        let field = |key: i32, name: &str| {
+            let value = map.get(&key).ok_or_else(|| anyhow!("Missing stat {name}"))?;
+            i64::try_from(value).map_err(|e| anyhow!("Invalid stat {name}: {e}"))
+        };
+        let unsigned_field = |key, name| to_unsigned(name, field(key, name)?);
+        Ok(Self {
+            file_type: field(STAT_TYPE, "type")?,
+            size: unsigned_field(STAT_SIZE, "size")?,
+            page_size: unsigned_field(STAT_PAGE_SIZE, "pageSize")?,
+            mod_time: map.get(&STAT_MOD_TIME)
+                .map(|value| DateTime::try_from(value).map_err(|e| anyhow!("Invalid stat modTime: {e}")))
+                .transpose()?,
+            max_write: unsigned_field(STAT_MAX_WRITE, "maxWrite")?,
+            max_read: unsigned_field(STAT_MAX_READ, "maxRead")?,
+        })
+    }
+}
 
 #[derive(Debug)]
 pub enum FileOp {
@@ -193,7 +257,7 @@ impl FileOp {
     /// Blocking, run it outside of the async executor.
     pub fn execute(self, path: &Path) -> anyhow::Result<RpcValue> {
         match self {
-            Self::Stat => stat(path),
+            Self::Stat => stat(path).map(RpcValue::from),
             Self::Size => Ok(RpcValue::from(file_size(path)? as i64)),
             Self::Crc { offset, size } => Ok(RpcValue::from(crc(path, offset, size)?)),
             Self::Sha1 { offset, size } => Ok(RpcValue::from(sha1(path, offset, size)?)),
@@ -250,18 +314,10 @@ fn file_size(path: &Path) -> anyhow::Result<u64> {
     }
 }
 
-fn stat(path: &Path) -> anyhow::Result<RpcValue> {
-    let mut result = IMap::new();
-    result.insert(STAT_TYPE, FILE_TYPE_REGULAR.into());
-    result.insert(STAT_SIZE, (file_size(path)? as i64).into());
-    result.insert(STAT_PAGE_SIZE, (PAGE_SIZE as i64).into());
-    result.insert(STAT_MAX_WRITE, (MAX_WRITE as i64).into());
-    result.insert(STAT_MAX_READ, (MAX_READ as i64).into());
-    if let Ok(mod_time) = std::fs::metadata(path).and_then(|metadata| metadata.modified()) {
-        let mod_time = chrono::DateTime::<chrono::Utc>::from(mod_time);
-        result.insert(STAT_MOD_TIME, RpcValue::try_from(mod_time).map_err(|e| anyhow!("Invalid file time: {e}"))?);
-    }
-    Ok(result.into())
+fn stat(path: &Path) -> anyhow::Result<FileStat> {
+    let mod_time = std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()
+        .map(|mod_time| DateTime::from_datetime(&chrono::DateTime::<chrono::Utc>::from(mod_time)));
+    Ok(FileStat { size: file_size(path)?, mod_time, ..FileStat::default() })
 }
 
 /// Feeds `update` with the part of the range which is in the file, the range can exceed the file.
@@ -312,6 +368,25 @@ mod tests {
     fn op(method: &str, param: &str) -> anyhow::Result<FileOp> {
         let param = if param.is_empty() { RpcValue::null() } else { RpcValue::from_cpon(param).unwrap() };
         FileOp::from_request(method, &param).expect("file node method")
+    }
+
+    #[test]
+    fn stat_conversion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+
+        let stat_missing = stat(&path).unwrap();
+        assert_eq!(stat_missing, FileStat::default());
+        assert_eq!(FileStat::try_from(&RpcValue::from(stat_missing.clone())).unwrap(), stat_missing);
+
+        std::fs::write(&path, b"123456789").unwrap();
+        let stat_existing = stat(&path).unwrap();
+        assert_eq!(stat_existing.size, 9);
+        assert!(stat_existing.mod_time.is_some());
+        assert_eq!(FileStat::try_from(&RpcValue::from(stat_existing.clone())).unwrap(), stat_existing);
+
+        assert!(FileStat::try_from(&RpcValue::null()).is_err());
+        assert!(FileStat::try_from(&RpcValue::from_cpon("i{0:0,1:-1,2:1,5:1,6:1}").unwrap()).is_err());
     }
 
     #[test]

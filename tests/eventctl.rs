@@ -14,7 +14,7 @@ use shvrpc::RpcMessage;
 use shvrpc::metamethod::AccessLevel;
 
 use common::{TestClient, assert_permission_denied, create_event, create_event_with_own_db, data_dir, request};
-use qxeventd::{PushEventDbParam, QX_API_TOKEN};
+use qxeventd::{FileStat, PushEventDbParam, QX_API_TOKEN};
 
 const SHA1_123456789: [u8; 20] = [
     0xf7, 0xc3, 0xbc, 0x1d, 0x80, 0x8e, 0x04, 0x73, 0x2a, 0xdf,
@@ -264,6 +264,15 @@ async fn push_db_call(client: &mut TestClient, event_id: i64, method: &str, para
     client.call(push_db_request(event_id, method, param, "fanda", AccessLevel::Read)).await
 }
 
+async fn push_db_stat(client: &mut TestClient, event_id: i64) -> FileStat {
+    FileStat::try_from(&push_db_call(client, event_id, "stat", RpcValue::null()).await.unwrap()).unwrap()
+}
+
+/// Maximal size of the data accepted by a single pushDb write or append, as reported by stat
+async fn push_db_max_write(client: &mut TestClient, event_id: i64) -> usize {
+    push_db_stat(client, event_id).await.max_write as usize
+}
+
 fn chunk(offset: i64, data: &[u8]) -> RpcValue {
     vec![RpcValue::from(offset), RpcValue::from(data)].into()
 }
@@ -312,11 +321,10 @@ fn push_db_upload_in_chunks_and_commit() {
         push_db_call(&mut client, event_id, "write", chunk(1, b"2")).await.unwrap();
 
         assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 9);
-        let stat = push_db_call(&mut client, event_id, "stat", RpcValue::null()).await.unwrap();
-        let stat = stat.as_imap();
-        assert_eq!(stat[&0].as_int(), 0);
-        assert_eq!(stat[&1].as_int(), 9);
-        assert_eq!(stat[&4].type_name(), "DateTime");
+        let stat = push_db_stat(&mut client, event_id).await;
+        assert_eq!(stat.file_type, 0);
+        assert_eq!(stat.size, 9);
+        assert!(stat.mod_time.is_some());
         assert_eq!(push_db_call(&mut client, event_id, "crc", RpcValue::null()).await.unwrap().to_cpon(), "3421780262u");
         assert_eq!(push_db_call(&mut client, event_id, "sha1", RpcValue::null()).await.unwrap().as_blob(), SHA1_123456789);
         assert_eq!(push_db_call(&mut client, event_id, "read", cpon("[7,100]")).await.unwrap().as_blob(), b"89");
@@ -372,7 +380,9 @@ fn push_db_commit_rejects_sha1_mismatch() {
             conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
         });
         let compressed = compress(&modified);
-        push_db_call(&mut client, event_id, "append", RpcValue::from(&compressed[..])).await.unwrap();
+        for data in compressed.chunks(push_db_max_write(&mut client, event_id).await) {
+            push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
+        }
 
         // SHA-1 of the compressed data is not accepted, it has to be the one of the original data
         for sha1 in [sha1_of(&snapshot), sha1_of(&compressed)] {
@@ -458,8 +468,9 @@ fn push_db_commit_replaces_opened_event_db() {
             conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
         });
 
-        for (ix, data) in compress(&modified).chunks(4096).enumerate() {
-            push_db_call(&mut client, event_id, "write", chunk(ix as i64 * 4096, data)).await.unwrap();
+        let max_write = push_db_max_write(&mut client, event_id).await;
+        for (ix, data) in compress(&modified).chunks(max_write).enumerate() {
+            push_db_call(&mut client, event_id, "write", chunk((ix * max_write) as i64, data)).await.unwrap();
         }
         push_db_call(&mut client, event_id, "commit", sha1_of(&modified)).await.unwrap();
 
@@ -596,7 +607,7 @@ fn pull_db_snapshot_is_stable_until_refreshed() {
 
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
         assert_eq!(pull_db_call(&mut client, event_id, "size", "").await.unwrap().as_int(), 9);
-        assert_eq!(pull_db_call(&mut client, event_id, "stat", "").await.unwrap().as_imap()[&1].as_int(), 9);
+        assert_eq!(FileStat::try_from(&pull_db_call(&mut client, event_id, "stat", "").await.unwrap()).unwrap().size, 9);
         assert_eq!(pull_db_call(&mut client, event_id, "crc", "").await.unwrap().to_cpon(), "3421780262u");
         assert_eq!(pull_db_call(&mut client, event_id, "sha1", "").await.unwrap().as_blob(), SHA1_123456789);
 
