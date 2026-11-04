@@ -2,7 +2,7 @@
 use log::warn;
 use serde::{Serialize};
 use serde::Deserialize;
-use crate::filenode::{META_FILE_APPEND, META_FILE_CRC, META_FILE_READ, META_FILE_SIZE, META_FILE_STAT, META_FILE_TRUNCATE, META_FILE_WRITE};
+use crate::filenode::{META_FILE_APPEND, META_FILE_CRC, META_FILE_READ, META_FILE_SHA1, META_FILE_SIZE, META_FILE_STAT, META_FILE_TRUNCATE, META_FILE_WRITE};
 use crate::rpcvalueext::RpcValueExt;
 use crate::rpctype::RpcType;
 use shvclient::ClientCommandSender;
@@ -468,7 +468,7 @@ pub(crate) async fn request_handler(
         EventCtlNode::PushEventDbFileNode(event_id) => {
             const METH_PUSH_DB_COMMIT: &str = "commit";
             const PUSH_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
-                META_METHOD_DIR, META_METHOD_LS, META_FILE_STAT, META_FILE_SIZE, META_FILE_CRC, META_FILE_READ, META_FILE_WRITE, META_FILE_TRUNCATE, META_FILE_APPEND,
+                META_METHOD_DIR, META_METHOD_LS, META_FILE_STAT, META_FILE_SIZE, META_FILE_CRC, META_FILE_SHA1, META_FILE_READ, META_FILE_WRITE, META_FILE_TRUNCATE, META_FILE_APPEND,
                 MetaMethod::new_static(
                     METH_PUSH_DB_COMMIT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
                 ),
@@ -500,7 +500,7 @@ pub(crate) async fn request_handler(
         EventCtlNode::PullEventDbFileNode(event_id) => {
             const METH_PULL_DB_SNAPSHOT: &str = "snapshot";
             const PULL_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
-                META_METHOD_DIR, META_METHOD_LS, META_FILE_STAT, META_FILE_SIZE, META_FILE_CRC, META_FILE_READ,
+                META_METHOD_DIR, META_METHOD_LS, META_FILE_STAT, META_FILE_SIZE, META_FILE_CRC, META_FILE_SHA1, META_FILE_READ,
                 MetaMethod::new_static(
                     METH_PULL_DB_SNAPSHOT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
                 ),

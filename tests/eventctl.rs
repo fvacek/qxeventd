@@ -15,6 +15,11 @@ use shvrpc::metamethod::AccessLevel;
 use common::{TestClient, assert_permission_denied, create_event, create_event_with_own_db, data_dir, request};
 use qxeventd::{PushEventDbParam, QX_API_TOKEN};
 
+const SHA1_123456789: [u8; 20] = [
+    0xf7, 0xc3, 0xbc, 0x1d, 0x80, 0x8e, 0x04, 0x73, 0x2a, 0xdf,
+    0x67, 0x99, 0x65, 0xcc, 0xc3, 0x4c, 0xa7, 0xae, 0x34, 0x41,
+];
+
 fn compress(data: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(data).unwrap();
@@ -279,7 +284,7 @@ fn push_db_node_ls_and_dir() {
         let res = client.call(request(&path, "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
         assert_eq!(res.to_cpon(), "[]");
         let res = client.call(request(&path, "dir", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
-        for method in ["stat", "size", "crc", "read", "write", "truncate", "append", "commit"] {
+        for method in ["stat", "size", "crc", "sha1", "read", "write", "truncate", "append", "commit"] {
             assert!(res.contains(&format!(r#""{method}""#)), "{method}: {res}");
         }
     });
@@ -307,6 +312,7 @@ fn push_db_upload_in_chunks_and_commit() {
         assert_eq!(stat[&1].as_int(), 9);
         assert_eq!(stat[&4].type_name(), "DateTime");
         assert_eq!(push_db_call(&mut client, event_id, "crc", RpcValue::null()).await.unwrap().to_cpon(), "3421780262u");
+        assert_eq!(push_db_call(&mut client, event_id, "sha1", RpcValue::null()).await.unwrap().as_blob(), SHA1_123456789);
         assert_eq!(push_db_call(&mut client, event_id, "read", cpon("[7,100]")).await.unwrap().as_blob(), b"89");
         assert_eq!(push_db_call(&mut client, event_id, "read", cpon("[100,1]")).await.unwrap().as_blob(), b"");
 
@@ -394,6 +400,7 @@ fn push_db_access_rights() {
             ("stat", RpcValue::null()),
             ("size", RpcValue::null()),
             ("crc", RpcValue::null()),
+            ("sha1", RpcValue::null()),
             ("read", cpon("[0,1]")),
             ("write", chunk(0, b"eve")),
             ("truncate", cpon("0")),
@@ -451,7 +458,7 @@ fn pull_db_node_ls_and_dir() {
         let res = pull_db_call(&mut client, event_id, "ls", "").await.unwrap();
         assert_eq!(res.to_cpon(), "[]");
         let res = pull_db_call(&mut client, event_id, "dir", "").await.unwrap().to_cpon();
-        for method in ["stat", "size", "crc", "read", "snapshot"] {
+        for method in ["stat", "size", "crc", "sha1", "read", "snapshot"] {
             assert!(res.contains(&format!(r#""{method}""#)), "{method}: {res}");
         }
         for method in ["write", "truncate", "append"] {
@@ -482,7 +489,7 @@ fn pull_db_requires_snapshot() {
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
         push_event_db(&mut client, event_id, b"database").await;
 
-        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("read", "[0,10]")] {
+        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("sha1", ""), ("read", "[0,10]")] {
             pull_db_call(&mut client, event_id, method, param).await.expect_err(method);
         }
     });
@@ -508,6 +515,7 @@ fn pull_db_snapshot_is_stable_until_refreshed() {
         assert_eq!(pull_db_call(&mut client, event_id, "size", "").await.unwrap().as_int(), 9);
         assert_eq!(pull_db_call(&mut client, event_id, "stat", "").await.unwrap().as_imap()[&1].as_int(), 9);
         assert_eq!(pull_db_call(&mut client, event_id, "crc", "").await.unwrap().to_cpon(), "3421780262u");
+        assert_eq!(pull_db_call(&mut client, event_id, "sha1", "").await.unwrap().as_blob(), SHA1_123456789);
 
         // change of the database does not affect the running download
         push_event_db(&mut client, event_id, b"new").await;
@@ -545,7 +553,7 @@ fn pull_db_access_rights() {
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
 
         // stranger with Read access is not allowed
-        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("read", "[0,1]"), ("snapshot", "")] {
+        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("sha1", ""), ("read", "[0,1]"), ("snapshot", "")] {
             assert_permission_denied(client.call(pull_db_request(event_id, method, param, "eve", AccessLevel::Read)).await);
         }
 

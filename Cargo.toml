@@ -32,6 +32,7 @@ chrono = { version = "0.4.42", features = ["serde"] }
 async-trait = "0.1.89"
 rand = "0.8.5"
 flate2 = "1"
+sha1 = "0.11"
 
 [dev-dependencies]
 shvclient = { git = "https://github.com/silicon-heaven/libshvclient-rs", branch = "main", default-features = false, features = ["smol", "mocking"]}

@@ -13,12 +13,14 @@ use shvproto::RpcValue;
 use shvproto::rpcvalue::IMap;
 use shvrpc::metamethod::{AccessLevel, Flags, MetaMethod};
 use shvrpc::RpcMessage;
+use sha1::{Digest, Sha1};
 
 use crate::{anyhow_to_rpc_error, resolve_error};
 
 pub const METH_STAT: &str = "stat";
 pub const METH_SIZE: &str = "size";
 pub const METH_CRC: &str = "crc";
+pub const METH_SHA1: &str = "sha1";
 pub const METH_READ: &str = "read";
 pub const METH_WRITE: &str = "write";
 pub const METH_TRUNCATE: &str = "truncate";
@@ -26,8 +28,9 @@ pub const METH_APPEND: &str = "append";
 
 pub const STAT_RESULT: &str = "!stat";
 pub const SIZE_RESULT: &str = "i(0,)";
-pub const CRC_PARAM: &str = "[i(0,):offset,i(0,)|n:size]|n";
+pub const RANGE_PARAM: &str = "[i(0,):offset,i(0,)|n:size]|n";
 pub const CRC_RESULT: &str = "u(>32)";
+pub const SHA1_RESULT: &str = "b(20)";
 pub const READ_PARAM: &str = "[i(0,):offset,i(0,):size]";
 pub const READ_RESULT: &str = "b";
 pub const WRITE_PARAM: &str = "[i(0,):offset,b:data]";
@@ -44,7 +47,10 @@ pub const META_FILE_SIZE: MetaMethod = MetaMethod::new_static(
     METH_SIZE, USER_ID_GETTER, AccessLevel::Service, "n", SIZE_RESULT, &[], "",
 );
 pub const META_FILE_CRC: MetaMethod = MetaMethod::new_static(
-    METH_CRC, Flags::UserIDRequired, AccessLevel::Service, CRC_PARAM, CRC_RESULT, &[], "",
+    METH_CRC, Flags::UserIDRequired, AccessLevel::Service, RANGE_PARAM, CRC_RESULT, &[], "",
+);
+pub const META_FILE_SHA1: MetaMethod = MetaMethod::new_static(
+    METH_SHA1, Flags::UserIDRequired, AccessLevel::Service, RANGE_PARAM, SHA1_RESULT, &[], "",
 );
 pub const META_FILE_READ: MetaMethod = MetaMethod::new_static(
     METH_READ, USER_ID_LARGE_RESULT, AccessLevel::Service, READ_PARAM, READ_RESULT, &[], "",
@@ -77,6 +83,7 @@ pub enum FileOp {
     Stat,
     Size,
     Crc { offset: u64, size: Option<u64> },
+    Sha1 { offset: u64, size: Option<u64> },
     Read { offset: u64, size: u64 },
     Write { offset: u64, data: Vec<u8> },
     Truncate { size: u64 },
@@ -127,29 +134,32 @@ fn pair_param<'a>(method: &str, param: &'a RpcValue) -> anyhow::Result<(&'a RpcV
     }
 }
 
+/// Parses the `[offset, size]|n` param of the checksum methods, `None` size means up to the end
+/// of the file.
+fn parse_range(method: &str, param: &RpcValue) -> anyhow::Result<(u64, Option<u64>)> {
+    if param.is_null() {
+        return Ok((0, None));
+    }
+    let (offset, size) = pair_param(method, param)?;
+    let offset = optional_unsigned("offset", offset)?;
+    let size = optional_unsigned("size", size)?;
+    Ok((offset.unwrap_or_default(), size))
+}
+
 impl FileOp {
     /// Returns `None` if `method` is not a file node method.
     pub fn from_request(method: &str, param: &RpcValue) -> Option<anyhow::Result<Self>> {
         Some(match method {
             METH_STAT => Ok(Self::Stat),
             METH_SIZE => Ok(Self::Size),
-            METH_CRC => Self::parse_crc(param),
+            METH_CRC => parse_range(METH_CRC, param).map(|(offset, size)| Self::Crc { offset, size }),
+            METH_SHA1 => parse_range(METH_SHA1, param).map(|(offset, size)| Self::Sha1 { offset, size }),
             METH_READ => Self::parse_read(param),
             METH_WRITE => Self::parse_write(param),
             METH_TRUNCATE => Self::parse_truncate(param),
             METH_APPEND => Self::parse_append(param),
             _ => return None,
         })
-    }
-
-    fn parse_crc(param: &RpcValue) -> anyhow::Result<Self> {
-        if param.is_null() {
-            return Ok(Self::Crc { offset: 0, size: None });
-        }
-        let (offset, size) = pair_param(METH_CRC, param)?;
-        let offset = optional_unsigned("offset", offset)?;
-        let size = optional_unsigned("size", size)?;
-        Ok(Self::Crc { offset: offset.unwrap_or_default(), size })
     }
 
     fn parse_read(param: &RpcValue) -> anyhow::Result<Self> {
@@ -186,6 +196,7 @@ impl FileOp {
             Self::Stat => stat(path),
             Self::Size => Ok(RpcValue::from(file_size(path)? as i64)),
             Self::Crc { offset, size } => Ok(RpcValue::from(crc(path, offset, size)?)),
+            Self::Sha1 { offset, size } => Ok(RpcValue::from(sha1(path, offset, size)?)),
             Self::Read { offset, size } => Ok(RpcValue::from(read(path, offset, size)?)),
             Self::Write { offset, data } => {
                 check_write_size(&data)?;
@@ -253,9 +264,8 @@ fn stat(path: &Path) -> anyhow::Result<RpcValue> {
     Ok(result.into())
 }
 
-/// CRC-32 of the part of the range which is in the file, the range can exceed the file.
-fn crc(path: &Path, offset: u64, size: Option<u64>) -> anyhow::Result<u32> {
-    let mut crc = flate2::Crc::new();
+/// Feeds `update` with the part of the range which is in the file, the range can exceed the file.
+fn for_each_chunk(path: &Path, offset: u64, size: Option<u64>, mut update: impl FnMut(&[u8])) -> anyhow::Result<()> {
     if let Some(mut file) = open_for_read(path)? {
         file.seek(SeekFrom::Start(offset))?;
         let mut reader = file.take(size.unwrap_or(u64::MAX));
@@ -265,10 +275,24 @@ fn crc(path: &Path, offset: u64, size: Option<u64>) -> anyhow::Result<u32> {
             if len == 0 {
                 break;
             }
-            crc.update(&buffer[..len]);
+            update(&buffer[..len]);
         }
     }
+    Ok(())
+}
+
+/// CRC-32 of the part of the range which is in the file.
+fn crc(path: &Path, offset: u64, size: Option<u64>) -> anyhow::Result<u32> {
+    let mut crc = flate2::Crc::new();
+    for_each_chunk(path, offset, size, |chunk| crc.update(chunk))?;
     Ok(crc.sum())
+}
+
+/// SHA-1 of the part of the range which is in the file.
+fn sha1(path: &Path, offset: u64, size: Option<u64>) -> anyhow::Result<Vec<u8>> {
+    let mut hasher = Sha1::new();
+    for_each_chunk(path, offset, size, |chunk| hasher.update(chunk))?;
+    Ok(hasher.finalize().to_vec())
 }
 
 /// Reads at most `MAX_READ` bytes, data out of the file are not returned.
@@ -303,6 +327,36 @@ mod tests {
         assert!(matches!(op(METH_CRC, "[null,2]").unwrap(), FileOp::Crc { offset: 0, size: Some(2) }));
         assert!(op(METH_CRC, "[-1,2]").is_err());
         assert!(op(METH_CRC, "\"foo\"").is_err());
+    }
+
+    #[test]
+    fn sha1_param_forms() {
+        assert!(matches!(op(METH_SHA1, "").unwrap(), FileOp::Sha1 { offset: 0, size: None }));
+        assert!(matches!(op(METH_SHA1, "[1,2]").unwrap(), FileOp::Sha1 { offset: 1, size: Some(2) }));
+        assert!(matches!(op(METH_SHA1, "[1,null]").unwrap(), FileOp::Sha1 { offset: 1, size: None }));
+        assert!(matches!(op(METH_SHA1, "[null,2]").unwrap(), FileOp::Sha1 { offset: 0, size: Some(2) }));
+        assert!(op(METH_SHA1, "[-1,2]").is_err());
+        assert!(op(METH_SHA1, "\"foo\"").is_err());
+    }
+
+    #[test]
+    fn sha1_out_of_file_range() {
+        const SHA1_EMPTY: [u8; 20] = [
+            0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55,
+            0xbf, 0xef, 0x95, 0x60, 0x18, 0x90, 0xaf, 0xd8, 0x07, 0x09,
+        ];
+        const SHA1_DIGITS: [u8; 20] = [
+            0xf7, 0xc3, 0xbc, 0x1d, 0x80, 0x8e, 0x04, 0x73, 0x2a, 0xdf,
+            0x67, 0x99, 0x65, 0xcc, 0xc3, 0x4c, 0xa7, 0xae, 0x34, 0x41,
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        assert_eq!(sha1(&path, 0, None).unwrap(), SHA1_EMPTY);
+        assert!(!path.exists());
+        std::fs::write(&path, b"123456789").unwrap();
+        assert_eq!(sha1(&path, 0, None).unwrap(), SHA1_DIGITS);
+        assert_eq!(sha1(&path, 0, Some(100)).unwrap(), SHA1_DIGITS);
+        assert_eq!(sha1(&path, 100, None).unwrap(), SHA1_EMPTY);
     }
 
     #[test]
