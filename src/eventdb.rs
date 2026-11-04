@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use async_sqlite::rusqlite::Connection;
 use async_sqlite::{JournalMode, Pool, PoolBuilder};
 use log::info;
 use qxsql::sql::{QxSqlApi, record_from_slice};
@@ -32,12 +33,7 @@ pub async fn migrate_db(db_file: &str, event_data: &EventRecord, client_command_
                     .await?;
 
     // Update the database schema, atomically
-    pool.conn_mut(|conn| {
-        match MIGRATIONS.to_latest(conn) {
-            Ok(_) => Ok(()),
-            Err(e) => panic!("{}", e),
-        }
-    }).await?;
+    pool.conn_mut(|conn| Ok(migrate_connection(conn))).await??;
     let qxsql = LocalDbSqlApi::new(pool.clone(), client_command_sender);
     if !db_file_exists {
         let config_entries = [
@@ -57,6 +53,24 @@ pub async fn migrate_db(db_file: &str, event_data: &EventRecord, client_command_
     info!("Migration of: {db_file} OK");
 
     Ok(pool)
+}
+
+/// Checks that the file can be opened as an event database and migrates it, so it can be
+/// installed without a risk of the event failing to open afterwards. Blocking.
+pub fn migrate_db_file(db_file: &str) -> anyhow::Result<()> {
+    migrate_connection(&mut Connection::open(db_file)?)
+}
+
+fn migrate_connection(conn: &mut Connection) -> anyhow::Result<()> {
+    // A database exported by QuickEvent has the tables, but it does not have the version set.
+    // Such a database is considered to be migrated already.
+    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let table_count: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
+    if user_version == 0 && table_count > 0 {
+        conn.pragma_update(None, "user_version", MIGRATION_ARRAY.len() as i64)?;
+    }
+    MIGRATIONS.to_latest(conn)?;
+    Ok(())
 }
 
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);

@@ -334,11 +334,14 @@ fn push_db_upload_in_chunks_and_commit() {
         assert_eq!(pull_event_db(&mut client, event_id).await, b"old");
 
         push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
-        for data in compress(b"123456789").chunks(4) {
+        let ((), db_image) = with_event_db_image(b"", |conn| {
+            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 1;").unwrap();
+        });
+        for data in compress(&db_image).chunks(4) {
             push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
         }
-        push_db_call(&mut client, event_id, "commit", sha1_of(b"123456789")).await.unwrap();
-        assert_eq!(pull_event_db(&mut client, event_id).await, b"123456789");
+        push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
+        assert_eq!(pull_event_db(&mut client, event_id).await, db_image);
         assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 0);
     });
 }
@@ -479,6 +482,59 @@ fn push_db_commit_replaces_opened_event_db() {
         let snapshot = pull_event_db(&mut client, event_id).await;
         let (event_name, _) = with_event_db_image(&snapshot, |conn| read_config(conn, "event.name"));
         assert_eq!(event_name, "pushed");
+    });
+}
+
+#[test]
+fn push_db_commit_adopts_database_without_version() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+
+        let snapshot = pull_event_db(&mut client, event_id).await;
+        let ((), modified) = with_event_db_image(&snapshot, |conn| {
+            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
+            conn.pragma_update(None, "user_version", 0).unwrap();
+        });
+
+        let max_write = push_db_max_write(&mut client, event_id).await;
+        for data in compress(&modified).chunks(max_write) {
+            push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
+        }
+        push_db_call(&mut client, event_id, "commit", sha1_of(&modified)).await.unwrap();
+
+        let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
+        let snapshot = pull_event_db(&mut client, event_id).await;
+        let ((event_name, user_version), _) = with_event_db_image(&snapshot, |conn| {
+            let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+            (read_config(conn, "event.name"), user_version)
+        });
+        assert_eq!(event_name, "pushed");
+        assert_eq!(user_version, 1);
+    });
+}
+
+#[test]
+fn push_db_commit_rejects_invalid_database() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+        let snapshot = pull_event_db(&mut client, event_id).await;
+
+        // valid compressed data with matching SHA-1, but not a database
+        let data = vec![b'x'; 1024];
+        let compressed = compress(&data);
+        push_db_call(&mut client, event_id, "append", RpcValue::from(&compressed[..])).await.unwrap();
+        push_db_call(&mut client, event_id, "commit", sha1_of(&data)).await.expect_err("not a database");
+
+        // upload is kept, running event is not interrupted
+        assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), compressed.len() as i64);
+        let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
+        assert_eq!(pull_event_db(&mut client, event_id).await, snapshot);
     });
 }
 

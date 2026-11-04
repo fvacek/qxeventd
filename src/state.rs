@@ -24,7 +24,7 @@ use smol::{lock::RwLock, channel};
 use shvrpc::util::join_path;
 
 use crate::localdbsqlapi::LocalDbSqlApi;
-use crate::eventdb::migrate_db;
+use crate::eventdb::{migrate_db, migrate_db_file};
 use crate::eventsqlapi::EventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
@@ -204,7 +204,8 @@ impl State {
                 if crate::filenode::sha1(std::path::Path::new(&tmp_file), 0, None)? != expected_sha1 {
                     bail!("Event {event_id} database does not match the expected SHA-1");
                 }
-                Ok(())
+                migrate_db_file(&tmp_file)
+                    .map_err(|err| anyhow!("Invalid event {event_id} database: {err}"))
             }).await
         };
         let install_result = match inflate_result {
