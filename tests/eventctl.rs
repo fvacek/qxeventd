@@ -607,3 +607,90 @@ fn pull_and_push_opened_event_db() {
         assert_eq!(event_name, "pushed");
     });
 }
+
+async fn open_event_for_sql(client: &mut TestClient, owner: &str) -> (String, String) {
+    let (event_id, api_token) = create_event_with_own_db(client, owner).await;
+    client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), owner, AccessLevel::Read)).await.unwrap();
+    (format!("eventctl/{event_id}/sqlApi"), api_token)
+}
+
+#[test]
+fn sql_api_node_ls_and_dir() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+
+        let res = client.call(request(&format!("eventctl/{event_id}"), "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert!(res.to_cpon().contains(r#""sqlApi""#), "{}", res.to_cpon());
+
+        let path = format!("eventctl/{event_id}/sqlApi");
+        let res = client.call(request(&path, "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert_eq!(res.to_cpon(), "[]");
+        let res = client.call(request(&path, "dir", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
+        for method in ["query", "exec", "create", "read", "update", "delete"] {
+            assert!(res.contains(&format!(r#""{method}""#)), "{method}: {res}");
+        }
+    });
+}
+
+#[test]
+fn sql_api_record_lifecycle() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (path, _api_token) = open_event_for_sql(&mut client, "fanda").await;
+        let mut call = async |method: &str, param: String| client.call(request(&path, method, &param, "fanda", AccessLevel::Read)).await;
+
+        let id = call("create", r#"{"table":"qxchanges","record":{"status":"Pending"}}"#.into()).await.unwrap().as_int();
+        let res = call("read", format!(r#"{{"table":"qxchanges","id":{id}}}"#)).await.unwrap();
+        assert_eq!(res.get("status").unwrap().as_str(), "Pending");
+
+        let res = call("update", format!(r#"{{"table":"qxchanges","id":{id},"record":{{"status":"Done"}}}}"#)).await.unwrap();
+        assert!(res.as_bool());
+        let res = call("query", format!(r#"["SELECT status FROM qxchanges WHERE id = :id",{{"id":{id}}}]"#)).await.unwrap();
+        assert!(res.to_cpon().contains(r#""Done""#), "{}", res.to_cpon());
+
+        let res = call("exec", format!(r#"["UPDATE qxchanges SET status = 'Exec' WHERE id = :id",{{"id":{id}}}]"#)).await.unwrap();
+        assert_eq!(res.get("rows_affected").unwrap().as_int(), 1);
+
+        let res = call("delete", format!(r#"{{"table":"qxchanges","id":{id}}}"#)).await.unwrap();
+        assert!(res.as_bool());
+        let res = call("read", format!(r#"{{"table":"qxchanges","id":{id}}}"#)).await.unwrap();
+        assert!(res.is_null(), "{}", res.to_cpon());
+    });
+}
+
+#[test]
+fn sql_api_requires_opened_event() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        let path = format!("eventctl/{event_id}/sqlApi");
+        let err = client.call(request(&path, "query", r#"["SELECT 1",{}]"#, "fanda", AccessLevel::Read)).await.unwrap_err();
+        assert!(err.to_string().contains("is not open"), "{err}");
+    });
+}
+
+#[test]
+fn sql_api_access_rights() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (path, api_token) = open_event_for_sql(&mut client, "fanda").await;
+        let create = r#"{"table":"qxchanges","record":{"status":"Pending"}}"#;
+        let exec = r#"["DELETE FROM qxchanges",{}]"#;
+
+        // stranger with Read access can read, but not write
+        client.call(request(&path, "query", r#"["SELECT 1",{}]"#, "eve", AccessLevel::Read)).await.expect("reader can query");
+        assert_permission_denied(client.call(request(&path, "exec", exec, "eve", AccessLevel::Read)).await);
+        assert_permission_denied(client.call(request(&path, "create", create, "eve", AccessLevel::Read)).await);
+
+        // invalid api token is rejected even for read
+        client.call(with_api_token(request(&path, "query", r#"["SELECT 1",{}]"#, "eve", AccessLevel::Read), "invalid")).await
+            .expect_err("invalid api token cannot query");
+
+        // valid api token and Write access can write
+        client.call(with_api_token(request(&path, "create", create, "eve", AccessLevel::Read), &api_token)).await
+            .expect("api token holder can create");
+        client.call(request(&path, "create", create, "writer", AccessLevel::Write)).await
+            .expect("user with Write access can create");
+    });
+}

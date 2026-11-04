@@ -1,7 +1,10 @@
 
 use log::warn;
+use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, QUERY_PARAMS, QUERY_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
+use qxsql::{QueryAndParams, QxSqlApi, QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecReadParam, RecUpdateParam};
 use serde::{Serialize};
 use serde::Deserialize;
+use crate::eventsqlapi::EventSqlApi;
 use crate::filenode::{META_FILE_APPEND, META_FILE_CRC, META_FILE_READ, META_FILE_SHA1, META_FILE_SIZE, META_FILE_STAT, META_FILE_TRUNCATE, META_FILE_WRITE};
 use crate::rpcvalueext::RpcValueExt;
 use crate::rpctype::RpcType;
@@ -21,6 +24,7 @@ use crate::state::{open_event, pulled_event_db_file, pushed_event_db_file, Event
 enum EventCtlNode {
     Root,
     Event(EventId),
+    EventSqlApi(EventId),
     PushEventDbFileNode(EventId),
     PullEventDbFileNode(EventId),
 }
@@ -34,6 +38,7 @@ impl EventCtlNode {
         let event_id = event_id_str.parse::<i64>()?;
         match dir {
             "" => Ok(Self::Event(event_id)),
+            "sql" => Ok(Self::EventSqlApi(event_id)),
             "pushDb" => Ok(Self::PushEventDbFileNode(event_id)),
             "pullDb" => Ok(Self::PullEventDbFileNode(event_id)),
             _ => Err(anyhow::anyhow!("invalid path: {}", path))
@@ -399,7 +404,7 @@ pub(crate) async fn request_handler(
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_NODE_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_NODE_METHODS, async move || {
-                    Ok(vec!["sql".into(), "pushDb".into(), "pullDb".into()])
+                    Ok(vec!["sqlApi".into(), "pushDb".into(), "pullDb".into()])
                 }),
                 Method::Other(m) => {
                     let method = m.method();
@@ -459,6 +464,97 @@ pub(crate) async fn request_handler(
                         METH_EVENT_CLOSE => m.resolve(EVENTCTL_NODE_METHODS, async move || {
                             let res = app_state.write().await.close_event(event_id, client_cmd_tx.clone()).await;
                             res.map_err(anyhow_to_rpc_error)
+                        }),
+                        _ => err_unresolved_request(),
+                    }
+                }
+            }
+        }
+        EventCtlNode::EventSqlApi(event_id) => {
+            const METH_SQL_QUERY: &str = "query";
+            const METH_SQL_EXEC: &str = "exec";
+            const METH_SQL_CREATE: &str = "create";
+            const METH_SQL_READ: &str = "read";
+            const METH_SQL_UPDATE: &str = "update";
+            const METH_SQL_DELETE: &str = "delete";
+            const EVENTCTL_SQL_NODE_METHODS: &[MetaMethod] = &[
+                META_METHOD_DIR, META_METHOD_LS,
+                MetaMethod::new_static(
+                    METH_SQL_QUERY, Flags::UserIDRequired, AccessLevel::Read, QUERY_PARAMS, QUERY_RESULT, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_SQL_EXEC, Flags::UserIDRequired, AccessLevel::Write, EXEC_PARAMS, EXEC_RESULT, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_SQL_CREATE, Flags::UserIDRequired, AccessLevel::Write, CREATE_PARAMS, CREATE_RESULT, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_SQL_READ, Flags::UserIDRequired, AccessLevel::Read, READ_PARAMS, READ_RESULT, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_SQL_UPDATE, Flags::UserIDRequired, AccessLevel::Write, UPDATE_PARAMS, UPDATE_RESULT, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_SQL_DELETE, Flags::UserIDRequired, AccessLevel::Write, DELETE_PARAMS, DELETE_RESULT, &[], "",
+                ),
+            ];
+
+            let methods = EVENTCTL_SQL_NODE_METHODS;
+            match Method::from_request(&rq) {
+                Method::Dir(dir) => dir.resolve(methods),
+                Method::Ls(ls) => ls.resolve(methods, async move || Ok(vec![])),
+                Method::Other(m) => {
+                    let method = m.method();
+                    let rights = escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), methods);
+                    match method {
+                        METH_SQL_QUERY => m.resolve(rights.await, async move || {
+                            let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
+                                .map_err(|err| str_to_rpc_error(&err))?;
+                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            sql_api.query(query.query(), query.params()).await
+                                .map(|res| res.to_rpcvalue())
+                                .map_err(anyhow_to_rpc_error)
+                        }),
+                        METH_SQL_EXEC => m.resolve(rights.await, async move || {
+                            let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
+                                .map_err(|err| str_to_rpc_error(&err))?;
+                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            sql_api.exec(query.query(), query.params()).await
+                                .map(|res| res.to_rpcvalue())
+                                .map_err(anyhow_to_rpc_error)
+                        }),
+                        METH_SQL_CREATE => m.resolve(rights.await, async move || {
+                            let param = RecInsertParam::try_from(rq.param().unwrap_or_default())
+                                .map_err(|err| str_to_rpc_error(&err))?;
+                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            sql_api.create_record_with_recchng(&param.table, &param.record, param.issuer).await
+                                .map(|res| res.to_rpcvalue())
+                                .map_err(anyhow_to_rpc_error)
+                        }),
+                        METH_SQL_READ => m.resolve(rights.await, async move || {
+                            let param = RecReadParam::try_from(rq.param().unwrap_or_default())
+                                .map_err(|err| str_to_rpc_error(&err))?;
+                            let fields = qxsql::string_list_to_ref_vec(&param.fields);
+                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            sql_api.read_record(&param.table, param.id, fields).await
+                                .map(|res| res.to_rpcvalue())
+                                .map_err(anyhow_to_rpc_error)
+                        }),
+                        METH_SQL_UPDATE => m.resolve(rights.await, async move || {
+                            let param = RecUpdateParam::try_from(rq.param().unwrap_or_default())
+                                .map_err(|err| str_to_rpc_error(&err))?;
+                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            sql_api.update_record_with_recchng(&param.table, param.id, &param.record, param.issuer).await
+                                .map(|res| res.to_rpcvalue())
+                                .map_err(anyhow_to_rpc_error)
+                        }),
+                        METH_SQL_DELETE => m.resolve(rights.await, async move || {
+                            let param = RecDeleteParam::try_from(rq.param().unwrap_or_default())
+                                .map_err(|err| str_to_rpc_error(&err))?;
+                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            sql_api.delete_record_with_recchng(&param.table, param.id, param.issuer).await
+                                .map(|res| res.to_rpcvalue())
+                                .map_err(anyhow_to_rpc_error)
                         }),
                         _ => err_unresolved_request(),
                     }
@@ -545,7 +641,6 @@ async fn list_events(app_state: SharedAppState) -> Vec<String> {
         .map(|id| format!("{id}"))
         .collect()
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LateEntryParams {
