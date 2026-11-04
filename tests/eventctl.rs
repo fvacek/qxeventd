@@ -641,7 +641,7 @@ fn pull_and_push_opened_event_db() {
 async fn open_event_for_sql(client: &mut TestClient, owner: &str) -> (String, String) {
     let (event_id, api_token) = create_event_with_own_db(client, owner).await;
     client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), owner, AccessLevel::Read)).await.unwrap();
-    (format!("eventctl/{event_id}/sqlApi"), api_token)
+    (format!("eventctl/{event_id}/sql"), api_token)
 }
 
 #[test]
@@ -651,9 +651,9 @@ fn sql_api_node_ls_and_dir() {
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
 
         let res = client.call(request(&format!("eventctl/{event_id}"), "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
-        assert!(res.to_cpon().contains(r#""sqlApi""#), "{}", res.to_cpon());
+        assert!(res.to_cpon().contains(r#""sql""#), "{}", res.to_cpon());
 
-        let path = format!("eventctl/{event_id}/sqlApi");
+        let path = format!("eventctl/{event_id}/sql");
         let res = client.call(request(&path, "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
         assert_eq!(res.to_cpon(), "[]");
         let res = client.call(request(&path, "dir", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
@@ -694,7 +694,7 @@ fn sql_api_requires_opened_event() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        let path = format!("eventctl/{event_id}/sqlApi");
+        let path = format!("eventctl/{event_id}/sql");
         let err = client.call(request(&path, "query", r#"["SELECT 1",{}]"#, "fanda", AccessLevel::Read)).await.unwrap_err();
         assert!(err.to_string().contains("is not open"), "{err}");
     });
