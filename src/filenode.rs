@@ -74,9 +74,9 @@ const STAT_MAX_WRITE: i32 = 5;
 const STAT_MAX_READ: i32 = 6;
 
 const FILE_TYPE_REGULAR: i64 = 0;
-const PAGE_SIZE: u64 = 64 * 1024;
-const MAX_READ: u64 = 1024 * 1024;
-const MAX_WRITE: usize = 1024 * 1024;
+const PAGE_SIZE: u64 = 0;
+const MAX_READ: u64 = 1024 * 4;
+const MAX_WRITE: usize = 1024 * 4;
 
 #[derive(Debug)]
 pub enum FileOp {
