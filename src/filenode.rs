@@ -75,8 +75,8 @@ const STAT_MAX_READ: i32 = 6;
 
 const FILE_TYPE_REGULAR: i64 = 0;
 const PAGE_SIZE: u64 = 1024 * 64;
-const MAX_READ: u64 = 1024 * 4;
-const MAX_WRITE: usize = 1024 * 4;
+const MAX_READ: u64 = 1024 * 64;
+const MAX_WRITE: usize = 1024 * 64;
 
 /// Result of the file node stat method
 #[derive(Debug, Clone, PartialEq, Eq)]
