@@ -32,7 +32,7 @@ mod filenode;
 mod qxchange;
 mod qxeventconfig;
 
-pub use eventctlnode::{PushEventDbParam, QX_API_TOKEN};
+pub use eventctlnode::QX_API_TOKEN;
 pub use filenode::FileStat;
 
 pub(crate) static GLOBAL_CONFIG: OnceLock<Config> = OnceLock::new();

@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::{collections::BTreeMap, sync::Arc};
-use std::io::{Read, Write};
 
 use flate2::read::ZlibDecoder;
-use flate2::{Compression, write::ZlibEncoder};
 use futures::StreamExt;
 use anyhow::bail;
 use anyhow::anyhow;
@@ -162,30 +160,6 @@ impl State {
         EventRecord::from_record(&record)
     }
 
-    pub async fn push_event_db(app_state: SharedAppState, event_id: EventId, zdata: &[u8], client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
-        // Decode before closing the event so an invalid upload does not interrupt a
-        // currently running event.
-        let mut decoder = ZlibDecoder::new(zdata);
-        let mut db_data = Vec::new();
-        decoder.read_to_end(&mut db_data)
-            .map_err(|err| anyhow!("Failed to decompress event database: {err}"))?;
-
-        let db_file = event_db_file(event_id);
-        if let Some(parent) = std::path::Path::new(&db_file).parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp_file = format!("{db_file}.upload-tmp-{:016x}", rand::random::<u64>());
-
-        let install_result = match std::fs::write(&tmp_file, &db_data) {
-            Ok(()) => Self::install_event_db(app_state, event_id, &tmp_file, client_command_sender).await,
-            Err(err) => Err(err.into()),
-        };
-        if install_result.is_err() {
-            let _ = std::fs::remove_file(&tmp_file);
-        }
-        install_result
-    }
-
     /// Install the zlib compressed database uploaded using the pushDb file node. The uploaded
     /// file is kept if it cannot be installed, so the upload does not have to be repeated.
     /// `expected_sha1` is the SHA-1 of the uncompressed database.
@@ -251,35 +225,6 @@ impl State {
             open_event(app_state, event_id, client_command_sender).await?;
         }
         Ok(())
-    }
-
-    pub async fn pull_event_db(app_state: SharedAppState, event_id: EventId) -> anyhow::Result<(usize, Vec<u8>)> {
-        let open_event_db = {
-            let state = app_state.read().await;
-            match state.open_events.get(&event_id).cloned() {
-                Some(event) => Some(event.read().await.db.clone()),
-                None => None,
-            }
-        };
-
-        let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-        let db_data = if let Some(db) = open_event_db {
-            // Event is open, make consistent snapshot using SQLite online backup API
-            let backup_file = format!("{db_file}.backup-{:016x}", rand::random::<u64>());
-            let read_result = backup_open_event_db(&db, event_id, &backup_file).await
-                .and_then(|_| std::fs::read(&backup_file).map_err(anyhow::Error::from));
-            if let Err(err) = std::fs::remove_file(&backup_file) && err.kind() != std::io::ErrorKind::NotFound {
-                warn!("Failed to remove event DB backup file {backup_file}: {err}");
-            }
-            read_result?
-        } else {
-            std::fs::read(&db_file)?
-        };
-        let db_data_size = db_data.len();
-
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&db_data)?;
-        Ok((db_data_size, encoder.finish()?))
     }
 
     /// Create the file served by the pullDb file node, it replaces the previous one atomically.
@@ -387,7 +332,7 @@ async fn close_event_db(db: &async_sqlite::Pool) -> anyhow::Result<()> {
 pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<String> {
     let event_shv_path = event_api_shv_path(event_id);
     // The lock is held until the event is registered, so the DB file cannot be replaced by
-    // push_event_db after the pool is opened, nor can the event be opened twice.
+    // commit_pushed_event_db after the pool is opened, nor can the event be opened twice.
     let mut state = app_state.write().await;
     if let Some(event) = state.open_events.get(&event_id).cloned() {
         event.write().await.touched_at = chrono::Utc::now();

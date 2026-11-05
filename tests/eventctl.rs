@@ -2,11 +2,9 @@
 
 mod common;
 
-use std::io::{Read, Write};
-use qxeventd::rpcvalueext::RpcValueExt;
+use std::io::Write;
 use async_sqlite::rusqlite::Connection;
 use flate2::Compression;
-use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use sha1::{Digest, Sha1};
 use shvproto::RpcValue;
@@ -14,7 +12,7 @@ use shvrpc::RpcMessage;
 use shvrpc::metamethod::AccessLevel;
 
 use common::{TestClient, assert_permission_denied, create_event, create_event_with_own_db, data_dir, request};
-use qxeventd::{FileStat, PushEventDbParam, QX_API_TOKEN};
+use qxeventd::{FileStat, QX_API_TOKEN};
 
 const SHA1_123456789: [u8; 20] = [
     0xf7, 0xc3, 0xbc, 0x1d, 0x80, 0x8e, 0x04, 0x73, 0x2a, 0xdf,
@@ -27,32 +25,17 @@ fn compress(data: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-fn push_event_db_request(event_id: i64, compressed_data: Vec<u8>, user: &str, access: AccessLevel) -> RpcMessage {
-    let param = PushEventDbParam { event_id: event_id, zdata: compressed_data };
-    request("eventctl", "pushEventDb", "", user, access).with_param(param.to_rpcvalue())
-}
-
-fn pull_event_db_request(event_id: i64, user: &str, access: AccessLevel) -> RpcMessage {
-    request("eventctl", "pullEventDb", &format!(r#"{{"event_id":{event_id}}}"#), user, access)
-}
-
 fn with_api_token(rq: RpcMessage, api_token: &str) -> RpcMessage {
     let mut meta = rq.meta().clone();
     meta.insert(QX_API_TOKEN, api_token.into());
     RpcMessage::from_meta(meta).with_param(rq.param().cloned())
 }
 
-async fn push_event_db(client: &mut TestClient, event_id: i64, data: &[u8]) {
-    client.call(push_event_db_request(event_id, compress(data), "fanda", AccessLevel::Read)).await.expect("pushEventDb");
-}
-
-async fn pull_event_db(client: &mut TestClient, event_id: i64) -> Vec<u8> {
-    let res = client.call(pull_event_db_request(event_id, "fanda", AccessLevel::Read)).await.expect("pullEventDb");
-    let res = res.as_map();
-    let mut data = Vec::new();
-    ZlibDecoder::new(res["zdata"].as_blob()).read_to_end(&mut data).expect("valid zlib data");
-    assert_eq!(res["uncompressed_data_size"].as_int(), data.len() as i64);
-    data
+/// Store event DB file directly, pushDb commit accepts valid databases only
+fn write_event_db(event_id: i64, data: &[u8]) {
+    let dir = format!("{}/{event_id}", data_dir());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(format!("{dir}/event.qbe"), data).unwrap();
 }
 
 /// Open event DB image in a temporary file, to check its content or to modify it
@@ -152,109 +135,6 @@ fn list_events_returns_typed_items() {
     });
 }
 
-#[test]
-fn push_and_pull_event_db() {
-    smol::block_on(async {
-        let mut client = TestClient::new().await;
-        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-
-        push_event_db(&mut client, event_id, b"first database").await;
-        assert_eq!(pull_event_db(&mut client, event_id).await, b"first database");
-
-        // push replaces existing database
-        push_event_db(&mut client, event_id, b"second database").await;
-        assert_eq!(pull_event_db(&mut client, event_id).await, b"second database");
-    });
-}
-
-#[test]
-fn pull_event_db_returns_compressed_data_as_blob() {
-    smol::block_on(async {
-        let mut client = TestClient::new().await;
-        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"database").await;
-        let res = client.call(pull_event_db_request(event_id, "fanda", AccessLevel::Read)).await.unwrap();
-        assert_eq!(res.as_map()["zdata"].type_name(), "Blob");
-    });
-}
-
-#[test]
-fn pull_event_db_fails_if_there_is_no_db() {
-    smol::block_on(async {
-        let mut client = TestClient::new().await;
-        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        client.call(pull_event_db_request(event_id, "fanda", AccessLevel::Read)).await.expect_err("event DB does not exist");
-    });
-}
-
-#[test]
-fn push_invalid_event_db_keeps_existing_one() {
-    smol::block_on(async {
-        let mut client = TestClient::new().await;
-        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"database").await;
-
-        client.call(push_event_db_request(event_id, b"not zlib data".to_vec(), "fanda", AccessLevel::Read)).await
-            .expect_err("invalid data should be rejected");
-
-        assert_eq!(pull_event_db(&mut client, event_id).await, b"database");
-    });
-}
-
-#[test]
-fn push_event_db_removes_stale_wal_files() {
-    smol::block_on(async {
-        let mut client = TestClient::new().await;
-        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"database").await;
-
-        // left over e.g. after crash, event is not opened
-        let stale_files = ["wal", "shm"].map(|suffix| format!("{}/{event_id}/event.qbe-{suffix}", data_dir()));
-        for file in &stale_files {
-            std::fs::write(file, b"stale").unwrap();
-        }
-
-        push_event_db(&mut client, event_id, b"database").await;
-        for file in &stale_files {
-            assert!(!std::path::Path::new(file).exists(), "{file}");
-        }
-    });
-}
-
-#[test]
-fn push_and_pull_event_db_access_rights() {
-    smol::block_on(async {
-        let mut client = TestClient::new().await;
-        let (event_id, api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"database").await;
-
-        // stranger with Read access is not allowed
-        assert_permission_denied(client.call(push_event_db_request(event_id, compress(b"eve"), "eve", AccessLevel::Read)).await);
-        assert_permission_denied(client.call(pull_event_db_request(event_id, "eve", AccessLevel::Read)).await);
-
-        // neither is one with invalid api token, the method is not even resolved then
-        client.call(with_api_token(push_event_db_request(event_id, compress(b"eve"), "eve", AccessLevel::Read), "invalid")).await
-            .expect_err("invalid api token cannot push event DB");
-        client.call(with_api_token(pull_event_db_request(event_id, "eve", AccessLevel::Read), "invalid")).await
-            .expect_err("invalid api token cannot pull event DB");
-        assert_eq!(pull_event_db(&mut client, event_id).await, b"database");
-
-        // stranger with valid api token is
-        client.call(with_api_token(push_event_db_request(event_id, compress(b"token"), "eve", AccessLevel::Read), &api_token)).await
-            .expect("api token holder can push event DB");
-        client.call(with_api_token(pull_event_db_request(event_id, "eve", AccessLevel::Read), &api_token)).await
-            .expect("api token holder can pull event DB");
-        assert_eq!(pull_event_db(&mut client, event_id).await, b"token");
-
-        // user with Service access is
-        client.call(push_event_db_request(event_id, compress(b"service"), "admin", AccessLevel::Service)).await
-            .expect("service user can push event DB");
-        client.call(pull_event_db_request(event_id, "admin", AccessLevel::Service)).await
-            .expect("service user can pull event DB");
-        assert_eq!(pull_event_db(&mut client, event_id).await, b"service");
-    });
-}
-
 fn push_db_request(event_id: i64, method: &str, param: RpcValue, user: &str, access: AccessLevel) -> RpcMessage {
     let param = if param.is_null() { None } else { Some(param) };
     request(&format!("eventctl/{event_id}/pushDb"), method, "", user, access).with_param(param)
@@ -310,7 +190,7 @@ fn push_db_upload_in_chunks_and_commit() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"old").await;
+        write_event_db(event_id, b"old");
 
         // nothing uploaded yet
         assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 0);
@@ -411,7 +291,7 @@ fn push_db_commit_requires_sha1_param() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"old").await;
+        write_event_db(event_id, b"old");
         push_db_call(&mut client, event_id, "append", RpcValue::from(&compress(b"new")[..])).await.unwrap();
 
         for param in [RpcValue::null(), cpon("1"), RpcValue::from(&b"short"[..])] {
@@ -456,6 +336,30 @@ fn push_db_commit_without_upload_keeps_event_opened() {
 
         let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
         assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
+    });
+}
+
+#[test]
+fn push_db_commit_removes_stale_wal_files() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        write_event_db(event_id, b"database");
+
+        // left over e.g. after crash, event is not opened
+        let stale_files = ["wal", "shm"].map(|suffix| format!("{}/{event_id}/event.qbe-{suffix}", data_dir()));
+        for file in &stale_files {
+            std::fs::write(file, b"stale").unwrap();
+        }
+
+        let ((), db_image) = with_event_db_image(b"", |conn| {
+            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 1;").unwrap();
+        });
+        push_db_call(&mut client, event_id, "append", RpcValue::from(&compress(&db_image)[..])).await.unwrap();
+        push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
+        for file in &stale_files {
+            assert!(!std::path::Path::new(file).exists(), "{file}");
+        }
     });
 }
 
@@ -583,6 +487,12 @@ async fn pull_db_call(client: &mut TestClient, event_id: i64, method: &str, para
     client.call(pull_db_request(event_id, method, param, "fanda", AccessLevel::Read)).await
 }
 
+/// Create a new snapshot and download it
+async fn pull_event_db(client: &mut TestClient, event_id: i64) -> Vec<u8> {
+    pull_db_call(client, event_id, "snapshot", "").await.expect("snapshot");
+    pull_db_read_all(client, event_id).await
+}
+
 /// Download the snapshot in chunks
 async fn pull_db_read_all(client: &mut TestClient, event_id: i64) -> Vec<u8> {
     let mut data = Vec::new();
@@ -622,7 +532,7 @@ fn pull_db_is_read_only() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"database").await;
+        write_event_db(event_id, b"database");
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
 
         for (method, param) in [("write", r#"[0,b"x"]"#), ("truncate", "0"), ("append", r#"b"x""#), ("commit", "")] {
@@ -637,7 +547,7 @@ fn pull_db_requires_snapshot() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"database").await;
+        write_event_db(event_id, b"database");
 
         for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("sha1", ""), ("read", "[0,10]")] {
             pull_db_call(&mut client, event_id, method, param).await.expect_err(method);
@@ -659,7 +569,7 @@ fn pull_db_snapshot_is_stable_until_refreshed() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"123456789").await;
+        write_event_db(event_id, b"123456789");
 
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
         assert_eq!(pull_db_call(&mut client, event_id, "size", "").await.unwrap().as_int(), 9);
@@ -668,7 +578,7 @@ fn pull_db_snapshot_is_stable_until_refreshed() {
         assert_eq!(pull_db_call(&mut client, event_id, "sha1", "").await.unwrap().as_blob(), SHA1_123456789);
 
         // change of the database does not affect the running download
-        push_event_db(&mut client, event_id, b"new").await;
+        write_event_db(event_id, b"new");
         assert_eq!(pull_db_read_all(&mut client, event_id).await, b"123456789");
 
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
@@ -699,7 +609,7 @@ fn pull_db_access_rights() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
         let (event_id, api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        push_event_db(&mut client, event_id, b"database").await;
+        write_event_db(event_id, b"database");
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
 
         // stranger with Read access is not allowed
@@ -731,30 +641,6 @@ fn pull_closed_event_db_contains_data_written_while_opened() {
         let data = pull_event_db(&mut client, event_id).await;
         let (stage_count, _) = with_event_db_image(&data, |conn| read_config(conn, "event.stage_count"));
         assert_eq!(stage_count, "1");
-    });
-}
-
-#[test]
-fn pull_and_push_opened_event_db() {
-    smol::block_on(async {
-        let mut client = TestClient::new().await;
-        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
-        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
-
-        // pull makes snapshot of the opened DB
-        let snapshot = pull_event_db(&mut client, event_id).await;
-        let ((), modified) = with_event_db_image(&snapshot, |conn| {
-            assert_eq!(read_config(conn, "event.stage_count"), "1");
-            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
-        });
-
-        // push replaces DB of the opened event, which stays opened and uses the new DB
-        push_event_db(&mut client, event_id, &modified).await;
-        let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
-        assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
-        let snapshot = pull_event_db(&mut client, event_id).await;
-        let (event_name, _) = with_event_db_image(&snapshot, |conn| read_config(conn, "event.name"));
-        assert_eq!(event_name, "pushed");
     });
 }
 
