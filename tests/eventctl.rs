@@ -2,9 +2,10 @@
 
 mod common;
 
-use std::io::Write;
+use std::io::{Read, Write};
 use async_sqlite::rusqlite::Connection;
 use flate2::Compression;
+use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use sha1::{Digest, Sha1};
 use shvproto::RpcValue;
@@ -23,6 +24,12 @@ fn compress(data: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(data).unwrap();
     encoder.finish().unwrap()
+}
+
+fn decompress(data: &[u8]) -> Vec<u8> {
+    let mut decompressed = Vec::new();
+    ZlibDecoder::new(data).read_to_end(&mut decompressed).unwrap();
+    decompressed
 }
 
 fn with_api_token(rq: RpcMessage, api_token: &str) -> RpcMessage {
@@ -493,8 +500,13 @@ async fn pull_event_db(client: &mut TestClient, event_id: i64) -> Vec<u8> {
     pull_db_read_all(client, event_id).await
 }
 
-/// Download the snapshot in chunks
+/// Download the snapshot in chunks and decompress it
 async fn pull_db_read_all(client: &mut TestClient, event_id: i64) -> Vec<u8> {
+    decompress(&pull_db_read_compressed(client, event_id).await)
+}
+
+/// Download the snapshot in chunks, as it is served by the file node
+async fn pull_db_read_compressed(client: &mut TestClient, event_id: i64) -> Vec<u8> {
     let mut data = Vec::new();
     loop {
         let param = format!("[{},1000]", data.len());
@@ -572,10 +584,16 @@ fn pull_db_snapshot_is_stable_until_refreshed() {
         write_event_db(event_id, b"123456789");
 
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
-        assert_eq!(pull_db_call(&mut client, event_id, "size", "").await.unwrap().as_int(), 9);
-        assert_eq!(FileStat::try_from(&pull_db_call(&mut client, event_id, "stat", "").await.unwrap()).unwrap().size, 9);
-        assert_eq!(pull_db_call(&mut client, event_id, "crc", "").await.unwrap().to_cpon(), "3421780262u");
-        assert_eq!(pull_db_call(&mut client, event_id, "sha1", "").await.unwrap().as_blob(), SHA1_123456789);
+        let compressed = pull_db_read_compressed(&mut client, event_id).await;
+        assert_eq!(decompress(&compressed), b"123456789");
+
+        // file node methods describe the compressed data
+        assert_eq!(pull_db_call(&mut client, event_id, "size", "").await.unwrap().as_int(), compressed.len() as i64);
+        assert_eq!(FileStat::try_from(&pull_db_call(&mut client, event_id, "stat", "").await.unwrap()).unwrap().size, compressed.len() as u64);
+        let mut crc = flate2::Crc::new();
+        crc.update(&compressed);
+        assert_eq!(pull_db_call(&mut client, event_id, "crc", "").await.unwrap().to_cpon(), format!("{}u", crc.sum()));
+        assert_eq!(pull_db_call(&mut client, event_id, "sha1", "").await.unwrap().as_blob(), Sha1::digest(&compressed).to_vec());
 
         // change of the database does not affect the running download
         write_event_db(event_id, b"new");
@@ -583,6 +601,26 @@ fn pull_db_snapshot_is_stable_until_refreshed() {
 
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
         assert_eq!(pull_db_read_all(&mut client, event_id).await, b"new");
+    });
+}
+
+#[test]
+fn pulled_db_can_be_pushed_back() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+
+        pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
+        let compressed = pull_db_read_compressed(&mut client, event_id).await;
+        let max_write = push_db_max_write(&mut client, event_id).await;
+        for data in compressed.chunks(max_write) {
+            push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
+        }
+        let snapshot = decompress(&compressed);
+        push_db_call(&mut client, event_id, "commit", sha1_of(&snapshot)).await.unwrap();
+        let (stage_count, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, |conn| read_config(conn, "event.stage_count"));
+        assert_eq!(stage_count, "1");
     });
 }
 

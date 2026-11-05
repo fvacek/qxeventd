@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::{collections::BTreeMap, sync::Arc};
 
+use flate2::Compression;
 use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
 use futures::StreamExt;
 use anyhow::bail;
 use anyhow::anyhow;
@@ -227,7 +229,8 @@ impl State {
         Ok(())
     }
 
-    /// Create the file served by the pullDb file node, it replaces the previous one atomically.
+    /// Create the zlib compressed file served by the pullDb file node, it replaces the previous
+    /// one atomically.
     pub async fn snapshot_event_db(app_state: SharedAppState, event_id: EventId) -> anyhow::Result<()> {
         let snapshot_file = pulled_event_db_file(event_id);
         let tmp_file = format!("{snapshot_file}.tmp-{:016x}", rand::random::<u64>());
@@ -250,9 +253,24 @@ impl State {
                 }
             }
         };
-        let result = create_result.and_then(|_| std::fs::rename(&tmp_file, &snapshot_file).map_err(anyhow::Error::from));
+        // The copy is not affected by database changes, the lock is not needed for compression.
+        let compressed_tmp_file = format!("{tmp_file}.zlib");
+        let result = match create_result {
+            Ok(()) => {
+                let tmp_file = tmp_file.clone();
+                let compressed_tmp_file = compressed_tmp_file.clone();
+                smol::unblock(move || {
+                    deflate_file(&tmp_file, &compressed_tmp_file)
+                        .map_err(|e| anyhow!("Failed to compress event {event_id} DB: {e}"))?;
+                    std::fs::rename(&compressed_tmp_file, &snapshot_file)?;
+                    Ok(())
+                }).await
+            }
+            Err(err) => Err(err),
+        };
+        let _ = std::fs::remove_file(&tmp_file);
         if result.is_err() {
-            let _ = std::fs::remove_file(&tmp_file);
+            let _ = std::fs::remove_file(&compressed_tmp_file);
         }
         result
     }
@@ -667,6 +685,13 @@ fn inflate_file(zlib_file: &str, out_file: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+fn deflate_file(in_file: &str, zlib_file: &str) -> std::io::Result<()> {
+    let mut encoder = ZlibEncoder::new(std::fs::File::create(zlib_file)?, Compression::default());
+    std::io::copy(&mut std::fs::File::open(in_file)?, &mut encoder)?;
+    encoder.finish()?;
+    Ok(())
+}
+
 fn event_db_file(event_id: EventId) -> String {
     format!("{}/{event_id}/event.qbe", global_config().data_dir)
 }
@@ -677,7 +702,7 @@ pub fn pushed_event_db_file(event_id: EventId) -> String {
     format!("{}.pushdb", event_db_file(event_id))
 }
 
-/// Snapshot served by the pullDb file node
+/// Zlib compressed snapshot served by the pullDb file node
 pub fn pulled_event_db_file(event_id: EventId) -> String {
     format!("{}.pulldb", event_db_file(event_id))
 }
