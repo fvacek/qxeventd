@@ -103,6 +103,7 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         open_events: Default::default(),
         shutdown_sender: Some(shutdown_sender),
         event_records: Default::default(),
+        pulled_db_sha1: Default::default(),
     }));
     let config = GLOBAL_CONFIG
         .get()
@@ -132,6 +133,7 @@ pub async fn create_client(app_db_dir: &str) -> anyhow::Result<shvclient::Client
         open_events: Default::default(),
         shutdown_sender: None,
         event_records: Default::default(),
+        pulled_db_sha1: Default::default(),
     }));
     Ok(build_client(app_state))
 }
