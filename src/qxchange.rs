@@ -47,9 +47,16 @@ impl From<Data> for DbValue {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LateEntryKind {
-    Update { run_id: i64 },
-    NewEntry { class_id: i64 },
+    Update {
+        #[serde(rename = "runId")]
+        run_id: i64,
+    },
+    NewEntry {
+        #[serde(rename = "classId")]
+        class_id: i64,
+    },
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LateEntry {

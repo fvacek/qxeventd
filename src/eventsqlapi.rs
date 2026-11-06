@@ -7,13 +7,13 @@ use shvclient::ClientCommandSender;
 use crate::localdbsqlapi::LocalDbSqlApi;
 use crate::state::{EventId, SharedAppState};
 
-pub struct EventSqlApi {
+pub struct LocalEventSqlApi {
     event_id: EventId,
     app_state: SharedAppState,
     rpc_client: ClientCommandSender,
 }
 
-impl EventSqlApi {
+impl LocalEventSqlApi {
     pub fn new(event_id: EventId, app_state: SharedAppState, rpc_client: ClientCommandSender) -> Self {
         Self {
             event_id,
@@ -39,7 +39,7 @@ impl EventSqlApi {
 }
 
 #[async_trait]
-impl qxsql::QxSqlApi for EventSqlApi {
+impl qxsql::QxSqlApi for LocalEventSqlApi {
     async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> {
         let qxsql = LocalDbSqlApi::new(self.event_db().await?, self.rpc_client.clone());
         qxsql.query(query, params).await
@@ -52,7 +52,7 @@ impl qxsql::QxSqlApi for EventSqlApi {
 }
 
 #[async_trait]
-impl qxsql::QxSqlApiRecChng for EventSqlApi {
+impl qxsql::QxSqlApiRecChng for LocalEventSqlApi {
     fn filter_recchng(&self, recchng: RecChng) -> Option<RecChng>  {
         Some(recchng)
     }

@@ -2,9 +2,8 @@
 use log::warn;
 use qxsql::sql::{CREATE_PARAMS, CREATE_RESULT, DELETE_PARAMS, DELETE_RESULT, EXEC_PARAMS, EXEC_RESULT, QUERY_PARAMS, QUERY_RESULT, READ_PARAMS, READ_RESULT, UPDATE_PARAMS, UPDATE_RESULT};
 use qxsql::{QueryAndParams, QxSqlApi, QxSqlApiRecChng, RecDeleteParam, RecInsertParam, RecReadParam, RecUpdateParam};
-use serde::{Serialize};
-use serde::Deserialize;
-use crate::eventsqlapi::EventSqlApi;
+use serde::{Serialize, Deserialize};
+use crate::eventsqlapi::LocalEventSqlApi;
 use crate::filenode::{META_FILE_APPEND, META_FILE_CRC, META_FILE_READ, META_FILE_SHA1, META_FILE_SIZE, META_FILE_STAT, META_FILE_TRUNCATE, META_FILE_WRITE};
 use crate::rpcvalueext::RpcValueExt;
 use crate::rpctype::RpcType;
@@ -17,7 +16,7 @@ use crate::qxchange::{self, Data, LateEntry, QxChangeRecord};
 use crate::qxeventconfig::Role;
 use crate::remotedbsqlapi::RemoteEventSqlApi;
 use crate::{anyhow_to_rpc_error, filenode, resolve_error, split_first_fragment, str_to_rpc_error};
-use crate::state::{open_event, setup_remote_db_recchng_monitoring, pulled_event_db_file, pushed_event_db_file, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
+use crate::state::{open_event, setup_remote_db_recchng_monitoring, pulled_event_db_file, pushed_event_db_file, EventDbMode, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
 
 
 #[derive(Debug)]
@@ -382,7 +381,12 @@ pub(crate) async fn request_handler(
                                     return Err::<RpcValue, _>(str_to_rpc_error("user id is required"));
                                 };
                                 app_state.read().await.opened_event_status(event_id).await.map_err(anyhow_to_rpc_error)?;
-                                let qxsql = RemoteEventSqlApi::new(event_id, client_cmd_tx.clone());
+                                let db_mode = app_state.write().await.event_db_mode(event_id).await.map_err(anyhow_to_rpc_error)?;
+                                let qxsql = match db_mode {
+                                    EventDbMode::Replica => EventRecordApi::Remote(RemoteEventSqlApi::new(event_id, client_cmd_tx.clone())),
+                                    EventDbMode::Master => EventRecordApi::Local(LocalEventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone())),
+                                    _ => return Err(str_to_rpc_error(&format!("Late entries cannot be updated in {db_mode:?} DB mode"))),
+                                };
                                 if let Some(qxchange_id) = params.change_id {
                                     if params.late_entry.is_none() {
                                         // delete existing record with no changes
@@ -468,7 +472,7 @@ pub(crate) async fn request_handler(
                         METH_SQL_QUERY => m.resolve(rights.await, async move || {
                             let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
                                 .map_err(|err| str_to_rpc_error(&err))?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            let sql_api = LocalEventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.query(query.query(), query.params()).await
                                 .map(|res| res.to_rpcvalue())
                                 .map_err(anyhow_to_rpc_error)
@@ -476,7 +480,7 @@ pub(crate) async fn request_handler(
                         METH_SQL_EXEC => m.resolve(rights.await, async move || {
                             let query = QueryAndParams::try_from(rq.param().unwrap_or_default())
                                 .map_err(|err| str_to_rpc_error(&err))?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            let sql_api = LocalEventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.exec(query.query(), query.params()).await
                                 .map(|res| res.to_rpcvalue())
                                 .map_err(anyhow_to_rpc_error)
@@ -484,7 +488,7 @@ pub(crate) async fn request_handler(
                         METH_SQL_CREATE => m.resolve(rights.await, async move || {
                             let param = RecInsertParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(|err| str_to_rpc_error(&err))?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            let sql_api = LocalEventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.create_record_with_recchng(&param.table, &param.record, param.issuer).await
                                 .map(|res| res.to_rpcvalue())
                                 .map_err(anyhow_to_rpc_error)
@@ -493,7 +497,7 @@ pub(crate) async fn request_handler(
                             let param = RecReadParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(|err| str_to_rpc_error(&err))?;
                             let fields = qxsql::string_list_to_ref_vec(&param.fields);
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            let sql_api = LocalEventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.read_record(&param.table, param.id, fields).await
                                 .map(|res| res.to_rpcvalue())
                                 .map_err(anyhow_to_rpc_error)
@@ -501,7 +505,7 @@ pub(crate) async fn request_handler(
                         METH_SQL_UPDATE => m.resolve(rights.await, async move || {
                             let param = RecUpdateParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(|err| str_to_rpc_error(&err))?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            let sql_api = LocalEventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.update_record_with_recchng(&param.table, param.id, &param.record, param.issuer).await
                                 .map(|res| res.to_rpcvalue())
                                 .map_err(anyhow_to_rpc_error)
@@ -509,7 +513,7 @@ pub(crate) async fn request_handler(
                         METH_SQL_DELETE => m.resolve(rights.await, async move || {
                             let param = RecDeleteParam::try_from(rq.param().unwrap_or_default())
                                 .map_err(|err| str_to_rpc_error(&err))?;
-                            let sql_api = EventSqlApi::new(event_id, app_state, client_cmd_tx);
+                            let sql_api = LocalEventSqlApi::new(event_id, app_state, client_cmd_tx);
                             sql_api.delete_record_with_recchng(&param.table, param.id, param.issuer).await
                                 .map(|res| res.to_rpcvalue())
                                 .map_err(anyhow_to_rpc_error)
@@ -591,6 +595,33 @@ pub(crate) async fn request_handler(
                     }).await
                 }
             }
+        }
+    }
+}
+
+/// Record API used by late entry updates: local event DB in Master mode, remote DB in Replica mode.
+enum EventRecordApi {
+    Local(LocalEventSqlApi),
+    Remote(RemoteEventSqlApi),
+}
+
+impl EventRecordApi {
+    async fn create_record_event(&self, table: &str, record: &qxsql::Record, issuer: Option<String>) -> anyhow::Result<i64> {
+        match self {
+            Self::Local(api) => api.create_record_with_recchng(table, record, issuer).await,
+            Self::Remote(api) => api.create_record_event(table, record, issuer).await,
+        }
+    }
+    async fn update_record_event(&self, table: &str, id: i64, record: &qxsql::Record, issuer: Option<String>) -> anyhow::Result<bool> {
+        match self {
+            Self::Local(api) => api.update_record_with_recchng(table, id, record, issuer).await,
+            Self::Remote(api) => api.update_record_event(table, id, record, issuer).await,
+        }
+    }
+    async fn delete_record_event(&self, table: &str, id: i64, issuer: Option<String>) -> anyhow::Result<bool> {
+        match self {
+            Self::Local(api) => api.delete_record_with_recchng(table, id, issuer).await,
+            Self::Remote(api) => api.delete_record_event(table, id, issuer).await,
         }
     }
 }

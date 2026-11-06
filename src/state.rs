@@ -25,7 +25,7 @@ use shvrpc::util::join_path;
 
 use crate::localdbsqlapi::LocalDbSqlApi;
 use crate::eventdb::{migrate_db, migrate_db_file};
-use crate::eventsqlapi::EventSqlApi;
+use crate::eventsqlapi::LocalEventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
 use crate::qxeventconfig::QxEventConfig;
@@ -460,7 +460,7 @@ async fn run_remote_db_recchng_monitoring(app_state: SharedAppState, event_id: E
 }
 
 async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) -> anyhow::Result<()> {
-    let sql_api = EventSqlApi::new(event_id, app_state, rpc_client);
+    let sql_api = LocalEventSqlApi::new(event_id, app_state, rpc_client);
 
     match &recchng.op {
         RecOp::Insert => match recchng.record.as_ref() {

@@ -40,7 +40,6 @@ impl RemoteEventSqlApi {
             .map_err(call_rpc_error_to_anyhow)?;
         Ok(updated)
     }
-    #[allow(dead_code)]
     pub async fn delete_record_event(&self, table: &str, id: i64, issuer: Option<String>) -> anyhow::Result<bool> {
         let param = RecDeleteParam {
             table: table.to_string(),
