@@ -556,15 +556,10 @@ pub(crate) async fn request_handler(
         }
         EventCtlNode::PullEventDbFileNode(event_id) => {
             const METH_PULL_DB_SNAPSHOT: &str = "snapshot";
-            const METH_PULL_DB_ORIGINAL_DATA_SHA1: &str = "originalDataSha1";
             const PULL_EVENT_DB_FILE_NODE_METHODS: &[MetaMethod] = &[
                 META_METHOD_DIR, META_METHOD_LS, META_FILE_STAT, META_FILE_SIZE, META_FILE_CRC, META_FILE_SHA1, META_FILE_READ,
                 MetaMethod::new_static(
                     METH_PULL_DB_SNAPSHOT, Flags::UserIDRequired, AccessLevel::Service, "n", "n", &[], "",
-                ),
-                MetaMethod::new_static(
-                    // SHA-1 of the decompressed snapshot, to verify the downloaded data
-                    METH_PULL_DB_ORIGINAL_DATA_SHA1, Flags::UserIDRequired, AccessLevel::Service, "n", "b(20)", &[], "",
                 ),
             ];
             let methods = PULL_EVENT_DB_FILE_NODE_METHODS;
@@ -579,15 +574,6 @@ pub(crate) async fn request_handler(
                             State::snapshot_event_db(app_state, event_id).await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(RpcValue::null())
-                        });
-                    }
-                    if method == METH_PULL_DB_ORIGINAL_DATA_SHA1 {
-                        return m.resolve(rights.await, async move || {
-                            app_state.read().await.pulled_db_sha1.get(&event_id).cloned()
-                                .map(RpcValue::from)
-                                .ok_or_else(|| anyhow_to_rpc_error(anyhow::anyhow!(
-                                    "Event {event_id} DB snapshot SHA-1 is not known, call {METH_PULL_DB_SNAPSHOT} first"
-                                )))
                         });
                     }
                     filenode::resolve_op(&m, &rq, methods, rights, async move |op| {

@@ -40,9 +40,6 @@ pub(crate) struct State {
     pub db_pool: async_sqlite::Pool,
     pub open_events: BTreeMap<EventId, Arc<RwLock<OpenEventCtl>>>,
     pub event_records: HashMap<EventId, Arc<RwLock<EventRecord>>>,
-    /// SHA-1 of the uncompressed data of the pullDb snapshot, it is not persistent,
-    /// so the snapshot must be created again after restart to get it.
-    pub pulled_db_sha1: HashMap<EventId, Vec<u8>>,
     pub shutdown_sender: Option<channel::Sender<()>>,
 }
 
@@ -233,7 +230,7 @@ impl State {
     }
 
     /// Create the zlib compressed file served by the pullDb file node, it replaces the previous
-    /// one atomically. The SHA-1 of the uncompressed data is kept in `pulled_db_sha1`.
+    /// one atomically.
     pub async fn snapshot_event_db(app_state: SharedAppState, event_id: EventId) -> anyhow::Result<()> {
         let snapshot_file = pulled_event_db_file(event_id);
         let tmp_file = format!("{snapshot_file}.tmp-{:016x}", rand::random::<u64>());
@@ -261,22 +258,13 @@ impl State {
         let result = match create_result {
             Ok(()) => {
                 let tmp_file = tmp_file.clone();
-                let compressed_file = compressed_tmp_file.clone();
-                let compress_result = smol::unblock(move || {
-                    deflate_file(&tmp_file, &compressed_file)
-                        .map_err(|e| anyhow!("Failed to compress event {event_id} DB: {e}"))
-                }).await;
-                match compress_result {
-                    // The write lock ensures that the snapshot and its SHA-1 are replaced together.
-                    Ok(sha1) => {
-                        let mut state = app_state.write().await;
-                        state.pulled_db_sha1.remove(&event_id);
-                        std::fs::rename(&compressed_tmp_file, &snapshot_file)?;
-                        state.pulled_db_sha1.insert(event_id, sha1);
-                        Ok(())
-                    }
-                    Err(err) => Err(err),
-                }
+                let compressed_tmp_file = compressed_tmp_file.clone();
+                smol::unblock(move || {
+                    deflate_file(&tmp_file, &compressed_tmp_file)
+                        .map_err(|e| anyhow!("Failed to compress event {event_id} DB: {e}"))?;
+                    std::fs::rename(&compressed_tmp_file, &snapshot_file)?;
+                    Ok(())
+                }).await
             }
             Err(err) => Err(err),
         };
@@ -311,7 +299,6 @@ impl State {
         self.close_event(event_id, rpc_client.clone()).await?;
         let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client);
         let was_deleted = qxsql.delete_record_with_recchng("events", event_id, None).await?;
-        self.pulled_db_sha1.remove(&event_id);
         Ok(was_deleted)
     }
 
@@ -698,24 +685,11 @@ fn inflate_file(zlib_file: &str, out_file: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Compress the file, returns SHA-1 of the original data.
-fn deflate_file(in_file: &str, zlib_file: &str) -> std::io::Result<Vec<u8>> {
-    use sha1::{Digest, Sha1};
-    use std::io::{Read, Write};
+fn deflate_file(in_file: &str, zlib_file: &str) -> std::io::Result<()> {
     let mut encoder = ZlibEncoder::new(std::fs::File::create(zlib_file)?, Compression::default());
-    let mut input = std::fs::File::open(in_file)?;
-    let mut hasher = Sha1::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = input.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        encoder.write_all(&buf[..n])?;
-    }
+    std::io::copy(&mut std::fs::File::open(in_file)?, &mut encoder)?;
     encoder.finish()?;
-    Ok(hasher.finalize().to_vec())
+    Ok(())
 }
 
 fn event_db_file(event_id: EventId) -> String {

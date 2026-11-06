@@ -530,7 +530,7 @@ fn pull_db_node_ls_and_dir() {
         let res = pull_db_call(&mut client, event_id, "ls", "").await.unwrap();
         assert_eq!(res.to_cpon(), "[]");
         let res = pull_db_call(&mut client, event_id, "dir", "").await.unwrap().to_cpon();
-        for method in ["stat", "size", "crc", "sha1", "read", "snapshot", "originalDataSha1"] {
+        for method in ["stat", "size", "crc", "sha1", "read", "snapshot"] {
             assert!(res.contains(&format!(r#""{method}""#)), "{method}: {res}");
         }
         for method in ["write", "truncate", "append"] {
@@ -561,7 +561,7 @@ fn pull_db_requires_snapshot() {
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
         write_event_db(event_id, b"database");
 
-        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("sha1", ""), ("read", "[0,10]"), ("originalDataSha1", "")] {
+        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("sha1", ""), ("read", "[0,10]")] {
             pull_db_call(&mut client, event_id, method, param).await.expect_err(method);
         }
     });
@@ -594,18 +594,13 @@ fn pull_db_snapshot_is_stable_until_refreshed() {
         crc.update(&compressed);
         assert_eq!(pull_db_call(&mut client, event_id, "crc", "").await.unwrap().to_cpon(), format!("{}u", crc.sum()));
         assert_eq!(pull_db_call(&mut client, event_id, "sha1", "").await.unwrap().as_blob(), Sha1::digest(&compressed).to_vec());
-        // originalDataSha1 describes the decompressed data
-        assert_eq!(pull_db_call(&mut client, event_id, "originalDataSha1", "").await.unwrap().as_blob(), SHA1_123456789);
 
         // change of the database does not affect the running download
         write_event_db(event_id, b"new");
         assert_eq!(pull_db_read_all(&mut client, event_id).await, b"123456789");
 
-        assert_eq!(pull_db_call(&mut client, event_id, "originalDataSha1", "").await.unwrap().as_blob(), SHA1_123456789);
-
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
         assert_eq!(pull_db_read_all(&mut client, event_id).await, b"new");
-        assert_eq!(pull_db_call(&mut client, event_id, "originalDataSha1", "").await.unwrap().as_blob(), Sha1::digest(b"new").to_vec());
     });
 }
 
@@ -656,7 +651,7 @@ fn pull_db_access_rights() {
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
 
         // stranger with Read access is not allowed
-        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("sha1", ""), ("read", "[0,1]"), ("snapshot", ""), ("originalDataSha1", "")] {
+        for (method, param) in [("stat", ""), ("size", ""), ("crc", ""), ("sha1", ""), ("read", "[0,1]"), ("snapshot", "")] {
             assert_permission_denied(client.call(pull_db_request(event_id, method, param, "eve", AccessLevel::Read)).await);
         }
 
