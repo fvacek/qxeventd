@@ -1,7 +1,7 @@
 name: qxbroker
 listen:
 - url: tcp://0.0.0.0:3755
-- url: ws://localhost:3777
+- url: ws://0.0.0.0:3777
 use_access_db: true
 shv2_compatibility: false
 data_directory: /tmp/qx/shvbroker
