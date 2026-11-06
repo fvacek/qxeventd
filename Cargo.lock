@@ -1514,7 +1514,7 @@ dependencies = [
 [[package]]
 name = "qxsql"
 version = "0.2.0"
-source = "git+https://github.com/fvacek/qxsql.git?branch=master#6ad8b9b3f8a6fcdd32bdf4d63007bec5ad0990fb"
+source = "git+https://github.com/fvacek/qxsql.git?branch=master#6a06693e090bb0ca2390674cb51e1fcc8a0b9bd6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1532,7 +1532,7 @@ dependencies = [
 [[package]]
 name = "qxsql-derive"
 version = "0.1.0"
-source = "git+https://github.com/fvacek/qxsql.git?branch=master#6ad8b9b3f8a6fcdd32bdf4d63007bec5ad0990fb"
+source = "git+https://github.com/fvacek/qxsql.git?branch=master#6a06693e090bb0ca2390674cb51e1fcc8a0b9bd6"
 dependencies = [
  "proc-macro2",
  "quote",

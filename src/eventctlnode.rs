@@ -348,7 +348,7 @@ pub(crate) async fn request_handler(
                 META_METHOD_DIR,
                 META_METHOD_LS,
                 MetaMethod::new_static(
-                    METH_EVENT_UPDATE_LATE_ENTRY, Flags::UserIDRequired, AccessLevel::Write, "{i:run_id,{?}:record}", "b|i", &[], "",
+                    METH_EVENT_UPDATE_LATE_ENTRY, Flags::UserIDRequired, AccessLevel::Read, "{i:run_id,{?}:record}", "b|i", &[], "",
                 ),
                 MetaMethod::new_static(
                     METH_EVENT_STATUS, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
@@ -375,8 +375,7 @@ pub(crate) async fn request_handler(
                                 Ok(params) => params,
                                 Err(err) => return resolve_error(&m, EVENTCTL_NODE_METHODS, anyhow::anyhow!(err)),
                             };
-                            let methods = escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_NODE_METHODS).await;
-                            m.resolve(methods, async move || {
+                            m.resolve(EVENTCTL_NODE_METHODS, async move || {
                                 let Some(user_id) = sanitize_user_id(&rq).map(str::to_string) else {
                                     return Err::<RpcValue, _>(str_to_rpc_error("user id is required"));
                                 };

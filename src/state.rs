@@ -387,10 +387,10 @@ pub(crate) async fn setup_remote_db_recchng_monitoring(app_state: SharedAppState
         // event is not open, monitoring will be started when it is opened
         return;
     };
-    smol::spawn(run_remote_db_recchng_monitoring(app_state, event_id, event, rpc_client)).detach();
+    smol::spawn(remote_db_recchng_monitoring_task(app_state, event_id, event, rpc_client)).detach();
 }
 
-async fn run_remote_db_recchng_monitoring(app_state: SharedAppState, event_id: EventId, event: Arc<RwLock<OpenEventCtl>>, rpc_client: ClientCommandSender) {
+async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: EventId, event: Arc<RwLock<OpenEventCtl>>, rpc_client: ClientCommandSender) {
     let ping_result: anyhow::Result<()> = rpc_client
         .call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>)
         .await

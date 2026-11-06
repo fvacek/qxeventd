@@ -60,4 +60,8 @@ impl qxsql::QxSqlApiRecChng for LocalEventSqlApi {
     async fn client_command_sender(&self) -> Option<ClientCommandSender>  {
             Some(self.rpc_client.clone())
     }
+
+    fn recchng_shv_path(&self) -> String {
+        format!("eventctl/{}/sql", self.event_id)
+    }
 }
