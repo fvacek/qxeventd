@@ -46,14 +46,14 @@ impl From<Data> for DbValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LateEntryId {
-    RunId(i64),
-    ClassId(i64),
+pub enum LateEntryKind {
+    Update { run_id: i64 },
+    NewEntry { class_id: i64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LateEntry {
-    pub id: LateEntryId,
+    pub id: LateEntryKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firstname: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

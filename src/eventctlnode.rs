@@ -398,8 +398,8 @@ pub(crate) async fn request_handler(
                                 } else {
                                     let (foreign_table, foreign_id) = if let Some(le) = &params.late_entry {
                                         match le.id {
-                                            qxchange::LateEntryId::RunId(id) => ("runs".to_string(), id),
-                                            qxchange::LateEntryId::ClassId(id) => ("classes".to_string(), id),
+                                            qxchange::LateEntryKind::Update { run_id: id } => ("runs".to_string(), id),
+                                            qxchange::LateEntryKind::NewEntry { class_id: id } => ("classes".to_string(), id),
                                         }
                                     } else {
                                         return Err(str_to_rpc_error("Run or Class ID is required"));
