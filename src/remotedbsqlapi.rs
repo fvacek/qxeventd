@@ -19,37 +19,6 @@ impl RemoteEventSqlApi {
             rpc_client,
         }
     }
-    pub async fn create_record_event(&self, table: &str, record: &Record, issuer: Option<String>) -> anyhow::Result<i64> {
-        let param = RecInsertParam {
-            table: table.to_string(),
-            record: record.clone(),
-            issuer,
-        };
-        let id: i64 = self.rpc_client.call_rpc_method(remote_event_sql_path(self.event_id), "create", Some(to_rpcvalue(&param)?), None, None, None::<fn(f64)>).await
-            .map_err(call_rpc_error_to_anyhow)?;
-        Ok(id)
-    }
-    pub async fn update_record_event(&self, table: &str, id: i64, record: &Record, issuer: Option<String>) -> anyhow::Result<bool> {
-        let param = RecUpdateParam {
-            table: table.to_string(),
-            id,
-            record: record.clone(),
-            issuer,
-        };
-        let updated: bool = self.rpc_client.call_rpc_method(remote_event_sql_path(self.event_id), "update", Some(to_rpcvalue(&param)?), None, None, None::<fn(f64)>).await
-            .map_err(call_rpc_error_to_anyhow)?;
-        Ok(updated)
-    }
-    pub async fn delete_record_event(&self, table: &str, id: i64, issuer: Option<String>) -> anyhow::Result<bool> {
-        let param = RecDeleteParam {
-            table: table.to_string(),
-            id,
-            issuer,
-        };
-        let deleted: bool = self.rpc_client.call_rpc_method(remote_event_sql_path(self.event_id), "delete", Some(to_rpcvalue(&param)?), None, None, None::<fn(f64)>).await
-            .map_err(call_rpc_error_to_anyhow)?;
-        Ok(deleted)
-    }
 }
 
 #[async_trait]
@@ -68,6 +37,41 @@ impl qxsql::QxSqlApi for RemoteEventSqlApi {
             .map_err(call_rpc_error_to_anyhow)?;
         let res: ExecResult = from_rpcvalue(&rpc_value)?;
         Ok(res)
+    }
+
+    // Record operations are forwarded as RPC calls, so the remote side emits the recchng signals.
+    async fn create_record(&self, table: &str, record: &Record) -> anyhow::Result<i64> {
+        let param = RecInsertParam {
+            table: table.to_string(),
+            record: record.clone(),
+            issuer: None,
+        };
+        let id: i64 = self.rpc_client.call_rpc_method(remote_event_sql_path(self.event_id), "create", Some(to_rpcvalue(&param)?), None, None, None::<fn(f64)>).await
+            .map_err(call_rpc_error_to_anyhow)?;
+        Ok(id)
+    }
+
+    async fn update_record(&self, table: &str, id: i64, record: &Record) -> anyhow::Result<bool> {
+        let param = RecUpdateParam {
+            table: table.to_string(),
+            id,
+            record: record.clone(),
+            issuer: None,
+        };
+        let updated: bool = self.rpc_client.call_rpc_method(remote_event_sql_path(self.event_id), "update", Some(to_rpcvalue(&param)?), None, None, None::<fn(f64)>).await
+            .map_err(call_rpc_error_to_anyhow)?;
+        Ok(updated)
+    }
+
+    async fn delete_record(&self, table: &str, id: i64) -> anyhow::Result<bool> {
+        let param = RecDeleteParam {
+            table: table.to_string(),
+            id,
+            issuer: None,
+        };
+        let deleted: bool = self.rpc_client.call_rpc_method(remote_event_sql_path(self.event_id), "delete", Some(to_rpcvalue(&param)?), None, None, None::<fn(f64)>).await
+            .map_err(call_rpc_error_to_anyhow)?;
+        Ok(deleted)
     }
 }
 

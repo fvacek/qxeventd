@@ -775,9 +775,9 @@ fn sql_api_access_rights() {
         assert_permission_denied(client.call(request(&path, "exec", exec, "eve", AccessLevel::Read)).await);
         assert_permission_denied(client.call(request(&path, "create", create, "eve", AccessLevel::Read)).await);
 
-        // invalid api token is rejected even for read
-        client.call(with_api_token(request(&path, "query", r#"["SELECT 1",{}]"#, "eve", AccessLevel::Read), "invalid")).await
-            .expect_err("invalid api token cannot query");
+        // invalid api token is rejected even if the user has Write access
+        client.call(with_api_token(request(&path, "create", create, "writer", AccessLevel::Write), "invalid")).await
+            .expect_err("invalid api token cannot create");
 
         // valid api token and Write access can write
         client.call(with_api_token(request(&path, "create", create, "eve", AccessLevel::Read), &api_token)).await

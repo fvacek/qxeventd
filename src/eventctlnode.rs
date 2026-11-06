@@ -382,22 +382,23 @@ pub(crate) async fn request_handler(
                                 };
                                 app_state.read().await.opened_event_status(event_id).await.map_err(anyhow_to_rpc_error)?;
                                 let db_mode = app_state.write().await.event_db_mode(event_id).await.map_err(anyhow_to_rpc_error)?;
-                                let qxsql = match db_mode {
-                                    EventDbMode::Replica => EventRecordApi::Remote(RemoteEventSqlApi::new(event_id, client_cmd_tx.clone())),
-                                    EventDbMode::Master => EventRecordApi::Local(LocalEventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone())),
+                                // Replica writes go to the remote master DB; Master writes go to the local event DB.
+                                let qxsql: Box<dyn QxSqlApiRecChng> = match db_mode {
+                                    EventDbMode::Replica => Box::new(RemoteEventSqlApi::new(event_id, client_cmd_tx.clone())),
+                                    EventDbMode::Master => Box::new(LocalEventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone())),
                                     _ => return Err(str_to_rpc_error(&format!("Late entries cannot be updated in {db_mode:?} DB mode"))),
                                 };
                                 if let Some(qxchange_id) = params.change_id {
                                     if params.late_entry.is_none() {
                                         // delete existing record with no changes
-                                        let ok = qxsql.delete_record_event("qxchanges", qxchange_id, None).await.map_err(anyhow_to_rpc_error)?;
+                                        let ok = qxsql.delete_record_with_recchng("qxchanges", qxchange_id, None).await.map_err(anyhow_to_rpc_error)?;
                                         return Ok(RpcValue::from(ok))
                                     }
                                     let qxchange = QxChangeRecord {
                                         data: params.late_entry.map(|le| Data::LateEntry(le)),
                                         ..Default::default()
                                     };
-                                    let ok = qxsql.update_record_event("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
+                                    let ok = qxsql.update_record_with_recchng("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(ok))
                                 } else {
                                     let (foreign_table, foreign_id) = if let Some(le) = &params.late_entry {
@@ -418,7 +419,7 @@ pub(crate) async fn request_handler(
                                         status: Some(qxchange::Status::Pending),
                                         status_message: None,
                                     };
-                                    let id = qxsql.create_record_event("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
+                                    let id = qxsql.create_record_with_recchng("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(id))
                                 }
                             })
@@ -595,33 +596,6 @@ pub(crate) async fn request_handler(
                     }).await
                 }
             }
-        }
-    }
-}
-
-/// Record API used by late entry updates: local event DB in Master mode, remote DB in Replica mode.
-enum EventRecordApi {
-    Local(LocalEventSqlApi),
-    Remote(RemoteEventSqlApi),
-}
-
-impl EventRecordApi {
-    async fn create_record_event(&self, table: &str, record: &qxsql::Record, issuer: Option<String>) -> anyhow::Result<i64> {
-        match self {
-            Self::Local(api) => api.create_record_with_recchng(table, record, issuer).await,
-            Self::Remote(api) => api.create_record_event(table, record, issuer).await,
-        }
-    }
-    async fn update_record_event(&self, table: &str, id: i64, record: &qxsql::Record, issuer: Option<String>) -> anyhow::Result<bool> {
-        match self {
-            Self::Local(api) => api.update_record_with_recchng(table, id, record, issuer).await,
-            Self::Remote(api) => api.update_record_event(table, id, record, issuer).await,
-        }
-    }
-    async fn delete_record_event(&self, table: &str, id: i64, issuer: Option<String>) -> anyhow::Result<bool> {
-        match self {
-            Self::Local(api) => api.delete_record_with_recchng(table, id, issuer).await,
-            Self::Remote(api) => api.delete_record_event(table, id, issuer).await,
         }
     }
 }
