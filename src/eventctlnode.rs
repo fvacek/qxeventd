@@ -17,7 +17,7 @@ use crate::qxchange::{self, Data, LateEntry, QxChangeRecord};
 use crate::qxeventconfig::Role;
 use crate::remotedbsqlapi::RemoteEventSqlApi;
 use crate::{anyhow_to_rpc_error, filenode, resolve_error, split_first_fragment, str_to_rpc_error};
-use crate::state::{open_event, pulled_event_db_file, pushed_event_db_file, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
+use crate::state::{open_event, setup_remote_db_recchng_monitoring, pulled_event_db_file, pushed_event_db_file, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
 
 
 #[derive(Debug)]
@@ -302,8 +302,11 @@ pub(crate) async fn request_handler(
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(p.event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
-                                let res = app_state.write().await.set_event_db_mode(p.event_id, p.db_mode, client_cmd_tx).await
+                                let res = app_state.write().await.set_event_db_mode(p.event_id, p.db_mode, client_cmd_tx.clone()).await
                                     .map_err(anyhow_to_rpc_error)?;
+                                if matches!(p.db_mode, crate::state::EventDbMode::Replica) {
+                                    setup_remote_db_recchng_monitoring(app_state, p.event_id, client_cmd_tx).await;
+                                }
                                 Ok(res)
                             })
                         }

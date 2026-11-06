@@ -373,18 +373,30 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
     rpc_client.send_message(message)
         .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
-    smol::spawn(setup_qe_recchng_monitoring(app_state.clone(), event_id, event, rpc_client.clone())).detach();
+    if matches!(event_record.db_mode, EventDbMode::Replica) {
+        setup_remote_db_recchng_monitoring(app_state.clone(), event_id, rpc_client.clone()).await;
+    }
 
     Ok(event_shv_path)
 }
 
-async fn setup_qe_recchng_monitoring(app_state: SharedAppState, event_id: EventId, event: Arc<RwLock<OpenEventCtl>>, rpc_client: ClientCommandSender) {
+/// Starts remote DB recchng monitoring for an open event.
+/// Has to be called whenever event DB mode changes to Replica.
+pub(crate) async fn setup_remote_db_recchng_monitoring(app_state: SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) {
+    let Some(event) = app_state.read().await.open_events.get(&event_id).cloned() else {
+        // event is not open, monitoring will be started when it is opened
+        return;
+    };
+    smol::spawn(run_remote_db_recchng_monitoring(app_state, event_id, event, rpc_client)).detach();
+}
+
+async fn run_remote_db_recchng_monitoring(app_state: SharedAppState, event_id: EventId, event: Arc<RwLock<OpenEventCtl>>, rpc_client: ClientCommandSender) {
     let ping_result: anyhow::Result<()> = rpc_client
         .call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>)
         .await
         .map_err(|_| anyhow!("Failed to ping DB service."));
     if let Err(err) = ping_result {
-        warn!("Remote DB connection for event {event_id} not available");
+        warn!("Remote DB connection for event {event_id} not available, error: {err}");
         return;
     }
 
@@ -425,7 +437,8 @@ async fn setup_qe_recchng_monitoring(app_state: SharedAppState, event_id: EventI
                             }
                         };
                         if !matches!(db_mode, EventDbMode::Replica) {
-                            continue;
+                            info!("Event {event_id} DB mode is {db_mode:?}, stopping remote DB synchronization");
+                            break;
                         }
                         match rechng_from_rpcvalue(message.param()) {
                             Ok(recchng) => match apply_remote_db_recchng(app_state.clone(), event_id, &recchng, rpc_client.clone()).await {
