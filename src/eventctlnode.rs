@@ -105,8 +105,7 @@ async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState,
     };
 
     if !mm.flags.contains(Flags::UserIDRequired) {
-        warn!("Method: {method_name} should require a user id, if it uses user rights escalation");
-        return vec![];
+        return vec![ mm.clone() ];
     }
 
     let Some(event_id) = event_id else {
@@ -439,7 +438,7 @@ pub(crate) async fn request_handler(
             const EVENTCTL_SQL_NODE_METHODS: &[MetaMethod] = &[
                 META_METHOD_DIR, META_METHOD_LS,
                 MetaMethod::new_static(
-                    METH_SQL_QUERY, Flags::UserIDRequired, AccessLevel::Read, QUERY_PARAMS, QUERY_RESULT, &[], "",
+                    METH_SQL_QUERY, Flags::None, AccessLevel::Read, QUERY_PARAMS, QUERY_RESULT, &[], "",
                 ),
                 MetaMethod::new_static(
                     METH_SQL_EXEC, Flags::UserIDRequired, AccessLevel::Write, EXEC_PARAMS, EXEC_RESULT, &[], "",
@@ -448,7 +447,7 @@ pub(crate) async fn request_handler(
                     METH_SQL_CREATE, Flags::UserIDRequired, AccessLevel::Write, CREATE_PARAMS, CREATE_RESULT, &[], "",
                 ),
                 MetaMethod::new_static(
-                    METH_SQL_READ, Flags::UserIDRequired, AccessLevel::Read, READ_PARAMS, READ_RESULT, &[], "",
+                    METH_SQL_READ, Flags::None, AccessLevel::Read, READ_PARAMS, READ_RESULT, &[], "",
                 ),
                 MetaMethod::new_static(
                     METH_SQL_UPDATE, Flags::UserIDRequired, AccessLevel::Write, UPDATE_PARAMS, UPDATE_RESULT, &[], "",
