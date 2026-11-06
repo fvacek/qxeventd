@@ -40,6 +40,8 @@ pub struct TestClient {
     conn_cmd_rx: UnboundedReceiver<ConnectionCommand>,
     /// Signals sent by qxeventd, collected while waiting for responses
     pub signals: Vec<RpcMessage>,
+    /// Whether the mocked remote event DB service answers ping
+    pub remote_db_available: bool,
     _client_task: smol::Task<()>,
 }
 
@@ -53,7 +55,7 @@ impl TestClient {
         });
         let (conn_cmd_tx, conn_cmd_rx) = unbounded();
         conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx)).unwrap();
-        Self { conn_evt_tx, conn_cmd_rx, signals: vec![], _client_task: client_task }
+        Self { conn_evt_tx, conn_cmd_rx, signals: vec![], remote_db_available: true, _client_task: client_task }
     }
 
     fn send(&self, msg: &RpcMessage) {
@@ -72,12 +74,12 @@ impl TestClient {
     }
 
     /// Mocked responses of broker to requests sent by qxeventd
-    fn mock_broker_response(rq: &RpcMessage) -> Result<RpcValue, RpcError> {
+    fn mock_broker_response(&self, rq: &RpcMessage) -> Result<RpcValue, RpcError> {
         match (rq.shv_path().unwrap_or_default(), rq.method().unwrap_or_default()) {
             (".broker/access/mounts", "setValue") => Ok(true.into()),
             (".broker", "ls") => Ok(vec![RpcValue::from("client")].into()),
             (".broker/currentClient", "subscribe") => Ok(true.into()),
-            (path, "ping") if path.ends_with("/.app") => Ok(RpcValue::null()),
+            (path, "ping") if path.ends_with("/.app") && self.remote_db_available => Ok(RpcValue::null()),
             (path, method) => Err(RpcError::new(RpcErrorCode::MethodNotFound, format!("mock broker: {path}:{method}"))),
         }
     }
@@ -96,7 +98,7 @@ impl TestClient {
                 // delay response, wait for the next one
             } else if msg.is_request() {
                 let mut resp = msg.prepare_response().unwrap();
-                match Self::mock_broker_response(&msg) {
+                match self.mock_broker_response(&msg) {
                     Ok(result) => resp.set_result(result),
                     Err(err) => resp.set_error(err),
                 };

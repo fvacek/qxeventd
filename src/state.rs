@@ -361,32 +361,30 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
     let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
     let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
     let now = chrono::Utc::now();
-    state.open_events.insert(event_id, Arc::new(RwLock::new(OpenEventCtl {
+    let event = Arc::new(RwLock::new(OpenEventCtl {
         db: pool,
         open_at: now,
         touched_at: now,
-    })));
+    }));
+    state.open_events.insert(event_id, event.clone());
     drop(state);
 
     let message = RpcMessage::new_signal("event", "lsmod").with_param(true);
     rpc_client.send_message(message)
         .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
-    smol::spawn(setup_remote_db_connection(app_state.clone(), event_id, rpc_client.clone())).detach();
+    smol::spawn(setup_qe_recchng_monitoring(app_state.clone(), event_id, event, rpc_client.clone())).detach();
 
     Ok(event_shv_path)
 }
 
-async fn setup_remote_db_connection(app_state: SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) {
+async fn setup_qe_recchng_monitoring(app_state: SharedAppState, event_id: EventId, event: Arc<RwLock<OpenEventCtl>>, rpc_client: ClientCommandSender) {
     let ping_result: anyhow::Result<()> = rpc_client
         .call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>)
         .await
         .map_err(|_| anyhow!("Failed to ping DB service."));
     if let Err(err) = ping_result {
-        error!("Failed to set up remote DB connection for event {event_id}: {err}");
-        if let Err(close_err) = app_state.write().await.close_event(event_id, rpc_client.clone()).await {
-            error!("Failed to close event {event_id} after remote DB setup failure: {close_err}");
-        }
+        warn!("Remote DB connection for event {event_id} not available");
         return;
     }
 
@@ -394,9 +392,6 @@ async fn setup_remote_db_connection(app_state: SharedAppState, event_id: EventId
         Ok(ri) => ri,
         Err(err) => {
             error!("Failed to create subscription request for event {event_id}: {err}");
-            if let Err(close_err) = app_state.write().await.close_event(event_id, rpc_client.clone()).await {
-                error!("Failed to close event {event_id} after remote DB setup failure: {close_err}");
-            }
             return;
         }
     };
@@ -404,15 +399,18 @@ async fn setup_remote_db_connection(app_state: SharedAppState, event_id: EventId
     let mut subscriber = match rpc_client.subscribe(ri).await {
         Ok(subscriber) => subscriber,
         Err(err) => {
-            error!("Failed to subscribe to remote event {event_id}: {err}");
-            if let Err(close_err) = app_state.write().await.close_event(event_id, rpc_client.clone()).await {
-                error!("Failed to close event {event_id} after remote DB setup failure: {close_err}");
-            }
+            warn!("Failed to subscribe to remote event {event_id}, using local DB only: {err}");
             return;
         }
     };
 
     while let Some(frame) = subscriber.next().await {
+        let is_same_event_open = app_state.read().await.open_events.get(&event_id)
+            .is_some_and(|open_event| Arc::ptr_eq(open_event, &event));
+        if !is_same_event_open {
+            info!("Event {event_id} was closed, stopping remote DB synchronization");
+            break;
+        }
         match frame.to_rpcmesage() {
             Ok(message) => {
                 if message.is_signal() && message.method() == Some("recchng") {
@@ -445,10 +443,7 @@ async fn setup_remote_db_connection(app_state: SharedAppState, event_id: EventId
             Err(err) => error!("Failed to decode event {event_id} subscription message: {err}"),
         }
     }
-    info!("SQL recchng {event_id} subscription stream closed");
-    if let Err(err) = app_state.write().await.close_event(event_id, rpc_client).await {
-        error!("Failed to close event {event_id} after SQL recchng subscription closed: {err}");
-    }
+    info!("SQL recchng {event_id} subscription ended");
 }
 
 async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) -> anyhow::Result<()> {

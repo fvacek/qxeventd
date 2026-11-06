@@ -745,6 +745,24 @@ fn sql_api_requires_opened_event() {
 }
 
 #[test]
+fn event_stays_open_without_remote_db() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        client.remote_db_available = false;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        let event_id_param = format!(r#"{{"event_id":{event_id}}}"#);
+        client.call(request("eventctl", "openEvent", &event_id_param, "fanda", AccessLevel::Read)).await.unwrap();
+        // let the failed remote DB ping be answered and processed
+        client.call(request("eventctl", "eventData", &event_id_param, "fanda", AccessLevel::Read)).await.unwrap();
+        smol::Timer::after(std::time::Duration::from_millis(100)).await;
+
+        let path = format!("eventctl/{event_id}/sql");
+        let res = client.call(request(&path, "query", r#"["SELECT 1",{}]"#, "fanda", AccessLevel::Read)).await;
+        assert!(res.is_ok(), "{res:?}");
+    });
+}
+
+#[test]
 fn sql_api_access_rights() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
