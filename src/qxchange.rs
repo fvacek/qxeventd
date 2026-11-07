@@ -5,7 +5,6 @@ use rpc_type_derive::RecordChange;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, ToRecord, RecordChange)]
-#[record_change(derive(Debug, Clone, Default, Serialize, Deserialize))]
 pub struct QxChangeRecord {
     pub data_type: String,
     pub foreign_table: Option<String>,

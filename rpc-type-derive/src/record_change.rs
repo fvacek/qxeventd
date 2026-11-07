@@ -26,8 +26,10 @@
 //!
 //! # Struct attributes
 //! - `#[record_change(derive(...))]` — derives applied to the change struct, replacing the
-//!   default `Debug, Clone, Default, serde::Serialize, serde::Deserialize,
-//!   crate::rpctype::RpcTypeStr`; `derive()` means no derives
+//!   default `Debug, Clone, Default, serde::Serialize, serde::Deserialize`; `derive()` means
+//!   no derives
+//! - `#[record_change(rpc_type_str)]` — additionally derive `crate::rpctype::RpcTypeStr` for the
+//!   change struct, every field type has to implement `RpcTypeStr` then
 //!
 //! # Field attributes
 //! - `#[record_change(skip)]` — field is not part of the change struct
@@ -72,23 +74,32 @@ fn field_attrs(attrs: &[Attribute]) -> syn::Result<FieldAttrs> {
     Ok(res)
 }
 
-/// Derives listed in `#[record_change(derive(...))]`, `None` without the attribute
-fn struct_derives(attrs: &[Attribute]) -> syn::Result<Option<Vec<Path>>> {
-    let mut derives = None;
+#[derive(Default)]
+struct StructAttrs {
+    /// Derives listed in `#[record_change(derive(...))]`, `None` without the attribute
+    derives: Option<Vec<Path>>,
+    rpc_type_str: bool,
+}
+
+fn struct_attrs(attrs: &[Attribute]) -> syn::Result<StructAttrs> {
+    let mut res = StructAttrs::default();
     for attr in attrs.iter().filter(|a| a.path().is_ident("record_change")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("derive") {
-                let derives = derives.get_or_insert_with(Vec::new);
+                let derives = res.derives.get_or_insert_with(Vec::new);
                 meta.parse_nested_meta(|derive| {
                     derives.push(derive.path);
                     Ok(())
                 })
+            } else if meta.path.is_ident("rpc_type_str") {
+                res.rpc_type_str = true;
+                Ok(())
             } else {
                 Err(meta.error("unknown record_change struct attribute"))
             }
         })?;
     }
-    Ok(derives)
+    Ok(res)
 }
 
 fn is_option(ty: &Type) -> bool {
@@ -123,7 +134,8 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
         _ => return Err(syn::Error::new_spanned(input, "RecordChange requires a struct")),
     };
 
-    let derives = match struct_derives(&input.attrs)? {
+    let struct_attrs = struct_attrs(&input.attrs)?;
+    let mut derives = match struct_attrs.derives {
         Some(derives) => derives,
         // full paths, so they work without any imports at the call site
         None => vec![
@@ -132,9 +144,11 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
             syn::parse_quote!(::core::default::Default),
             syn::parse_quote!(::serde::Serialize),
             syn::parse_quote!(::serde::Deserialize),
-            syn::parse_quote!(crate::rpctype::RpcTypeStr),
         ],
     };
+    if struct_attrs.rpc_type_str {
+        derives.push(syn::parse_quote!(crate::rpctype::RpcTypeStr));
+    }
     // `#[serde]` field attributes are only known with a serde derive
     let has_serde = derives.iter().any(|path| {
         path.segments.last().is_some_and(|seg| seg.ident == "Serialize" || seg.ident == "Deserialize")

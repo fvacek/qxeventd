@@ -214,6 +214,7 @@ mod tests {
 
         #[allow(dead_code)]
         #[derive(RecordChange)]
+        #[record_change(rpc_type_str)]
         struct Item {
             #[record_change(skip)]
             id: Option<i64>,

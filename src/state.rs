@@ -589,6 +589,7 @@ pub(crate) struct EventStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr, ToRecord, RecordChange)]
+#[record_change(rpc_type_str)]
 pub(crate) struct EventRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
