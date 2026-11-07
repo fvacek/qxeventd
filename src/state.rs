@@ -534,17 +534,12 @@ fn rechng_from_rpcvalue(value: Option<&RpcValue>) -> anyhow::Result<RecChng> {
         .map_err(|err| anyhow!("invalid recchng value: {err}"))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, RpcTypeStr)]
 pub(crate) enum EventDbMode {
     Archived,
     ReadOnly,
     Master,
     Replica,
-}
-
-// String enum `s[...]`, planned for https://silicon-heaven.github.io/shv-doc/rpctypes.html (not documented yet).
-impl RpcTypeStr for EventDbMode {
-    const RPC_TYPE_STR: &'static str = "s[Archived,ReadOnly,Master,Replica]";
 }
 
 impl EventDbMode {

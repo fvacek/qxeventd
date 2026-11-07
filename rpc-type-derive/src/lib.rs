@@ -1,5 +1,5 @@
-//! `#[derive(RpcTypeStr)]` implements `crate::rpctype::RpcTypeStr` for a struct with named fields,
-//! producing its SHV RPC type description as a compile-time `&'static str`
+//! `#[derive(RpcTypeStr)]` implements `crate::rpctype::RpcTypeStr` for a struct with named fields
+//! or an enum with unit variants only, producing its SHV RPC type description as a compile-time `&'static str`
 //! (see <https://silicon-heaven.github.io/shv-doc/rpctypes.html>).
 //!
 //! ```ignore
@@ -17,6 +17,10 @@
 //! a Blob `x`), `BTreeMap<K, V>` and `HashMap<K, V>` fields as `{V}`; every other field
 //! type has to implement
 //! `RpcTypeStr` itself.
+//!
+//! An enum with unit variants is described as a string enum `s[Variant,...]` (serde serializes
+//! unit variants as their names), honouring `#[serde(rename = "...")]` on variants.
+//! The `s[...]` syntax is planned for SHV RPC types, but it is not documented yet.
 //!
 //! The generated code refers to `crate::rpctype::RpcTypeStr` and `::const_format`.
 //!
@@ -128,6 +132,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     let fields = match &input.data {
+        Data::Enum(data) => return expand_enum(name, data),
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => &fields.named,
             _ => {
@@ -137,7 +142,9 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 ));
             }
         },
-        _ => return Err(syn::Error::new_spanned(input, "RpcTypeStr requires a struct")),
+        Data::Union(_) => {
+            return Err(syn::Error::new_spanned(input, "RpcTypeStr requires a struct or an enum"));
+        }
     };
 
     let rpc_type = if serde_attrs(&input.attrs)?.transparent {
@@ -164,6 +171,29 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         quote! { ::const_format::concatcp!("{", #(#parts,)* "}") }
     };
 
+    Ok(quote! {
+        impl crate::rpctype::RpcTypeStr for #name {
+            const RPC_TYPE_STR: &'static str = #rpc_type;
+        }
+    })
+}
+
+/// String enum `s[Variant,...]`
+fn expand_enum(name: &syn::Ident, data: &syn::DataEnum) -> syn::Result<proc_macro2::TokenStream> {
+    let mut names = Vec::new();
+    for variant in &data.variants {
+        if !matches!(variant.fields, Fields::Unit) {
+            return Err(syn::Error::new_spanned(
+                variant,
+                "RpcTypeStr supports enums with unit variants only",
+            ));
+        }
+        names.push(match serde_attrs(&variant.attrs)?.rename {
+            Some(rename) => rename,
+            None => variant.ident.to_string(),
+        });
+    }
+    let rpc_type = format!("s[{}]", names.join(","));
     Ok(quote! {
         impl crate::rpctype::RpcTypeStr for #name {
             const RPC_TYPE_STR: &'static str = #rpc_type;

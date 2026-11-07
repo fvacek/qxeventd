@@ -4,15 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::rpctype::RpcTypeStr;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, RpcTypeStr)]
 pub enum Role {
     Organizer,
     Banned,
-}
-
-// String enum `s[...]`, planned for https://silicon-heaven.github.io/shv-doc/rpctypes.html (not documented yet).
-impl RpcTypeStr for Role {
-    const RPC_TYPE_STR: &'static str = "s[Organizer,Banned]";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]

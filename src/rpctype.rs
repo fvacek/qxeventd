@@ -184,6 +184,26 @@ mod tests {
         opt_date: Option<chrono::DateTime<chrono::FixedOffset>>,
     }
 
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
+    enum Mode {
+        Archived,
+        #[serde(rename = "readOnly")]
+        ReadOnly,
+    }
+
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
+    struct WithEnum {
+        mode: Mode,
+        opt_mode: Option<Mode>,
+    }
+
+    #[test]
+    fn unit_enum_is_string_enum() {
+        assert_eq!(Mode::RPC_TYPE_STR, "s[Archived,readOnly]");
+        assert_eq!(WithEnum::RPC_TYPE_STR, "{s[Archived,readOnly]:mode,s[Archived,readOnly]|n:opt_mode}");
+        assert_eq!(shvproto::to_rpcvalue(&Mode::ReadOnly).unwrap().as_str(), "readOnly");
+    }
+
     #[test]
     fn chrono_datetime_is_shv_datetime() {
         assert_eq!(ChronoDates::RPC_TYPE_STR, "{t:date,t|n:opt_date}");
