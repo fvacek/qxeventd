@@ -542,8 +542,9 @@ pub(crate) enum EventDbMode {
     Replica,
 }
 
+// String enum `s[...]`, planned for https://silicon-heaven.github.io/shv-doc/rpctypes.html (not documented yet).
 impl RpcTypeStr for EventDbMode {
-    const RPC_TYPE_STR: &'static str = "s";
+    const RPC_TYPE_STR: &'static str = "s[Archived,ReadOnly,Master,Replica]";
 }
 
 impl EventDbMode {
