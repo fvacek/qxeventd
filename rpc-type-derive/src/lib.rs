@@ -1,9 +1,9 @@
-//! `#[derive(RpcType)]` implements `crate::rpctype::RpcType` for a struct with named fields,
+//! `#[derive(RpcTypeStr)]` implements `crate::rpctype::RpcType` for a struct with named fields,
 //! producing its SHV RPC type description as a compile-time `&'static str`
 //! (see <https://silicon-heaven.github.io/shv-doc/rpctypes.html>).
 //!
 //! ```ignore
-//! #[derive(Serialize, Deserialize, RpcType)]
+//! #[derive(Serialize, Deserialize, RpcTypeStr)]
 //! struct PushEventDbParams {
 //!     event_id: i64,
 //!     compressed_data: Vec<u8>,
@@ -27,8 +27,8 @@ use syn::{
     PathArguments, Type, TypePath,
 };
 
-#[proc_macro_derive(RpcType)]
-pub fn derive_rpc_type(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(RpcTypeStr)]
+pub fn derive_rpc_type_str(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
@@ -107,7 +107,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
             &input.generics,
-            "RpcType does not support generic structs",
+            "RpcTypeStr does not support generic structs",
         ));
     }
 
@@ -117,11 +117,11 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             _ => {
                 return Err(syn::Error::new_spanned(
                     &data.fields,
-                    "RpcType requires a struct with named fields",
+                    "RpcTypeStr requires a struct with named fields",
                 ));
             }
         },
-        _ => return Err(syn::Error::new_spanned(input, "RpcType requires a struct")),
+        _ => return Err(syn::Error::new_spanned(input, "RpcTypeStr requires a struct")),
     };
 
     let rpc_type = if serde_attrs(&input.attrs)?.transparent {

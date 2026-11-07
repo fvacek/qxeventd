@@ -29,7 +29,7 @@ use crate::eventsqlapi::LocalEventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
 use crate::qxeventconfig::QxEventConfig;
-use crate::rpctype::RpcType;
+use crate::rpctype::{RpcType, RpcTypeStr};
 
 
 pub type EventId = i64;
@@ -461,10 +461,12 @@ async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: 
 
 async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) -> anyhow::Result<()> {
     let sql_api = LocalEventSqlApi::new(event_id, app_state, rpc_client);
+    info!("Applying recchng {event_id}");
 
     match &recchng.op {
         RecOp::Insert => match recchng.record.as_ref() {
             Some(record) => {
+                let record = sanitize_recchng_record(&sql_api, &recchng.table, record).await?;
                 sql_api.create_record_with_recchng(&recchng.table, &record, recchng.issuer.clone()).await?;
                 Ok(())
             }
@@ -472,6 +474,11 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
         },
         RecOp::Update => match recchng.record.as_ref() {
             Some(record) => {
+                info!("Update recchng {recchng:?}");
+                let record = sanitize_recchng_record(&sql_api, &recchng.table, record).await?;
+                if record.is_empty() {
+                    return Ok(());
+                }
                 sql_api
                     .update_record_with_recchng(&recchng.table, recchng.id, &record, recchng.issuer.clone())
                     .await?;
@@ -486,6 +493,39 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
             Ok(())
         }
     }
+}
+
+/// Remote clients may publish records taken from joined views, with keys like
+/// `runs.leg`, `competitors.id` or computed columns like `runflags`.
+/// Keep only fields that are real columns of `table`, stripping the `table.` prefix.
+async fn sanitize_recchng_record(sql_api: &impl QxSqlApi, table: &str, record: &Record) -> anyhow::Result<Record> {
+    let params: Record = [("table".to_string(), DbValue::from(table.to_string()))].into_iter().collect();
+    let result = sql_api.query("SELECT name FROM pragma_table_info(:table)", Some(&params)).await?;
+    let columns: std::collections::HashSet<String> = result.rows.iter()
+        .filter_map(|row| match row.first() {
+            Some(DbValue::String(s)) => Some(s.to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    if columns.is_empty() {
+        bail!("table '{table}' does not exist");
+    }
+    let prefix = format!("{}.", table.to_lowercase());
+    let mut sanitized = Record::new();
+    let mut dropped = Vec::new();
+    for (key, value) in record {
+        let lkey = key.to_lowercase();
+        let col = lkey.strip_prefix(&prefix).unwrap_or(&lkey);
+        if columns.contains(col) {
+            sanitized.insert(col.to_string(), value.clone());
+        } else {
+            dropped.push(key.as_str());
+        }
+    }
+    if !dropped.is_empty() {
+        debug!("recchng for table '{table}': dropped non-column fields: {dropped:?}");
+    }
+    Ok(sanitized)
 }
 
 fn rechng_from_rpcvalue(value: Option<&RpcValue>) -> anyhow::Result<RecChng> {
@@ -542,7 +582,7 @@ pub(crate) struct EventStatus {
     pub expires_at: DateTime<chrono::FixedOffset>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub(crate) struct EventRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -560,7 +600,7 @@ pub(crate) struct EventRecord {
 
 fn default_stage_count() -> i64 { 1 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub(crate) struct EventListItem {
     pub id: EventId,
     pub name: String,
@@ -614,7 +654,7 @@ impl EventRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, RpcTypeStr)]
 pub(crate) struct EventRecordChange {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]

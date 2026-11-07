@@ -6,7 +6,7 @@ use serde::{Serialize, Deserialize};
 use crate::eventsqlapi::LocalEventSqlApi;
 use crate::filenode::{META_FILE_APPEND, META_FILE_CRC, META_FILE_READ, META_FILE_SHA1, META_FILE_SIZE, META_FILE_STAT, META_FILE_TRUNCATE, META_FILE_WRITE};
 use crate::rpcvalueext::RpcValueExt;
-use crate::rpctype::RpcType;
+use crate::rpctype::{RpcType, RpcTypeStr};
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
 use shvproto::{RpcValue, from_rpcvalue};
@@ -45,28 +45,28 @@ impl EventCtlNode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 struct EventIdParam {
     event_id: EventId,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 struct ApiTokenParam {
     api_token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 struct CreateEventParam {
     owner: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 struct CreateEventResult {
     event_id: EventId,
     api_token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 struct OpenEventResult {
     event_id: EventId,
     mount_point: String,
@@ -78,19 +78,19 @@ fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
 
 pub const QX_API_TOKEN: &str = "qx_api_token";
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub struct UpdateEventRecordParams {
     event_id: EventId,
     change: EventRecordChange,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub struct SetEventDbModeParams {
     event_id: EventId,
     db_mode: crate::state::EventDbMode,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcType)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 #[serde(transparent)]
 struct ListEventsResult {
     events: Vec<EventListItem>,

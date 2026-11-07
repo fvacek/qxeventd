@@ -1,11 +1,11 @@
 /// SHV RPC type description, see <https://silicon-heaven.github.io/shv-doc/rpctypes.html>
 ///
-/// Use `#[derive(RpcType)]` to generate it for parameter structs.
+/// Use `#[derive(RpcTypeStr)]` to generate it for parameter structs.
 pub trait RpcType {
     const RPC_TYPE: &'static str;
 }
 
-pub use rpc_type_derive::RpcType;
+pub use rpc_type_derive::RpcTypeStr;
 
 macro_rules! impl_rpc_type {
     ($rpc_type:literal: $($ty:ty),+) => {
@@ -59,7 +59,7 @@ mod tests {
     use shvproto::{DateTime, RpcValue};
     use std::collections::{BTreeMap, HashMap};
 
-    #[derive(Serialize, Deserialize, RpcType)]
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
     struct AllScalars {
         flag: bool,
         count: i32,
@@ -71,13 +71,13 @@ mod tests {
         modified: chrono::DateTime<chrono::FixedOffset>,
     }
 
-    #[derive(Serialize, Deserialize, RpcType)]
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
     #[serde(transparent)]
     struct RunId {
         run_id: i64,
     }
 
-    #[derive(Serialize, Deserialize, RpcType)]
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
     struct Renamed {
         #[serde(rename = "eventId")]
         event_id: i64,
@@ -85,29 +85,29 @@ mod tests {
         note: String,
     }
 
-    #[derive(Serialize, Deserialize, RpcType)]
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
     struct Nested {
         run: RunId,
         renamed: Renamed,
     }
 
-    #[derive(Serialize, Deserialize, RpcType)]
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
     struct Empty {}
 
-    #[derive(Serialize, Deserialize, RpcType)]
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
     struct OptionalParam {
         run_id: RunId,
         user_id: Option<String>
     }
 
-    #[derive(Serialize, Deserialize, RpcType)]
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
     struct Maps {
         names: BTreeMap<String, String>,
         counts: Option<HashMap<String, i64>>,
         nested: BTreeMap<String, Option<RunId>>,
     }
 
-    #[derive(Serialize, Deserialize, RpcType)]
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
     struct Lists {
         ids: Vec<i64>,
         data: Vec<u8>,
@@ -115,7 +115,7 @@ mod tests {
         matrix: Vec<Vec<String>>,
     }
 
-    #[derive(Serialize, Deserialize, RpcType)]
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
     #[serde(transparent)]
     struct RenamedList {
         items: Vec<Renamed>,
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(Maps::RPC_TYPE, "{{s}:names,{i}|n:counts,{i|n}:nested}");
     }
 
-    #[derive(Debug, PartialEq, Serialize, Deserialize, RpcType)]
+    #[derive(Debug, PartialEq, Serialize, Deserialize, RpcTypeStr)]
     struct ChronoDates {
         #[serde(with = "chrono_datetime")]
         date: chrono::DateTime<chrono::FixedOffset>,
