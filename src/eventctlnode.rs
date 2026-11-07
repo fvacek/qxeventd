@@ -348,7 +348,7 @@ pub(crate) async fn request_handler(
                 META_METHOD_DIR,
                 META_METHOD_LS,
                 MetaMethod::new_static(
-                    METH_EVENT_UPDATE_LATE_ENTRY, Flags::UserIDRequired, AccessLevel::Read, "{i:run_id,{?}:record}", "b|i", &[], "",
+                    METH_EVENT_UPDATE_LATE_ENTRY, Flags::UserIDRequired, AccessLevel::Read, LateEntryParams::RPC_TYPE_STR, "b|i", &[], "",
                 ),
                 MetaMethod::new_static(
                     METH_EVENT_STATUS, Flags::None, AccessLevel::Read, "", "{?}", &[], "",
@@ -620,7 +620,7 @@ async fn list_events(app_state: SharedAppState) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, RpcTypeStr)]
 struct LateEntryParams {
     stage_id: i64,
     change_id: Option<i64>,

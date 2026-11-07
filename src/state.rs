@@ -461,24 +461,25 @@ async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: 
 
 async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) -> anyhow::Result<()> {
     let sql_api = LocalEventSqlApi::new(event_id, app_state, rpc_client);
-    info!("Applying recchng {event_id}");
+    info!(target: "ApplyRecChng", "Applying recchng {recchng:?}");
 
     match &recchng.op {
         RecOp::Insert => match recchng.record.as_ref() {
             Some(record) => {
-                let record = sanitize_recchng_record(&sql_api, &recchng.table, record).await?;
+                if recchng.id <= 0 {
+                    return Err(anyhow!("Insert recchng to table '{table}' has no id, replica mode requires id even for inserts", table = &recchng.table));
+                }
+                let mut record = record.clone();
+                record.insert("id".to_owned(), recchng.id.into());
+                info!(target: "ApplyRecChng", "Insert recchng: table='{}', id={}", &recchng.table, recchng.id);
                 sql_api.create_record_with_recchng(&recchng.table, &record, recchng.issuer.clone()).await?;
                 Ok(())
             }
-            None => Err(anyhow!("insert recchng has no record")),
+            None => Err(anyhow!("Insert recchng to table '{table}' has no record", table = &recchng.table)),
         },
         RecOp::Update => match recchng.record.as_ref() {
             Some(record) => {
-                info!("Update recchng {recchng:?}");
-                let record = sanitize_recchng_record(&sql_api, &recchng.table, record).await?;
-                if record.is_empty() {
-                    return Ok(());
-                }
+                info!(target: "ApplyRecChng", "Update recchng: table='{}', id={}", &recchng.table, recchng.id);
                 sql_api
                     .update_record_with_recchng(&recchng.table, recchng.id, &record, recchng.issuer.clone())
                     .await?;
@@ -487,6 +488,7 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
             None => Err(anyhow!("update recchng has no record")),
         },
         RecOp::Delete => {
+            info!(target: "ApplyRecChng", "Delete recchng: table='{}', id={}", &recchng.table, recchng.id);
             sql_api
                 .delete_record_with_recchng(&recchng.table, recchng.id, recchng.issuer.clone())
                 .await?;
@@ -495,38 +497,6 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
     }
 }
 
-/// Remote clients may publish records taken from joined views, with keys like
-/// `runs.leg`, `competitors.id` or computed columns like `runflags`.
-/// Keep only fields that are real columns of `table`, stripping the `table.` prefix.
-async fn sanitize_recchng_record(sql_api: &impl QxSqlApi, table: &str, record: &Record) -> anyhow::Result<Record> {
-    let params: Record = [("table".to_string(), DbValue::from(table.to_string()))].into_iter().collect();
-    let result = sql_api.query("SELECT name FROM pragma_table_info(:table)", Some(&params)).await?;
-    let columns: std::collections::HashSet<String> = result.rows.iter()
-        .filter_map(|row| match row.first() {
-            Some(DbValue::String(s)) => Some(s.to_lowercase()),
-            _ => None,
-        })
-        .collect();
-    if columns.is_empty() {
-        bail!("table '{table}' does not exist");
-    }
-    let prefix = format!("{}.", table.to_lowercase());
-    let mut sanitized = Record::new();
-    let mut dropped = Vec::new();
-    for (key, value) in record {
-        let lkey = key.to_lowercase();
-        let col = lkey.strip_prefix(&prefix).unwrap_or(&lkey);
-        if columns.contains(col) {
-            sanitized.insert(col.to_string(), value.clone());
-        } else {
-            dropped.push(key.as_str());
-        }
-    }
-    if !dropped.is_empty() {
-        debug!("recchng for table '{table}': dropped non-column fields: {dropped:?}");
-    }
-    Ok(sanitized)
-}
 
 fn rechng_from_rpcvalue(value: Option<&RpcValue>) -> anyhow::Result<RecChng> {
     let value = value.ok_or_else(|| anyhow!("recchng signal has no parameter"))?;
