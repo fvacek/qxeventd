@@ -64,7 +64,9 @@ impl StaticNode for AppNode {
             }
             Some(METH_QUIT) => {
                 log::info!("Exit method called, initiating graceful shutdown");
-                match self.app_state.write().await.quit_app(client_command_sender).await {
+                // bound first, so the write guard is released before the match arms
+                let result = self.app_state.write().await.quit_app(client_command_sender).await;
+                match result {
                     Ok(_) => Some(Ok(shvproto::RpcValue::from(()))),
                     Err(e) => Some(Err(anyhow_to_rpc_error(e))),
                 }

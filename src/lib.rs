@@ -184,7 +184,7 @@ async fn app_task(
 
         }
         if is_connected {
-            let _ = app_state.write().await.gc_expired_events(client_cmd_tx2.clone()).await;
+            let _ = State::gc_expired_events(&app_state, client_cmd_tx2.clone()).await;
         }
     }
     info!("App task finished");

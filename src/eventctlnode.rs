@@ -113,7 +113,7 @@ async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState,
     };
 
     // 1. Resolve the event; reject if unavailable.
-    let Ok(event_record) = app_state.write().await.event_record(event_id).await else {
+    let Ok(event_record) = State::event_record(&app_state, event_id).await else {
         warn!("Invalid event id: {event_id} for method: {method_name}");
         return vec![];
     };
@@ -243,7 +243,7 @@ pub(crate) async fn request_handler(
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
                             m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                                let (event_id, api_token) = app_state.write().await.create_event(p.owner, client_cmd_tx.clone()).await
+                                let (event_id, api_token) = State::create_event(&app_state, p.owner, client_cmd_tx.clone()).await
                                     .map_err(anyhow_to_rpc_error)?;
                                 Ok(CreateEventResult { event_id, api_token }.to_rpcvalue())
                             })
@@ -289,7 +289,7 @@ pub(crate) async fn request_handler(
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(p.event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
-                                let res = app_state.write().await.update_event_record(p.event_id, p.change, client_cmd_tx).await
+                                let res = State::update_event_record(&app_state, p.event_id, p.change, client_cmd_tx).await
                                     .map_err(anyhow_to_rpc_error)?;
                                 Ok(res)
                             })
@@ -300,7 +300,7 @@ pub(crate) async fn request_handler(
                                 Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
                             };
                             m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(p.event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
-                                let res = app_state.write().await.set_event_db_mode(p.event_id, p.db_mode, client_cmd_tx.clone()).await
+                                let res = State::set_event_db_mode(&app_state, p.event_id, p.db_mode, client_cmd_tx.clone()).await
                                     .map_err(anyhow_to_rpc_error)?;
                                 if matches!(p.db_mode, crate::state::EventDbMode::Replica) {
                                     setup_remote_db_recchng_monitoring(app_state, p.event_id, client_cmd_tx).await;
@@ -316,13 +316,13 @@ pub(crate) async fn request_handler(
                             m.resolve(EVENTCTL_ROOT_METHODS, async move || {
                                 let event_id = app_state.read().await.api_token_to_event_id(&p.api_token).await
                                     .map_err(anyhow_to_rpc_error)?;
-                                let was_deleted = app_state.write().await.delete_event(event_id, client_cmd_tx).await
+                                let was_deleted = State::delete_event(&app_state, event_id, client_cmd_tx).await
                                     .map_err(anyhow_to_rpc_error)?;
                                 Ok(RpcValue::from(was_deleted))
                             })
                         },
                         METH_LIST_EVENTS => m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                            let events = app_state.write().await.list_events().await
+                            let events = app_state.read().await.list_events().await
                                 .map_err(anyhow_to_rpc_error)?;
                             Ok(ListEventsResult { events }.to_rpcvalue())
                         }),
@@ -380,7 +380,7 @@ pub(crate) async fn request_handler(
                                     return Err::<RpcValue, _>(str_to_rpc_error("user id is required"));
                                 };
                                 app_state.read().await.opened_event_status(event_id).await.map_err(anyhow_to_rpc_error)?;
-                                let db_mode = app_state.write().await.event_db_mode(event_id).await.map_err(anyhow_to_rpc_error)?;
+                                let db_mode = State::event_db_mode(&app_state, event_id).await.map_err(anyhow_to_rpc_error)?;
                                 // Replica writes go to the remote master DB; Master writes go to the local event DB.
                                 let qxsql: Box<dyn QxSqlApiRecChng> = match db_mode {
                                     EventDbMode::Replica => Box::new(RemoteEventSqlApi::new(event_id, client_cmd_tx.clone())),
@@ -427,7 +427,7 @@ pub(crate) async fn request_handler(
                             })
                         },
                         METH_EVENT_CLOSE => m.resolve(EVENTCTL_NODE_METHODS, async move || {
-                            let res = app_state.write().await.close_event(event_id, client_cmd_tx.clone()).await;
+                            let res = State::close_event(&app_state, event_id, client_cmd_tx.clone()).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),
                         _ => err_unresolved_request(),

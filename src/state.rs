@@ -39,7 +39,9 @@ pub type SharedAppState = Arc<RwLock<State>>;
 pub(crate) struct State {
     pub db_pool: async_sqlite::Pool,
     pub open_events: BTreeMap<EventId, Arc<RwLock<OpenEventCtl>>>,
-    pub event_records: HashMap<EventId, Arc<RwLock<EventRecord>>>,
+    /// Cache of event records, it has its own lock, so it can be used without
+    /// the app state write lock, see [`State::event_record`].
+    pub event_records: Arc<smol::lock::Mutex<HashMap<EventId, Arc<RwLock<EventRecord>>>>>,
     pub shutdown_sender: Option<channel::Sender<()>>,
 }
 
@@ -47,7 +49,7 @@ impl State {
     pub async fn quit_app(&mut self, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
         let event_ids: Vec<_> = self.open_events.keys().copied().collect();
         for event_id in event_ids {
-            if let Err(e) = self.close_event(event_id, client_command_sender.clone()).await {
+            if let Err(e) = self.close_event_locked(event_id, client_command_sender.clone()).await {
                 bail!("Failed to close event {}: {}", event_id, e);
             }
         }
@@ -63,7 +65,8 @@ impl State {
         records.iter().map(EventListItem::from_record).collect()
     }
 
-    pub async fn create_event(&self, owner: String, rpc_client: ClientCommandSender) -> anyhow::Result<(EventId, String)> {
+    /// The app state lock is not held during the broker call.
+    pub async fn create_event(app_state: &SharedAppState, owner: String, rpc_client: ClientCommandSender) -> anyhow::Result<(EventId, String)> {
         if owner.is_empty() {
             return Err(anyhow::anyhow!("Owner cannot be empty"));
         }
@@ -79,7 +82,8 @@ impl State {
             config: QxEventConfig::default(),
         };
         let rec = event_data.to_record();
-        let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client.clone());
+        let db_pool = app_state.read().await.db_pool.clone();
+        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
         let event_id = qxsql.create_record_with_recchng("events", &rec, Some(owner)).await?;
         info!("Created event {event_id}");
         if matches!(event_data.db_mode, EventDbMode::Replica) {
@@ -99,28 +103,32 @@ impl State {
         Ok(())
     }
 
-    pub async fn update_event_record(&mut self, event_id: EventId, record: EventRecordChange, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
+    /// The app state lock is not held during the broker call.
+    pub async fn update_event_record(app_state: &SharedAppState, event_id: EventId, record: EventRecordChange, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
+        let db_pool = app_state.read().await.db_pool.clone();
         // always update the mount point, for case than shvbroker config is reloaded from file
-        let event_record = self.load_event_record(event_id).await?;
+        let event_record = load_event_record(&db_pool, event_id).await?;
         if matches!(event_record.db_mode, EventDbMode::Replica) {
             Self::register_event_mount_point(event_id, &event_record.api_token, rpc_client.clone()).await?;
         }
-        let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client.clone());
+        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
         let ret = qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await;
-        self.forget_event_record(event_id).await?;
+        Self::forget_event_record(app_state, event_id).await;
         ret
     }
 
-    pub async fn set_event_db_mode(&mut self, event_id: EventId, db_mode: EventDbMode, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
-        let event_record = self.load_event_record(event_id).await?;
+    /// The app state lock is not held during the broker call.
+    pub async fn set_event_db_mode(app_state: &SharedAppState, event_id: EventId, db_mode: EventDbMode, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
+        let db_pool = app_state.read().await.db_pool.clone();
+        let event_record = load_event_record(&db_pool, event_id).await?;
         if matches!(db_mode, EventDbMode::Replica) {
             Self::register_event_mount_point(event_id, &event_record.api_token, rpc_client.clone()).await?;
         }
         let mut record = Record::new();
         record.insert("db_mode".to_string(), db_mode.as_record_value().into());
-        let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client);
+        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client);
         let result = qxsql.update_record_with_recchng("events", event_id, &record, None).await;
-        self.forget_event_record(event_id).await?;
+        Self::forget_event_record(app_state, event_id).await;
         result
     }
 
@@ -136,30 +144,35 @@ impl State {
         })
     }
 
-    pub async fn event_record(&mut self, event_id: EventId) -> anyhow::Result<Arc<RwLock<EventRecord>>> {
-        if let Some(record) = self.event_records.get(&event_id) {
+    /// Cached event record, only the cache lock is held during the DB read on cache miss.
+    pub async fn event_record(app_state: &SharedAppState, event_id: EventId) -> anyhow::Result<Arc<RwLock<EventRecord>>> {
+        let (event_records, db_pool) = {
+            let state = app_state.read().await;
+            (state.event_records.clone(), state.db_pool.clone())
+        };
+        // Held across the DB read, so forget_event_record() called after a record update
+        // cannot interleave with a load of the old record and leave it cached.
+        let mut event_records = event_records.lock().await;
+        if let Some(record) = event_records.get(&event_id) {
             return Ok(record.clone());
         }
-        let record = Arc::new(RwLock::new(self.load_event_record(event_id).await?));
-        self.event_records.insert(event_id, record.clone());
+        let record = Arc::new(RwLock::new(load_event_record(&db_pool, event_id).await?));
+        event_records.insert(event_id, record.clone());
         Ok(record)
     }
 
-    pub async fn event_db_mode(&mut self, event_id: EventId) -> anyhow::Result<EventDbMode> {
-        let record = self.event_record(event_id).await?;
+    pub async fn event_db_mode(app_state: &SharedAppState, event_id: EventId) -> anyhow::Result<EventDbMode> {
+        let record = Self::event_record(app_state, event_id).await?;
         Ok(record.read().await.db_mode.clone())
     }
 
-    async fn forget_event_record(&mut self, event_id: EventId) -> anyhow::Result<()> {
-        self.event_records.remove(&event_id);
-        Ok(())
+    async fn forget_event_record(app_state: &SharedAppState, event_id: EventId) {
+        let event_records = app_state.read().await.event_records.clone();
+        event_records.lock().await.remove(&event_id);
     }
 
     pub async fn load_event_record(&self, event_id: EventId) -> anyhow::Result<EventRecord> {
-        let qxsql = LocalDbSqlApi::new_without_recchng(self.db_pool.clone());
-        let record = qxsql.read_record("events", event_id, None).await?
-            .ok_or_else(||anyhow!("Event id: {event_id} not found"))?;
-        EventRecord::from_record(&record)
+        load_event_record(&self.db_pool, event_id).await
     }
 
     /// Install the zlib compressed database uploaded using the pushDb file node. The uploaded
@@ -212,7 +225,7 @@ impl State {
             std::fs::metadata(new_db_file)
                 .map_err(|err| anyhow!("Cannot install event {event_id} database {new_db_file}: {err}"))?;
             let was_open = state.open_events.contains_key(&event_id);
-            state.close_event(event_id, client_command_sender.clone()).await?;
+            state.close_event_locked(event_id, client_command_sender.clone()).await?;
             // SQLite would replay WAL left over from the old database over the new one.
             for stale_file in [format!("{db_file}-wal"), format!("{db_file}-shm")] {
                 if let Err(err) = std::fs::remove_file(&stale_file) && err.kind() != std::io::ErrorKind::NotFound {
@@ -275,44 +288,66 @@ impl State {
         result
     }
 
-    pub async fn close_event(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
-        if let Some(event) = self.open_events.remove(&event_id) {
-            // let mount_point = event_mount_point(event_id);
-
-            let close_result = close_event_db(&event.read().await.db).await;
-
-            let message = RpcMessage::new_signal("event", "lsmod").with_param(false);
-            client_command_sender.send_message(message)
-            .map_err(|e| anyhow!("Failed to send message {}", e))?;
-            close_result.map_err(|e| e.context(format!("Failed to close event {event_id} DB")))?;
-
-            // log::info!("Sending quit RPC message to qxsql of event {event_id} mounted at {mount_point}");
-            // let _: () = client_command_sender.call_rpc_method(format!("{mount_point}/.app"), "quit", None, None, None::<fn(_)>).await
-            //     .map_err(|err| anyhow::anyhow!("Failed to shut down event: {}", err))?;
-            Ok(true)
-        } else {
-            Ok(false)
+    /// Close the event while the app state write lock is held by the caller,
+    /// use it when the event must not be reopened before the lock is released.
+    pub async fn close_event_locked(&mut self, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
+        match self.open_events.remove(&event_id) {
+            Some(event) => {
+                close_removed_event(event_id, &event, &client_command_sender).await?;
+                Ok(true)
+            }
+            None => Ok(false),
         }
     }
-    pub async fn delete_event(&mut self, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
+
+    /// The app state write lock is held only to remove the event from open events,
+    /// the DB is checkpointed and closed without it.
+    pub async fn close_event(app_state: &SharedAppState, event_id: EventId, client_command_sender: ClientCommandSender) -> anyhow::Result<bool> {
+        let event = app_state.write().await.open_events.remove(&event_id);
+        match event {
+            Some(event) => {
+                close_removed_event(event_id, &event, &client_command_sender).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub async fn delete_event(app_state: &SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
         log::info!("Deleting event {}", event_id);
-        self.close_event(event_id, rpc_client.clone()).await?;
-        let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client);
+        Self::close_event(app_state, event_id, rpc_client.clone()).await?;
+        let db_pool = app_state.read().await.db_pool.clone();
+        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client);
         let was_deleted = qxsql.delete_record_with_recchng("events", event_id, None).await?;
+        Self::forget_event_record(app_state, event_id).await;
         Ok(was_deleted)
     }
 
-    pub async fn gc_expired_events(&mut self, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
-        let event_age_list = self.open_events.iter()
-            .map(|(id, event)| (*id, event.clone())).collect::<Vec<_>>();
-        let now = chrono::Utc::now();
-        for (event_id, event) in event_age_list {
-            if event.read().await.expires_at() < now {
-                info!("Closing event: {event_id} as expired.");
-                self.close_event(event_id, client_command_sender.clone()).await?;
+    /// The app state write lock is held only to remove expired events from open events,
+    /// their DBs are checkpointed and closed without it.
+    pub async fn gc_expired_events(app_state: &SharedAppState, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
+        let expired_events = {
+            let mut state = app_state.write().await;
+            let now = chrono::Utc::now();
+            let mut expired_ids = Vec::new();
+            for (event_id, event) in &state.open_events {
+                if event.read().await.expires_at() < now {
+                    expired_ids.push(*event_id);
+                }
+            }
+            expired_ids.into_iter()
+                .filter_map(|event_id| state.open_events.remove(&event_id).map(|event| (event_id, event)))
+                .collect::<Vec<_>>()
+        };
+        let mut result = Ok(());
+        for (event_id, event) in expired_events {
+            info!("Closing event: {event_id} as expired.");
+            if let Err(err) = close_removed_event(event_id, &event, &client_command_sender).await {
+                error!("Failed to close expired event {event_id}: {err}");
+                result = Err(err);
             }
         }
-        Ok(())
+        result
     }
 
     pub async fn api_token_to_event_id(&self, api_token: &str) -> anyhow::Result<EventId> {
@@ -345,6 +380,24 @@ async fn close_event_db(db: &async_sqlite::Pool) -> anyhow::Result<()> {
         bail!("WAL checkpoint was blocked");
     }
     Ok(())
+}
+
+async fn load_event_record(db_pool: &async_sqlite::Pool, event_id: EventId) -> anyhow::Result<EventRecord> {
+    let qxsql = LocalDbSqlApi::new_without_recchng(db_pool.clone());
+    let record = qxsql.read_record("events", event_id, None).await?
+        .ok_or_else(||anyhow!("Event id: {event_id} not found"))?;
+    EventRecord::from_record(&record)
+}
+
+/// Close DB of an event already removed from open events and notify clients.
+async fn close_removed_event(event_id: EventId, event: &RwLock<OpenEventCtl>, client_command_sender: &ClientCommandSender) -> anyhow::Result<()> {
+    let db = event.read().await.db.clone();
+    let close_result = close_event_db(&db).await;
+
+    let message = RpcMessage::new_signal("event", "lsmod").with_param(false);
+    client_command_sender.send_message(message)
+        .map_err(|e| anyhow!("Failed to send message {}", e))?;
+    close_result.map_err(|e| e.context(format!("Failed to close event {event_id} DB")))
 }
 
 pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<String> {
@@ -429,7 +482,8 @@ async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: 
                     let remote_sql_path = remote_event_sql_path(event_id);
                     if let Some(path) = message.shv_path() && path == &remote_sql_path {
                         info!("Received event {event_id} subscription message: {:?}", message.shv_path());
-                        let db_mode = match app_state.write().await.event_db_mode(event_id).await {
+                        let db_mode = State::event_db_mode(&app_state, event_id).await;
+                        let db_mode = match db_mode {
                             Ok(db_mode) => db_mode,
                             Err(err) => {
                                 error!("Failed to load event {event_id} record: {err}");
