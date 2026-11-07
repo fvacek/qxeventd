@@ -2,7 +2,7 @@
 ///
 /// Use `#[derive(RpcTypeStr)]` to generate it for parameter structs.
 pub trait RpcTypeStr {
-    const RPC_TYPE: &'static str;
+    const RPC_TYPE_STR: &'static str;
 }
 
 pub use rpc_type_derive::{RecordChange, RpcTypeStr};
@@ -10,7 +10,7 @@ pub use rpc_type_derive::{RecordChange, RpcTypeStr};
 macro_rules! impl_rpc_type {
     ($rpc_type:literal: $($ty:ty),+) => {
         $(impl RpcTypeStr for $ty {
-            const RPC_TYPE: &'static str = $rpc_type;
+            const RPC_TYPE_STR: &'static str = $rpc_type;
         })+
     };
 }
@@ -124,56 +124,56 @@ mod tests {
     #[test]
     fn scalars() {
         assert_eq!(
-            AllScalars::RPC_TYPE,
+            AllScalars::RPC_TYPE_STR,
             "{b:flag,i:count,u:size,f:ratio,s:name,x:data,t:created,t:modified}"
         );
     }
 
     #[test]
     fn rpc_value_is_any() {
-        assert_eq!(RpcValue::RPC_TYPE, "?");
+        assert_eq!(RpcValue::RPC_TYPE_STR, "?");
     }
 
     #[test]
     fn transparent() {
-        assert_eq!(RunId::RPC_TYPE, "i");
+        assert_eq!(RunId::RPC_TYPE_STR, "i");
     }
 
     #[test]
     fn rename_and_other_serde_attrs() {
-        assert_eq!(Renamed::RPC_TYPE, "{i:eventId,s:note}");
+        assert_eq!(Renamed::RPC_TYPE_STR, "{i:eventId,s:note}");
     }
 
     #[test]
     fn nested() {
-        assert_eq!(Nested::RPC_TYPE, "{i:run,{i:eventId,s:note}:renamed}");
+        assert_eq!(Nested::RPC_TYPE_STR, "{i:run,{i:eventId,s:note}:renamed}");
     }
 
     #[test]
     fn empty() {
-        assert_eq!(Empty::RPC_TYPE, "{}");
+        assert_eq!(Empty::RPC_TYPE_STR, "{}");
     }
 
     #[test]
     fn usable_in_const_context() {
-        const PARAM: &str = Renamed::RPC_TYPE;
+        const PARAM: &str = Renamed::RPC_TYPE_STR;
         assert_eq!(PARAM, "{i:eventId,s:note}");
     }
 
     #[test]
     fn optional_param() {
-        assert_eq!(OptionalParam::RPC_TYPE, "{i:run_id,s|n:user_id}");
+        assert_eq!(OptionalParam::RPC_TYPE_STR, "{i:run_id,s|n:user_id}");
     }
 
     #[test]
     fn lists() {
-        assert_eq!(Lists::RPC_TYPE, "{[i]:ids,x:data,[i|n]|n:runs,[[s]]:matrix}");
-        assert_eq!(RenamedList::RPC_TYPE, "[{i:eventId,s:note}]");
+        assert_eq!(Lists::RPC_TYPE_STR, "{[i]:ids,x:data,[i|n]|n:runs,[[s]]:matrix}");
+        assert_eq!(RenamedList::RPC_TYPE_STR, "[{i:eventId,s:note}]");
     }
 
     #[test]
     fn maps() {
-        assert_eq!(Maps::RPC_TYPE, "{{s}:names,{i}|n:counts,{i|n}:nested}");
+        assert_eq!(Maps::RPC_TYPE_STR, "{{s}:names,{i}|n:counts,{i|n}:nested}");
     }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize, RpcTypeStr)]
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn chrono_datetime_is_shv_datetime() {
-        assert_eq!(ChronoDates::RPC_TYPE, "{t:date,t|n:opt_date}");
+        assert_eq!(ChronoDates::RPC_TYPE_STR, "{t:date,t|n:opt_date}");
 
         let date = chrono::DateTime::parse_from_rfc3339("2026-10-31T10:00:00.123+01:00").unwrap();
         let dates = ChronoDates { date, opt_date: Some(date) };
@@ -308,7 +308,7 @@ mod tests {
         #[test]
         fn rpc_type() {
             assert_eq!(
-                ItemChange::RPC_TYPE,
+                ItemChange::RPC_TYPE_STR,
                 "{s|n:name,i|n:count,f|n:ratio,b|n:flag,x|n:data,s|n:note,s|n:item_kind,t|n:created}"
             );
         }

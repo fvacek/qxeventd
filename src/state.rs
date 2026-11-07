@@ -543,7 +543,7 @@ pub(crate) enum EventDbMode {
 }
 
 impl RpcTypeStr for EventDbMode {
-    const RPC_TYPE: &'static str = "s";
+    const RPC_TYPE_STR: &'static str = "s";
 }
 
 impl EventDbMode {

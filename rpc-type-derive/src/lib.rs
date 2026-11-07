@@ -8,7 +8,7 @@
 //!     event_id: i64,
 //!     compressed_data: Vec<u8>,
 //! }
-//! // PushEventDbParams::RPC_TYPE == "{i:event_id,x:compressed_data}"
+//! // PushEventDbParams::RPC_TYPE_STR == "{i:event_id,x:compressed_data}"
 //! ```
 //!
 //! The description mirrors serde's map serialization (KeyStruct), honouring
@@ -84,7 +84,7 @@ fn is_u8(ty: &Type) -> bool {
 ///
 /// `Option<T>` is expanded here as `T|n`, `Vec<T>` as `[T]` and `BTreeMap<K, V>` /
 /// `HashMap<K, V>` as `{V}`,
-/// because a generic `impl RpcTypeStr` for them cannot concatenate the inner `RPC_TYPE`
+/// because a generic `impl RpcTypeStr` for them cannot concatenate the inner `RPC_TYPE_STR`
 /// into a `&'static str` on stable Rust.
 fn type_parts(ty: &Type) -> Vec<proc_macro2::TokenStream> {
     if let Type::Path(TypePath { qself: None, path }) = ty
@@ -114,7 +114,7 @@ fn type_parts(ty: &Type) -> Vec<proc_macro2::TokenStream> {
             _ => {}
         }
     }
-    vec![quote! { <#ty as crate::rpctype::RpcTypeStr>::RPC_TYPE }]
+    vec![quote! { <#ty as crate::rpctype::RpcTypeStr>::RPC_TYPE_STR }]
 }
 
 fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -166,7 +166,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     Ok(quote! {
         impl crate::rpctype::RpcTypeStr for #name {
-            const RPC_TYPE: &'static str = #rpc_type;
+            const RPC_TYPE_STR: &'static str = #rpc_type;
         }
     })
 }

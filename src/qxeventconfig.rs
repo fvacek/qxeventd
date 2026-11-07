@@ -11,7 +11,7 @@ pub enum Role {
 }
 
 impl RpcTypeStr for Role {
-    const RPC_TYPE: &'static str = "s";
+    const RPC_TYPE_STR: &'static str = "s";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]

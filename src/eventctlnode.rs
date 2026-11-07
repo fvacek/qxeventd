@@ -196,35 +196,35 @@ pub(crate) async fn request_handler(
                 META_METHOD_DIR,
                 META_METHOD_LS,
                 MetaMethod::new_static(
-                    METH_CREATE_EVENT, Flags::None, AccessLevel::Write, CreateEventParam::RPC_TYPE, CreateEventResult::RPC_TYPE, &[], "",
+                    METH_CREATE_EVENT, Flags::None, AccessLevel::Write, CreateEventParam::RPC_TYPE_STR, CreateEventResult::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
-                    METH_OPEN_EVENT, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, OpenEventResult::RPC_TYPE, &[], "",
+                    METH_OPEN_EVENT, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE_STR, OpenEventResult::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
-                    METH_OPEN_EVENT_API_KEY, Flags::None, AccessLevel::Read, ApiTokenParam::RPC_TYPE, OpenEventResult::RPC_TYPE, &[], "",
+                    METH_OPEN_EVENT_API_KEY, Flags::None, AccessLevel::Read, ApiTokenParam::RPC_TYPE_STR, OpenEventResult::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
                     // user with Service access or user_id == event_owner can read event records
                     // read event record is privileged operation, because it exposes api_key
-                    METH_READ_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE, EventRecord::RPC_TYPE, &[], "",
+                    METH_READ_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, EventIdParam::RPC_TYPE_STR, EventRecord::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
                     // user with Service access or user_id == event_owner can update event records
-                    METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, UpdateEventRecordParams::RPC_TYPE, bool::RPC_TYPE, &[], "",
+                    METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, UpdateEventRecordParams::RPC_TYPE_STR, bool::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
                     // user with Service access or user_id == event_owner can change the database mode
-                    METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, SetEventDbModeParams::RPC_TYPE, bool::RPC_TYPE, &[], "",
+                    METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, SetEventDbModeParams::RPC_TYPE_STR, bool::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
-                    METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE, bool::RPC_TYPE, &[], "",
+                    METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE_STR, bool::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
-                    METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", ListEventsResult::RPC_TYPE, &[], "",
+                    METH_LIST_EVENTS, Flags::None, AccessLevel::Read, "n", ListEventsResult::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
-                    METH_EVENT_DATA, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE, EventRecord::RPC_TYPE, &[], "",
+                    METH_EVENT_DATA, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE_STR, EventRecord::RPC_TYPE_STR, &[], "",
                 ),
             ];
 
@@ -669,15 +669,15 @@ mod tests {
     #[test]
     fn event_record_rpc_types() {
         assert_eq!(
-            EventRecord::RPC_TYPE,
+            EventRecord::RPC_TYPE_STR,
             "{i|n:id,s:name,t:date,i:stage_count,s:owner,s:api_token,{{s}:members}:config,s:db_mode}"
         );
         assert_eq!(
-            UpdateEventRecordParams::RPC_TYPE,
+            UpdateEventRecordParams::RPC_TYPE_STR,
             "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,{{s}:members}|n:config,s|n:db_mode}:change}"
         );
-        assert_eq!(SetEventDbModeParams::RPC_TYPE, "{i:event_id,s:db_mode}");
-        assert_eq!(ListEventsResult::RPC_TYPE, "[{i:id,s:name,i:stage_count,t:date,s:owner,s:db_mode}]");
+        assert_eq!(SetEventDbModeParams::RPC_TYPE_STR, "{i:event_id,s:db_mode}");
+        assert_eq!(ListEventsResult::RPC_TYPE_STR, "[{i:id,s:name,i:stage_count,t:date,s:owner,s:db_mode}]");
 
         let record = EventRecord {
             id: Some(1),
@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(params.event_id, 42);
         assert_eq!(params.to_rpcvalue().to_cpon(), r#"{"event_id":42}"#);
         assert!(EventIdParam::try_from_rpcvalue(&RpcValue::from_cpon("42").unwrap()).is_err());
-        assert_eq!(EventIdParam::RPC_TYPE, "{i:event_id}");
+        assert_eq!(EventIdParam::RPC_TYPE_STR, "{i:event_id}");
 
         let params = ApiTokenParam::try_from_rpcvalue(&RpcValue::from_cpon(r#"{"api_token":"tok"}"#).unwrap()).unwrap();
         assert_eq!(params.api_token, "tok");
