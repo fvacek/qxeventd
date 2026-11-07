@@ -671,7 +671,7 @@ mod tests {
         );
         assert_eq!(
             UpdateEventRecordParams::RPC_TYPE,
-            "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,s|n:master_db_mode,{{s}:members}|n:config}:change}"
+            "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,{{s}:members}|n:config,s|n:master_db_mode}:change}"
         );
         assert_eq!(SetEventDbModeParams::RPC_TYPE, "{i:event_id,s:db_mode}");
         assert_eq!(ListEventsResult::RPC_TYPE, "[{i:id,s:name,i:stage_count,t:date,s:owner,s:db_mode}]");

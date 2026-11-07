@@ -29,7 +29,7 @@ use crate::eventsqlapi::LocalEventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
 use crate::qxeventconfig::QxEventConfig;
-use crate::rpctype::{RpcType, RpcTypeStr};
+use crate::rpctype::{RecordChange, RpcType, RpcTypeStr};
 
 
 pub type EventId = i64;
@@ -575,6 +575,12 @@ impl EventDbMode {
     }
 }
 
+impl From<EventDbMode> for DbValue {
+    fn from(value: EventDbMode) -> Self {
+        value.as_record_value().into()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EventStatus {
     pub master_db_mode: EventDbMode,
@@ -582,19 +588,22 @@ pub(crate) struct EventStatus {
     pub expires_at: DateTime<chrono::FixedOffset>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr, RecordChange)]
 pub(crate) struct EventRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[record_change(skip)]
     pub id: Option<i64>,
     pub name: String,
     #[serde(with = "crate::rpctype::chrono_datetime")]
+    #[record_change(with = "crate::rpctype::chrono_datetime_opt")]
     pub date: DateTime<chrono::FixedOffset>,
     #[serde(default = "default_stage_count")]
     pub stage_count: i64,
     pub owner: String,
     pub api_token: String,
     pub config: QxEventConfig,
+    #[record_change(rename = "master_db_mode")]
     pub db_mode: EventDbMode,
 }
 
@@ -652,66 +661,6 @@ impl EventRecord {
         record.insert("db_mode".to_string(), self.db_mode.as_record_value().into());
         Ok(record)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, RpcTypeStr)]
-pub(crate) struct EventRecordChange {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default, with = "crate::rpctype::chrono_datetime_opt")]
-    pub date: Option<DateTime<chrono::FixedOffset>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stage_count: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub owner: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub api_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub master_db_mode: Option<EventDbMode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub config: Option<QxEventConfig>,
-}
-
-impl EventRecordChange {
-    fn to_record(&self) -> Record {
-        let mut record = Record::new();
-        if let Some(name) = &self.name {
-            record.insert("name".to_string(), name.clone().into());
-        }
-        if let Some(date) = &self.date {
-            record.insert("date".to_string(), (*date).into());
-        }
-        if let Some(stage) = &self.stage_count {
-            record.insert("stage_count".to_string(), (*stage).into());
-        }
-        if let Some(owner) = &self.owner {
-            record.insert("owner".to_string(), owner.clone().into());
-        }
-        if let Some(api_token) = &self.api_token {
-            record.insert("api_token".to_string(), api_token.clone().into());
-        }
-        if let Some(master_db_mode) = self.master_db_mode {
-            record.insert("db_mode".to_string(), master_db_mode.as_record_value().into());
-        }
-        if let Some(config) = &self.config {
-            record.insert("config".to_string(), serde_json::to_string(config).expect("config to json should not fail").into());
-        }
-        record
-    }
-    // pub fn is_empty(&self) -> bool {
-    //     self.name.is_none()
-    //         && self.date.is_none()
-    //         && self.stage_count.is_none()
-    //         && self.owner.is_none()
-    //         && self.api_token.is_none()
-    //         && self.master_db_mode.is_none()
-    //         && self.config.is_none()
-    // }
 }
 
 pub(crate) struct OpenEventCtl {

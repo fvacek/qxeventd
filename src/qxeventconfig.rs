@@ -19,6 +19,13 @@ pub struct QxEventConfig {
     pub members: BTreeMap<String, Role>,
 }
 
+/// Config is stored as a JSON string
+impl From<QxEventConfig> for qxsql::DbValue {
+    fn from(value: QxEventConfig) -> Self {
+        serde_json::to_string(&value).expect("config to json should not fail").into()
+    }
+}
+
 impl Default for QxEventConfig {
     fn default() -> Self {
         Self {

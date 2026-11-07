@@ -5,7 +5,7 @@ pub trait RpcType {
     const RPC_TYPE: &'static str;
 }
 
-pub use rpc_type_derive::RpcTypeStr;
+pub use rpc_type_derive::{RecordChange, RpcTypeStr};
 
 macro_rules! impl_rpc_type {
     ($rpc_type:literal: $($ty:ty),+) => {

@@ -19,6 +19,9 @@
 //! `RpcType` itself.
 //!
 //! The generated code refers to `crate::rpctype::RpcType` and `::const_format`.
+//!
+//! `#[derive(RecordChange)]` generates a partial update `<Name>Change` struct with a
+//! `to_record()` function, see [`macro@RecordChange`].
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -27,10 +30,23 @@ use syn::{
     PathArguments, Type, TypePath,
 };
 
+mod record_change;
+
 #[proc_macro_derive(RpcTypeStr)]
 pub fn derive_rpc_type_str(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Generates `<Name>Change` with all the fields optional and its `to_record()` function.
+///
+/// See the `record_change` module docs for the attributes. The generated code refers to `::qxsql`.
+#[proc_macro_derive(RecordChange, attributes(record_change))]
+pub fn derive_record_change(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    record_change::expand(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
