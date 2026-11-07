@@ -1,5 +1,5 @@
 //! `#[derive(RpcTypeStr)]` implements `crate::rpctype::RpcTypeStr` for a struct with named fields
-//! or an enum with unit variants only, producing its SHV RPC type description as a compile-time `&'static str`
+//! or an enum, producing its SHV RPC type description as a compile-time `&'static str`
 //! (see <https://silicon-heaven.github.io/shv-doc/rpctypes.html>).
 //!
 //! ```ignore
@@ -18,9 +18,11 @@
 //! type has to implement
 //! `RpcTypeStr` itself.
 //!
-//! An enum with unit variants is described as a string enum `s[Variant,...]` (serde serializes
-//! unit variants as their names), honouring `#[serde(rename = "...")]` on variants.
-//! The `s[...]` syntax is planned for SHV RPC types, but it is not documented yet.
+//! An enum is described as serde serializes it externally tagged: unit variants form a string enum
+//! `s[Variant,...]`, a newtype variant `V(T)` is a map `{T:V}` and a struct variant
+//! `V { f: T }` is `{{T:f}:V}`; the alternatives are joined by `|`.
+//! `#[serde(rename = "...")]` on variants is honoured, `tag`, `content` and `untagged` enums are
+//! rejected. The `s[...]` syntax is planned for SHV RPC types, but it is not documented yet.
 //!
 //! The generated code refers to `crate::rpctype::RpcTypeStr` and `::const_format`.
 //!
@@ -59,6 +61,8 @@ pub fn derive_record_change(input: TokenStream) -> TokenStream {
 struct SerdeAttrs {
     transparent: bool,
     rename: Option<String>,
+    /// `tag`, `content` or `untagged`, an enum representation other than externally tagged
+    non_external_tagging: bool,
 }
 
 fn serde_attrs(attrs: &[Attribute]) -> syn::Result<SerdeAttrs> {
@@ -69,6 +73,11 @@ fn serde_attrs(attrs: &[Attribute]) -> syn::Result<SerdeAttrs> {
                 res.transparent = true;
             } else if meta.path.is_ident("rename") {
                 res.rename = Some(meta.value()?.parse::<LitStr>()?.value());
+            } else if meta.path.is_ident("untagged") {
+                res.non_external_tagging = true;
+            } else if meta.path.is_ident("tag") || meta.path.is_ident("content") {
+                res.non_external_tagging = true;
+                meta.value()?.parse::<syn::Expr>()?;
             } else if meta.input.peek(syn::Token![=]) {
                 meta.value()?.parse::<syn::Expr>()?;
             } else if meta.input.peek(syn::token::Paren) {
@@ -127,12 +136,12 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
             &input.generics,
-            "RpcTypeStr does not support generic structs",
+            "RpcTypeStr does not support generic types",
         ));
     }
 
     let fields = match &input.data {
-        Data::Enum(data) => return expand_enum(name, data),
+        Data::Enum(data) => return expand_enum(input, data),
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => &fields.named,
             _ => {
@@ -157,18 +166,8 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let parts = type_parts(&field.ty);
         quote! { ::const_format::concatcp!(#(#parts),*) }
     } else {
-        let mut parts = Vec::new();
-        for (i, field) in fields.iter().enumerate() {
-            let ty_parts = type_parts(&field.ty);
-            let key = match serde_attrs(&field.attrs)?.rename {
-                Some(rename) => rename,
-                None => field.ident.as_ref().unwrap().to_string(),
-            };
-            let sep = if i == 0 { "" } else { "," };
-            let key = format!(":{key}");
-            parts.push(quote! { #sep, #(#ty_parts,)* #key });
-        }
-        quote! { ::const_format::concatcp!("{", #(#parts,)* "}") }
+        let parts = named_fields_parts(fields)?;
+        quote! { ::const_format::concatcp!(#(#parts),*) }
     };
 
     Ok(quote! {
@@ -178,25 +177,88 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     })
 }
 
-/// String enum `s[Variant,...]`
-fn expand_enum(name: &syn::Ident, data: &syn::DataEnum) -> syn::Result<proc_macro2::TokenStream> {
-    let mut names = Vec::new();
-    for variant in &data.variants {
-        if !matches!(variant.fields, Fields::Unit) {
-            return Err(syn::Error::new_spanned(
-                variant,
-                "RpcTypeStr supports enums with unit variants only",
-            ));
+/// Const string pieces describing named fields as a map `{T:key,...}`
+fn named_fields_parts<'a>(
+    fields: impl IntoIterator<Item = &'a syn::Field>,
+) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+    let mut parts = vec![quote! { "{" }];
+    for (i, field) in fields.into_iter().enumerate() {
+        if i > 0 {
+            parts.push(quote! { "," });
         }
-        names.push(match serde_attrs(&variant.attrs)?.rename {
+        parts.extend(type_parts(&field.ty));
+        let key = match serde_attrs(&field.attrs)?.rename {
+            Some(rename) => rename,
+            None => field.ident.as_ref().unwrap().to_string(),
+        };
+        let key = format!(":{key}");
+        parts.push(quote! { #key });
+    }
+    parts.push(quote! { "}" });
+    Ok(parts)
+}
+
+/// Externally tagged enum, as serde serializes it by default.
+///
+/// Unit variants are serialized as their names and form a string enum `s[A,B]`,
+/// a newtype variant `V(T)` is a map `{T:V}`, a struct variant `V { f: T }` is `{{T:f}:V}`.
+/// The alternatives are joined by `|`.
+fn expand_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<proc_macro2::TokenStream> {
+    let name = &input.ident;
+    if serde_attrs(&input.attrs)?.non_external_tagging {
+        return Err(syn::Error::new_spanned(
+            input,
+            "RpcTypeStr supports externally tagged enums only, not `tag`, `content` or `untagged`",
+        ));
+    }
+
+    let mut unit_names = Vec::new();
+    let mut alternatives = Vec::new();
+    for variant in &data.variants {
+        let variant_name = match serde_attrs(&variant.attrs)?.rename {
             Some(rename) => rename,
             None => variant.ident.to_string(),
-        });
+        };
+        let value_parts = match &variant.fields {
+            Fields::Unit => {
+                unit_names.push(variant_name);
+                continue;
+            }
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                type_parts(&fields.unnamed[0].ty)
+            }
+            Fields::Named(fields) => named_fields_parts(&fields.named)?,
+            Fields::Unnamed(_) => {
+                return Err(syn::Error::new_spanned(
+                    variant,
+                    "RpcTypeStr does not support tuple variants with more than one field",
+                ));
+            }
+        };
+        let key = format!(":{variant_name}}}");
+        let mut parts = vec![quote! { "{" }];
+        parts.extend(value_parts);
+        parts.push(quote! { #key });
+        alternatives.push(parts);
     }
-    let rpc_type = format!("s[{}]", names.join(","));
+    if !unit_names.is_empty() {
+        let unit = format!("s[{}]", unit_names.join(","));
+        alternatives.insert(0, vec![quote! { #unit }]);
+    }
+    if alternatives.is_empty() {
+        return Err(syn::Error::new_spanned(input, "RpcTypeStr does not support enums without variants"));
+    }
+
+    let mut parts = Vec::new();
+    for (i, alternative) in alternatives.into_iter().enumerate() {
+        if i > 0 {
+            parts.push(quote! { "|" });
+        }
+        parts.extend(alternative);
+    }
     Ok(quote! {
         impl crate::rpctype::RpcTypeStr for #name {
-            const RPC_TYPE_STR: &'static str = #rpc_type;
+            const RPC_TYPE_STR: &'static str = ::const_format::concatcp!(#(#parts),*);
         }
     })
 }

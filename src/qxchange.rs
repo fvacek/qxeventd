@@ -1,10 +1,10 @@
 use std::fmt::Display;
 
 use qxsql::{DbValue, ToRecord};
-use rpc_type_derive::RecordChange;
+use rpc_type_derive::{RecordChange, RpcTypeStr};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, ToRecord, RecordChange)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToRecord, RecordChange, RpcTypeStr)]
 pub struct QxChangeRecord {
     pub data_type: String,
     pub foreign_table: Option<String>,
@@ -19,7 +19,7 @@ pub struct QxChangeRecord {
     pub created: chrono::DateTime<chrono::FixedOffset>,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub enum Status {
     Pending,
     Accepted,
@@ -52,7 +52,7 @@ impl From<Data> for DbValue {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub enum LateEntryKind {
     Update {
         #[serde(rename = "runId")]
@@ -69,7 +69,7 @@ pub enum LateEntryKind {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub struct LateEntry {
     pub kind: LateEntryKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +88,31 @@ pub struct LateEntry {
     pub paid: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub enum Data {
     LateEntry(LateEntry),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpctype::RpcTypeStr;
+
+    #[test]
+    fn rpc_types() {
+        assert_eq!(Status::RPC_TYPE_STR, "s[Pending,Accepted,Rejected]");
+        assert_eq!(
+            LateEntryKind::RPC_TYPE_STR,
+            "{{i:runId}:Update}|{{i:classId}:NewEntry}|{{i:runId}:DeleteEntry}"
+        );
+        assert_eq!(
+            Data::RPC_TYPE_STR,
+            concat!(
+                "{{{{i:runId}:Update}|{{i:classId}:NewEntry}|{{i:runId}:DeleteEntry}:kind,",
+                "s|n:firstname,s|n:lastname,s|n:registration,i|n:siid,i|n:starttimems,s|n:note,b|n:paid}:LateEntry}"
+            )
+        );
+        assert!(QxChangeRecord::RPC_TYPE_STR.contains(&format!("{}|n:data,", Data::RPC_TYPE_STR)));
+        assert!(QxChangeRecord::RPC_TYPE_STR.contains(",s[Pending,Accepted,Rejected]:status,"));
+    }
 }

@@ -204,6 +204,26 @@ mod tests {
         assert_eq!(shvproto::to_rpcvalue(&Mode::ReadOnly).unwrap().as_str(), "readOnly");
     }
 
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
+    enum Mixed {
+        None,
+        Id(i64),
+        #[serde(rename = "pos")]
+        Position { x: i32, #[serde(rename = "Y")] y: Option<i32> },
+        Other,
+    }
+
+    #[test]
+    fn data_enum_is_externally_tagged() {
+        assert_eq!(Mixed::RPC_TYPE_STR, "s[None,Other]|{i:Id}|{{i:x,i|n:Y}:pos}");
+        assert_eq!(shvproto::to_rpcvalue(&Mixed::None).unwrap().to_cpon(), r#""None""#);
+        assert_eq!(shvproto::to_rpcvalue(&Mixed::Id(3)).unwrap().to_cpon(), r#"{"Id":3}"#);
+        assert_eq!(
+            shvproto::to_rpcvalue(&Mixed::Position { x: 1, y: None }).unwrap().to_cpon(),
+            r#"{"pos":{"Y":null,"x":1}}"#
+        );
+    }
+
     #[test]
     fn chrono_datetime_is_shv_datetime() {
         assert_eq!(ChronoDates::RPC_TYPE_STR, "{t:date,t|n:opt_date}");
