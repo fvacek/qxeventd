@@ -1,4 +1,4 @@
-//! `#[derive(RpcTypeStr)]` implements `crate::rpctype::RpcType` for a struct with named fields,
+//! `#[derive(RpcTypeStr)]` implements `crate::rpctype::RpcTypeStr` for a struct with named fields,
 //! producing its SHV RPC type description as a compile-time `&'static str`
 //! (see <https://silicon-heaven.github.io/shv-doc/rpctypes.html>).
 //!
@@ -16,9 +16,9 @@
 //! `Option<T>` fields are described as `T|n`, `Vec<T>` as `[T]` (except `Vec<u8>`, which is
 //! a Blob `x`), `BTreeMap<K, V>` and `HashMap<K, V>` fields as `{V}`; every other field
 //! type has to implement
-//! `RpcType` itself.
+//! `RpcTypeStr` itself.
 //!
-//! The generated code refers to `crate::rpctype::RpcType` and `::const_format`.
+//! The generated code refers to `crate::rpctype::RpcTypeStr` and `::const_format`.
 //!
 //! `#[derive(RecordChange)]` generates a partial update `<Name>Change` struct with a
 //! `to_record()` function, see [`macro@RecordChange`].
@@ -84,7 +84,7 @@ fn is_u8(ty: &Type) -> bool {
 ///
 /// `Option<T>` is expanded here as `T|n`, `Vec<T>` as `[T]` and `BTreeMap<K, V>` /
 /// `HashMap<K, V>` as `{V}`,
-/// because a generic `impl RpcType` for them cannot concatenate the inner `RPC_TYPE`
+/// because a generic `impl RpcTypeStr` for them cannot concatenate the inner `RPC_TYPE`
 /// into a `&'static str` on stable Rust.
 fn type_parts(ty: &Type) -> Vec<proc_macro2::TokenStream> {
     if let Type::Path(TypePath { qself: None, path }) = ty
@@ -98,7 +98,7 @@ fn type_parts(ty: &Type) -> Vec<proc_macro2::TokenStream> {
                 parts.push(quote! { "|n" });
                 return parts;
             }
-            // Vec<u8> is a Blob, left to its RpcType impl
+            // Vec<u8> is a Blob, left to its RpcTypeStr impl
             ("Vec", [GenericArgument::Type(item)]) if !is_u8(item) => {
                 let mut parts = vec![quote! { "[" }];
                 parts.extend(type_parts(item));
@@ -114,7 +114,7 @@ fn type_parts(ty: &Type) -> Vec<proc_macro2::TokenStream> {
             _ => {}
         }
     }
-    vec![quote! { <#ty as crate::rpctype::RpcType>::RPC_TYPE }]
+    vec![quote! { <#ty as crate::rpctype::RpcTypeStr>::RPC_TYPE }]
 }
 
 fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -165,7 +165,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     };
 
     Ok(quote! {
-        impl crate::rpctype::RpcType for #name {
+        impl crate::rpctype::RpcTypeStr for #name {
             const RPC_TYPE: &'static str = #rpc_type;
         }
     })

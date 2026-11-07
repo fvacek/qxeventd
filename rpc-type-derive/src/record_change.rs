@@ -1,5 +1,7 @@
 //! `#[derive(RecordChange)]` generates a `<Name>Change` struct, a partial update of `<Name>`.
 //!
+//! `to_record()` for `<Name>` itself is not generated, derive `qxsql::ToRecord` for it.
+//!
 //! Every field of the original struct becomes `Option<T>` in the change struct (fields which
 //! are `Option<T>` already are kept as they are), and `to_record()` builds a `qxsql::Record`
 //! from the fields which are set, keyed by the original field name, i.e. the DB column.
@@ -19,7 +21,7 @@
 //! }
 //! // struct EventRecordChange { name: Option<String>, date: Option<DateTime<FixedOffset>>,
 //! //                            master_db_mode: Option<EventDbMode> }
-//! // EventRecordChange::to_record() -> Record with keys "name", "date", "db_mode"
+//! // EventRecordChange::to_record() -> Record with the set keys of "name", "date", "db_mode"
 //! ```
 //!
 //! # Struct attributes
@@ -149,6 +151,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
         let ident = attrs.rename.as_ref().unwrap_or(orig_ident);
         let field_vis = &field.vis;
         let ty = &field.ty;
+        let key = orig_ident.to_string();
         let ty = if is_option(ty) { quote! { #ty } } else { quote! { Option<#ty> } };
         let docs = field.attrs.iter().filter(|a| a.path().is_ident("doc"));
         let serde = if has_serde {
@@ -165,7 +168,6 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
             #field_vis #ident: #ty
         });
 
-        let key = orig_ident.to_string();
         inserts.push(quote! {
             if let Some(v) = &self.#ident {
                 record.insert(#key.to_string(), ::qxsql::DbValue::from(v.clone()));

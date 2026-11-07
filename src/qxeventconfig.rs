@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::rpctype::{RpcType, RpcTypeStr};
+use crate::rpctype::RpcTypeStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
@@ -10,7 +10,7 @@ pub enum Role {
     Banned,
 }
 
-impl RpcType for Role {
+impl RpcTypeStr for Role {
     const RPC_TYPE: &'static str = "s";
 }
 

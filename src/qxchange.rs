@@ -1,19 +1,23 @@
 use std::fmt::Display;
 
 use qxsql::{DbValue, ToRecord};
+use rpc_type_derive::RecordChange;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Default, ToRecord)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, ToRecord, RecordChange)]
+#[record_change(derive(Debug, Clone, Default, Serialize, Deserialize))]
 pub struct QxChangeRecord {
-    // #[serde(default, skip_serializing_if = "Option::is_none")] pub id: Option<i64>,
-    #[to_record(skip_if_none)] pub data_type: Option<String>,
-    #[to_record(skip_if_none)] pub foreign_table: Option<String>,
-    #[to_record(skip_if_none)] pub foreign_id: Option<i64>,
-    #[to_record(skip_if_none)] pub data: Option<Data>,
-    #[to_record(skip_if_none)] pub user_id: Option<String>,
-    #[to_record(skip_if_none)] pub status: Option<Status>,
-    #[to_record(skip_if_none)] pub status_message: Option<String>,
-    #[to_record(skip_if_none)] pub stage_id: Option<i64>,
+    pub data_type: String,
+    pub foreign_table: Option<String>,
+    pub foreign_id: Option<i64>,
+    pub data: Option<Data>,
+    pub user_id: Option<String>,
+    pub status: Status,
+    pub status_message: Option<String>,
+    pub stage_id: i64,
+    #[serde(with = "crate::rpctype::chrono_datetime")]
+    #[record_change(with = "crate::rpctype::chrono_datetime_opt")]
+    pub created: chrono::DateTime<chrono::FixedOffset>,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
@@ -22,7 +26,11 @@ pub enum Status {
     Accepted,
     Rejected,
 }
-
+impl Default for Status {
+    fn default() -> Self {
+        Status::Pending
+    }
+}
 impl From<Status> for DbValue {
     fn from(value: Status) -> Self {
         DbValue::String(format!("{}", value))
@@ -55,12 +63,16 @@ pub enum LateEntryKind {
         #[serde(rename = "classId")]
         class_id: i64,
     },
+    DeleteEntry {
+        #[serde(rename = "runId")]
+        run_id: i64,
+    },
 }
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LateEntry {
-    pub id: LateEntryKind,
+    pub kind: LateEntryKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firstname: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

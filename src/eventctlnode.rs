@@ -6,13 +6,13 @@ use serde::{Serialize, Deserialize};
 use crate::eventsqlapi::LocalEventSqlApi;
 use crate::filenode::{META_FILE_APPEND, META_FILE_CRC, META_FILE_READ, META_FILE_SHA1, META_FILE_SIZE, META_FILE_STAT, META_FILE_TRUNCATE, META_FILE_WRITE};
 use crate::rpcvalueext::RpcValueExt;
-use crate::rpctype::{RpcType, RpcTypeStr};
+use crate::rpctype::RpcTypeStr;
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
 use shvproto::{RpcValue, from_rpcvalue};
 use shvrpc::metamethod::{AccessLevel, MetaMethod, Flags};
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
-use crate::qxchange::{self, Data, LateEntry, QxChangeRecord};
+use crate::qxchange::{self, Data, LateEntry, QxChangeRecord, QxChangeRecordChange};
 use crate::qxeventconfig::Role;
 use crate::remotedbsqlapi::RemoteEventSqlApi;
 use crate::{anyhow_to_rpc_error, filenode, resolve_error, split_first_fragment, str_to_rpc_error};
@@ -393,7 +393,7 @@ pub(crate) async fn request_handler(
                                         let ok = qxsql.delete_record_with_recchng("qxchanges", qxchange_id, None).await.map_err(anyhow_to_rpc_error)?;
                                         return Ok(RpcValue::from(ok))
                                     }
-                                    let qxchange = QxChangeRecord {
+                                    let qxchange = QxChangeRecordChange {
                                         data: params.late_entry.map(|le| Data::LateEntry(le)),
                                         ..Default::default()
                                     };
@@ -401,23 +401,26 @@ pub(crate) async fn request_handler(
                                     Ok(RpcValue::from(ok))
                                 } else {
                                     let (foreign_table, foreign_id) = if let Some(le) = &params.late_entry {
-                                        match le.id {
+                                        match le.kind {
                                             qxchange::LateEntryKind::Update { run_id: id } => ("runs".to_string(), id),
                                             qxchange::LateEntryKind::NewEntry { class_id: id } => ("classes".to_string(), id),
+                                            qxchange::LateEntryKind::DeleteEntry { run_id: id } => ("runs".to_string(), id),
                                         }
                                     } else {
                                         return Err(str_to_rpc_error("Run or Class ID is required"));
                                     };
                                     let qxchange = QxChangeRecord {
-                                        stage_id: Some(params.stage_id),
+                                        stage_id: params.stage_id,
                                         foreign_table: Some(foreign_table),
                                         foreign_id: Some(foreign_id),
-                                        data_type: Some("LateEntry".to_string()),
+                                        data_type: "LateEntry".to_string(),
                                         data: params.late_entry.map(|le| Data::LateEntry(le)),
                                         user_id: Some(user_id),
-                                        status: Some(qxchange::Status::Pending),
+                                        status: qxchange::Status::default(),
                                         status_message: None,
+                                        created: chrono::Utc::now().fixed_offset(),
                                     };
+
                                     let id = qxsql.create_record_with_recchng("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(id))
                                 }
@@ -621,7 +624,7 @@ async fn list_events(app_state: SharedAppState) -> Vec<String> {
 struct LateEntryParams {
     stage_id: i64,
     change_id: Option<i64>,
-    late_entry: Option<LateEntry>,
+    late_entry: Option<LateEntry>, // drop change if None
     #[serde(default, skip_serializing_if = "Option::is_none")]
     issuer: Option<String>,
 }
@@ -671,7 +674,7 @@ mod tests {
         );
         assert_eq!(
             UpdateEventRecordParams::RPC_TYPE,
-            "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,{{s}:members}|n:config,s|n:master_db_mode}:change}"
+            "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,{{s}:members}|n:config,s|n:db_mode}:change}"
         );
         assert_eq!(SetEventDbModeParams::RPC_TYPE, "{i:event_id,s:db_mode}");
         assert_eq!(ListEventsResult::RPC_TYPE, "[{i:id,s:name,i:stage_count,t:date,s:owner,s:db_mode}]");

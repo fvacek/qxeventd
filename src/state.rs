@@ -11,7 +11,7 @@ use chrono::DateTime;
 use chrono::Local;
 use log::*;
 use qxsql::{QxSqlApiRecChng, RecChng, RecOp};
-use qxsql::{DbValue, Record};
+use qxsql::{DbValue, Record, ToRecord};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
@@ -29,7 +29,7 @@ use crate::eventsqlapi::LocalEventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
 use crate::qxeventconfig::QxEventConfig;
-use crate::rpctype::{RecordChange, RpcType, RpcTypeStr};
+use crate::rpctype::{RecordChange, RpcTypeStr};
 
 
 pub type EventId = i64;
@@ -78,7 +78,7 @@ impl State {
             stage_count: default_stage_count(),
             config: QxEventConfig::default(),
         };
-        let rec = event_data.to_record()?;
+        let rec = event_data.to_record();
         let qxsql = LocalDbSqlApi::new(self.db_pool.clone(), rpc_client.clone());
         let event_id = qxsql.create_record_with_recchng("events", &rec, Some(owner)).await?;
         info!("Created event {event_id}");
@@ -542,7 +542,7 @@ pub(crate) enum EventDbMode {
     Replica,
 }
 
-impl RpcType for EventDbMode {
+impl RpcTypeStr for EventDbMode {
     const RPC_TYPE: &'static str = "s";
 }
 
@@ -588,10 +588,11 @@ pub(crate) struct EventStatus {
     pub expires_at: DateTime<chrono::FixedOffset>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr, RecordChange)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr, ToRecord, RecordChange)]
 pub(crate) struct EventRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[to_record(skip)]
     #[record_change(skip)]
     pub id: Option<i64>,
     pub name: String,
@@ -603,7 +604,6 @@ pub(crate) struct EventRecord {
     pub owner: String,
     pub api_token: String,
     pub config: QxEventConfig,
-    #[record_change(rename = "master_db_mode")]
     pub db_mode: EventDbMode,
 }
 
@@ -649,17 +649,6 @@ impl EventRecord {
                 .and_then(|config| serde_json::from_str(config).ok())
                 .unwrap_or_default(),
         })
-    }
-    fn to_record(&self) -> anyhow::Result<Record> {
-        let mut record = Record::new();
-        record.insert("name".to_string(), self.name.clone().into());
-        record.insert("date".to_string(), self.date.into());
-        record.insert("stage_count".to_string(), self.stage_count.into());
-        record.insert("owner".to_string(), self.owner.clone().into());
-        record.insert("api_token".to_string(), self.api_token.clone().into());
-        record.insert("config".to_string(), serde_json::to_string(&self.config)?.into());
-        record.insert("db_mode".to_string(), self.db_mode.as_record_value().into());
-        Ok(record)
     }
 }
 
