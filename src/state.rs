@@ -471,6 +471,7 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
                 }
                 let mut record = record.clone();
                 record.insert("id".to_owned(), recchng.id.into());
+                remove_generated_columns(&sql_api, &recchng.table, &mut record).await?;
                 info!(target: "ApplyRecChng", "Insert recchng: table='{}', id={}", &recchng.table, recchng.id);
                 sql_api.create_record_with_recchng(&recchng.table, &record, recchng.issuer.clone()).await?;
                 Ok(())
@@ -480,6 +481,11 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
         RecOp::Update => match recchng.record.as_ref() {
             Some(record) => {
                 info!(target: "ApplyRecChng", "Update recchng: table='{}', id={}", &recchng.table, recchng.id);
+                let mut record = record.clone();
+                remove_generated_columns(&sql_api, &recchng.table, &mut record).await?;
+                if record.is_empty() {
+                    return Ok(());
+                }
                 sql_api
                     .update_record_with_recchng(&recchng.table, recchng.id, &record, recchng.issuer.clone())
                     .await?;
@@ -497,6 +503,16 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
     }
 }
 
+/// Remote recchngs carry whole rows, including generated (computed) columns,
+/// which SQLite refuses to INSERT/UPDATE explicitly.
+async fn remove_generated_columns(sql_api: &LocalEventSqlApi, table: &str, record: &mut Record) -> anyhow::Result<()> {
+    let generated_columns = sql_api.generated_columns(table).await?;
+    if generated_columns.is_empty() {
+        return Ok(());
+    }
+    record.retain(|key, _| !generated_columns.iter().any(|name| name.eq_ignore_ascii_case(key)));
+    Ok(())
+}
 
 fn rechng_from_rpcvalue(value: Option<&RpcValue>) -> anyhow::Result<RecChng> {
     let value = value.ok_or_else(|| anyhow!("recchng signal has no parameter"))?;
