@@ -96,7 +96,7 @@ pub fn set_global_config(config: Config) {
 
 /// Run qxeventd, connects to broker specified in global config.
 pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    eventdb::init_generated_columns();
+    eventdb::init_schema_columns();
     let db_pool = create_db_connection().await?;
     let (shutdown_sender, shutdown_receiver) = channel::bounded(1);
     let app_state = SharedAppState::new(RwLock::new(State {

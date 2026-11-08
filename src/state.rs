@@ -514,9 +514,8 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
                 if recchng.id <= 0 {
                     return Err(anyhow!("Insert recchng to table '{table}' has no id, replica mode requires id even for inserts", table = &recchng.table));
                 }
-                let mut record = record.clone();
+                let mut record = remove_default_and_generated_columns(&recchng.table, record);
                 record.insert("id".to_owned(), recchng.id.into());
-                remove_generated_columns(&recchng.table, &mut record);
                 info!(target: "ApplyRecChng", "Insert recchng: table='{}', id={}", &recchng.table, recchng.id);
                 sql_api.create_record_with_recchng(&recchng.table, &record, recchng.issuer.clone()).await?;
                 Ok(())
@@ -555,6 +554,22 @@ fn remove_generated_columns(table: &str, record: &mut Record) {
     if !generated_columns.is_empty() {
         record.retain(|key, _| !generated_columns.iter().any(|name| name.eq_ignore_ascii_case(key)));
     }
+}
+
+/// Removes generated columns, see [`remove_generated_columns`], and also columns having their
+/// default value, these can be omitted on INSERT, the DB fills them in itself.
+/// Not usable for UPDATE, where omitting a column would keep its old value.
+fn remove_default_and_generated_columns(table: &str, record: &Record) -> Record {
+    let generated_columns = crate::eventdb::generated_columns(table);
+    record
+        .iter()
+        .filter(|(key, _)| !generated_columns.iter().any(|name| name.eq_ignore_ascii_case(key)))
+        .filter(|(key, value)| {
+            crate::eventdb::column_default(table, key)
+                .is_none_or(|default| !crate::eventdb::is_default_value(value, default))
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 fn rechng_from_rpcvalue(value: Option<&RpcValue>) -> anyhow::Result<RecChng> {

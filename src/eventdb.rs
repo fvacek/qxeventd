@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 use async_sqlite::rusqlite::Connection;
 use async_sqlite::{JournalMode, Pool, PoolBuilder};
 use log::info;
+use qxsql::DbValue;
 use qxsql::sql::{QxSqlApi, record_from_slice};
 use rusqlite_migration::{M, Migrations};
 use shvclient::ClientCommandSender;
@@ -75,40 +76,112 @@ fn migrate_connection(conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generated (computed) column names per table of the event DB schema, all names lower case.
+/// Special columns of one event DB table, all names lower case.
+#[derive(Debug, Default)]
+struct TableColumns {
+    /// Generated (computed) columns, they cannot be written explicitly.
+    generated: Vec<String>,
+    /// Literal default values of columns, columns with non-literal defaults
+    /// (like `CURRENT_TIMESTAMP`) are not included.
+    defaults: HashMap<String, DbValue>,
+}
+
+/// Special columns per table of the event DB schema, table names lower case.
 /// Every event DB is migrated to the same schema, so it is read once from an in-memory DB
-/// migrated the same way, at application start, see [`init_generated_columns`].
+/// migrated the same way, at application start, see [`init_schema_columns`].
 /// The bundled schema validity is checked by tests.
-static GENERATED_COLUMNS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
-    let generated_columns = load_generated_columns().expect("Bundled event DB schema should be valid");
-    info!("Event DB generated columns: {generated_columns:?}");
-    generated_columns
+static SCHEMA_COLUMNS: LazyLock<HashMap<String, TableColumns>> = LazyLock::new(|| {
+    let schema_columns = load_schema_columns().expect("Bundled event DB schema should be valid");
+    info!("Event DB schema columns: {schema_columns:?}");
+    schema_columns
 });
 
-/// Load [`GENERATED_COLUMNS`] eagerly, so schema problems show up at application start.
-pub fn init_generated_columns() {
-    LazyLock::force(&GENERATED_COLUMNS);
+/// Load [`SCHEMA_COLUMNS`] eagerly, so schema problems show up at application start.
+pub fn init_schema_columns() {
+    LazyLock::force(&SCHEMA_COLUMNS);
+}
+
+fn table_columns(table: &str) -> Option<&'static TableColumns> {
+    SCHEMA_COLUMNS.get(&table.to_ascii_lowercase())
 }
 
 /// Generated columns of event DB `table`, they cannot be written explicitly.
 pub fn generated_columns(table: &str) -> &'static [String] {
-    GENERATED_COLUMNS.get(&table.to_ascii_lowercase()).map(Vec::as_slice).unwrap_or_default()
+    table_columns(table).map(|columns| columns.generated.as_slice()).unwrap_or_default()
 }
 
-fn load_generated_columns() -> anyhow::Result<HashMap<String, Vec<String>>> {
+/// Literal default value of `column` of event DB `table`, if any.
+pub fn column_default(table: &str, column: &str) -> Option<&'static DbValue> {
+    table_columns(table)?.defaults.get(&column.to_ascii_lowercase())
+}
+
+fn load_schema_columns() -> anyhow::Result<HashMap<String, TableColumns>> {
     let mut conn = Connection::open_in_memory()?;
     migrate_connection(&mut conn)?;
     // pragma_table_xinfo.hidden: 2 = VIRTUAL generated column, 3 = STORED generated column
     let mut stmt = conn.prepare(
-        "SELECT m.name, x.name FROM sqlite_master m, pragma_table_xinfo(m.name) x
-         WHERE m.type = 'table' AND x.hidden IN (2, 3)")?;
-    let mut generated_columns: HashMap<String, Vec<String>> = HashMap::new();
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        "SELECT m.name, x.name, x.hidden IN (2, 3), x.dflt_value FROM sqlite_master m, pragma_table_xinfo(m.name) x
+         WHERE m.type = 'table' AND (x.hidden IN (2, 3) OR x.dflt_value IS NOT NULL)")?;
+    let mut schema_columns: HashMap<String, TableColumns> = HashMap::new();
+    let rows = stmt.query_map([], |row| Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, bool>(2)?,
+        row.get::<_, Option<String>>(3)?,
+    )))?;
     for row in rows {
-        let (table, column) = row?;
-        generated_columns.entry(table.to_ascii_lowercase()).or_default().push(column.to_ascii_lowercase());
+        let (table, column, generated, default) = row?;
+        let table_columns = schema_columns.entry(table.to_ascii_lowercase()).or_default();
+        let column = column.to_ascii_lowercase();
+        if let Some(value) = default.as_deref().and_then(parse_default_literal) {
+            table_columns.defaults.insert(column.clone(), value);
+        }
+        if generated {
+            table_columns.generated.push(column);
+        }
     }
-    Ok(generated_columns)
+    Ok(schema_columns)
+}
+
+/// Parse SQL default value literal as reported by `pragma_table_xinfo.dflt_value`.
+fn parse_default_literal(default: &str) -> Option<DbValue> {
+    let default = default.trim();
+    if default.eq_ignore_ascii_case("NULL") {
+        return Some(DbValue::Null);
+    }
+    if default.eq_ignore_ascii_case("TRUE") {
+        return Some(DbValue::Int(1));
+    }
+    if default.eq_ignore_ascii_case("FALSE") {
+        return Some(DbValue::Int(0));
+    }
+    if let Some(s) = default.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        return Some(DbValue::String(s.replace("''", "'")));
+    }
+    if let Ok(n) = default.parse::<i64>() {
+        return Some(DbValue::Int(n));
+    }
+    if let Ok(d) = default.parse::<f64>() {
+        return Some(DbValue::Double(d));
+    }
+    // CURRENT_TIMESTAMP, expressions, ...
+    None
+}
+
+/// Whether `value` equals column default `default`, booleans and numbers are compared by value.
+pub fn is_default_value(value: &DbValue, default: &DbValue) -> bool {
+    fn as_number(value: &DbValue) -> Option<f64> {
+        match value {
+            DbValue::Int(n) => Some(*n as f64),
+            DbValue::Double(d) => Some(*d),
+            DbValue::Bool(b) => Some(if *b { 1. } else { 0. }),
+            _ => None,
+        }
+    }
+    match (as_number(value), as_number(default)) {
+        (Some(a), Some(b)) => a == b,
+        _ => value == default,
+    }
 }
 
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
@@ -129,5 +202,24 @@ mod tests {
         assert_eq!(generated_columns("RUNS"), ["disqualified"]);
         assert!(generated_columns("competitors").is_empty());
         assert!(generated_columns("no_such_table").is_empty());
+    }
+
+    #[test]
+    fn column_defaults_of_bundled_schema() {
+        assert_eq!(column_default("runs", "isRunning"), Some(&DbValue::Int(1)));
+        assert_eq!(column_default("RUNS", "misPunch"), Some(&DbValue::Int(0)));
+        assert_eq!(column_default("classdefs", "startSlotIndex"), Some(&DbValue::Int(-1)));
+        assert_eq!(column_default("runs", "id"), None);
+        assert_eq!(column_default("no_such_table", "id"), None);
+    }
+
+    #[test]
+    fn default_value_comparison() {
+        assert!(is_default_value(&DbValue::Bool(false), &DbValue::Int(0)));
+        assert!(is_default_value(&DbValue::Bool(true), &DbValue::Int(1)));
+        assert!(is_default_value(&DbValue::Int(-1), &DbValue::Int(-1)));
+        assert!(!is_default_value(&DbValue::Bool(true), &DbValue::Int(0)));
+        assert!(!is_default_value(&DbValue::Null, &DbValue::Int(0)));
+        assert!(is_default_value(&DbValue::String("a".into()), &DbValue::String("a".into())));
     }
 }
