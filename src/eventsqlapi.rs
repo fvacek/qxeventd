@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_sqlite::Pool;
@@ -9,10 +8,6 @@ use qxsql::sql::Record;
 use shvclient::ClientCommandSender;
 use crate::localdbsqlapi::LocalDbSqlApi;
 use crate::state::{EventId, OpenEventCtl, SharedAppState};
-
-/// Generated column names per table. All event DBs share the same schema,
-/// so the cache is process-wide and filled lazily on first use of a table.
-static GENERATED_COLUMNS: LazyLock<Mutex<HashMap<String, Arc<Vec<String>>>>> = LazyLock::new(Default::default);
 
 pub struct LocalEventSqlApi {
     event_id: EventId,
@@ -34,26 +29,6 @@ impl LocalEventSqlApi {
         self.app_state.read().await.open_events.get(&self.event_id)
             .cloned()
             .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
-    }
-    /// Names of generated (computed) columns of `table`, see [`GENERATED_COLUMNS`].
-    pub async fn generated_columns(&self, table: &str) -> anyhow::Result<Arc<Vec<String>>> {
-        if let Some(columns) = GENERATED_COLUMNS.lock().unwrap_or_else(|e| e.into_inner()).get(table) {
-            return Ok(columns.clone());
-        }
-        let event = self.opened_event().await?;
-        let db = event.use_db().await?;
-        let table_name = table.to_string();
-        // pragma_table_xinfo.hidden: 2 = VIRTUAL generated column, 3 = STORED generated column
-        let columns = db
-            .conn(move |conn| {
-                let mut stmt = conn.prepare("SELECT name FROM pragma_table_xinfo(?1) WHERE hidden IN (2, 3)")?;
-                stmt.query_map([&table_name], |row| row.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .await?;
-        let columns = Arc::new(columns);
-        GENERATED_COLUMNS.lock().unwrap_or_else(|e| e.into_inner()).insert(table.to_string(), columns.clone());
-        Ok(columns)
     }
     // pub async fn create_record_event(&self, table: &str, record: &Record, issuer: Option<String>) -> anyhow::Result<i64> {
     //         return self.create_record_with_recchng(table, record, issuer).await;

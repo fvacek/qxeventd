@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use async_sqlite::rusqlite::Connection;
 use async_sqlite::{JournalMode, Pool, PoolBuilder};
@@ -73,6 +75,36 @@ fn migrate_connection(conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Generated (computed) column names per table of the event DB schema, all names lower case.
+/// Every event DB is migrated to the same schema, so it is read once from an in-memory DB
+/// migrated the same way, on first use. The bundled schema validity is checked by tests.
+static GENERATED_COLUMNS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
+    let generated_columns = load_generated_columns().expect("Bundled event DB schema should be valid");
+    info!("Event DB generated columns: {generated_columns:?}");
+    generated_columns
+});
+
+/// Generated columns of event DB `table`, they cannot be written explicitly.
+pub fn generated_columns(table: &str) -> &'static [String] {
+    GENERATED_COLUMNS.get(&table.to_ascii_lowercase()).map(Vec::as_slice).unwrap_or_default()
+}
+
+fn load_generated_columns() -> anyhow::Result<HashMap<String, Vec<String>>> {
+    let mut conn = Connection::open_in_memory()?;
+    migrate_connection(&mut conn)?;
+    // pragma_table_xinfo.hidden: 2 = VIRTUAL generated column, 3 = STORED generated column
+    let mut stmt = conn.prepare(
+        "SELECT m.name, x.name FROM sqlite_master m, pragma_table_xinfo(m.name) x
+         WHERE m.type = 'table' AND x.hidden IN (2, 3)")?;
+    let mut generated_columns: HashMap<String, Vec<String>> = HashMap::new();
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (table, column) = row?;
+        generated_columns.entry(table.to_ascii_lowercase()).or_default().push(column.to_ascii_lowercase());
+    }
+    Ok(generated_columns)
+}
+
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 const MIGRATION_ARRAY: &[M] = &[
@@ -80,3 +112,16 @@ const MIGRATION_ARRAY: &[M] = &[
         include_str!("create_event_db.sql"),
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_columns_of_bundled_schema() {
+        assert_eq!(generated_columns("runs"), ["disqualified"]);
+        assert_eq!(generated_columns("RUNS"), ["disqualified"]);
+        assert!(generated_columns("competitors").is_empty());
+        assert!(generated_columns("no_such_table").is_empty());
+    }
+}

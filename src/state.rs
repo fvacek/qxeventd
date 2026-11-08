@@ -516,7 +516,7 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
                 }
                 let mut record = record.clone();
                 record.insert("id".to_owned(), recchng.id.into());
-                remove_generated_columns(&sql_api, &recchng.table, &mut record).await?;
+                remove_generated_columns(&recchng.table, &mut record);
                 info!(target: "ApplyRecChng", "Insert recchng: table='{}', id={}", &recchng.table, recchng.id);
                 sql_api.create_record_with_recchng(&recchng.table, &record, recchng.issuer.clone()).await?;
                 Ok(())
@@ -527,7 +527,7 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
             Some(record) => {
                 info!(target: "ApplyRecChng", "Update recchng: table='{}', id={}", &recchng.table, recchng.id);
                 let mut record = record.clone();
-                remove_generated_columns(&sql_api, &recchng.table, &mut record).await?;
+                remove_generated_columns(&recchng.table, &mut record);
                 if record.is_empty() {
                     return Ok(());
                 }
@@ -550,13 +550,11 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
 
 /// Remote recchngs carry whole rows, including generated (computed) columns,
 /// which SQLite refuses to INSERT/UPDATE explicitly.
-async fn remove_generated_columns(sql_api: &LocalEventSqlApi, table: &str, record: &mut Record) -> anyhow::Result<()> {
-    let generated_columns = sql_api.generated_columns(table).await?;
-    if generated_columns.is_empty() {
-        return Ok(());
+fn remove_generated_columns(table: &str, record: &mut Record) {
+    let generated_columns = crate::eventdb::generated_columns(table);
+    if !generated_columns.is_empty() {
+        record.retain(|key, _| !generated_columns.iter().any(|name| name.eq_ignore_ascii_case(key)));
     }
-    record.retain(|key, _| !generated_columns.iter().any(|name| name.eq_ignore_ascii_case(key)));
-    Ok(())
 }
 
 fn rechng_from_rpcvalue(value: Option<&RpcValue>) -> anyhow::Result<RecChng> {
