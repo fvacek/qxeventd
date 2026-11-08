@@ -77,12 +77,18 @@ fn migrate_connection(conn: &mut Connection) -> anyhow::Result<()> {
 
 /// Generated (computed) column names per table of the event DB schema, all names lower case.
 /// Every event DB is migrated to the same schema, so it is read once from an in-memory DB
-/// migrated the same way, on first use. The bundled schema validity is checked by tests.
+/// migrated the same way, at application start, see [`init_generated_columns`].
+/// The bundled schema validity is checked by tests.
 static GENERATED_COLUMNS: LazyLock<HashMap<String, Vec<String>>> = LazyLock::new(|| {
     let generated_columns = load_generated_columns().expect("Bundled event DB schema should be valid");
     info!("Event DB generated columns: {generated_columns:?}");
     generated_columns
 });
+
+/// Load [`GENERATED_COLUMNS`] eagerly, so schema problems show up at application start.
+pub fn init_generated_columns() {
+    LazyLock::force(&GENERATED_COLUMNS);
+}
 
 /// Generated columns of event DB `table`, they cannot be written explicitly.
 pub fn generated_columns(table: &str) -> &'static [String] {
