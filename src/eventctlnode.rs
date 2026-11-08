@@ -670,14 +670,14 @@ mod tests {
     fn event_record_rpc_types() {
         assert_eq!(
             EventRecord::RPC_TYPE_STR,
-            "{i|n:id,s:name,t:date,i:stage_count,s:owner,s:api_token,{{s[Organizer,Banned]}:members}:config,s[Archived,ReadOnly,Master,Replica]:db_mode}"
+            "{i|n:id,s:name,t:date,i:stage_count,s:owner,s:api_token,{{i[Organizer,Banned]}:members}:config,i[Archived,ReadOnly,Master,Replica]:db_mode}"
         );
         assert_eq!(
             UpdateEventRecordParams::RPC_TYPE_STR,
-            "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,{{s[Organizer,Banned]}:members}|n:config,s[Archived,ReadOnly,Master,Replica]|n:db_mode}:change}"
+            "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,{{i[Organizer,Banned]}:members}|n:config,i[Archived,ReadOnly,Master,Replica]|n:db_mode}:change}"
         );
-        assert_eq!(SetEventDbModeParams::RPC_TYPE_STR, "{i:event_id,s[Archived,ReadOnly,Master,Replica]:db_mode}");
-        assert_eq!(ListEventsResult::RPC_TYPE_STR, "[{i:id,s:name,i:stage_count,t:date,s:owner,s[Archived,ReadOnly,Master,Replica]:db_mode}]");
+        assert_eq!(SetEventDbModeParams::RPC_TYPE_STR, "{i:event_id,i[Archived,ReadOnly,Master,Replica]:db_mode}");
+        assert_eq!(ListEventsResult::RPC_TYPE_STR, "[{i:id,s:name,i:stage_count,t:date,s:owner,i[Archived,ReadOnly,Master,Replica]:db_mode}]");
 
         let record = EventRecord {
             id: Some(1),

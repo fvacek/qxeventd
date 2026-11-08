@@ -18,11 +18,14 @@
 //! type has to implement
 //! `RpcTypeStr` itself.
 //!
-//! An enum is described as serde serializes it externally tagged: unit variants form a string enum
-//! `s[Variant,...]`, a newtype variant `V(T)` is a map `{T:V}` and a struct variant
-//! `V { f: T }` is `{{T:f}:V}`; the alternatives are joined by `|`.
-//! `#[serde(rename = "...")]` on variants is honoured, `tag`, `content` and `untagged` enums are
-//! rejected. The `s[...]` syntax is planned for SHV RPC types, but it is not documented yet.
+//! An enum is described as an SHV Enum `i[KEY,KEY:INDEX,...]` with the variant names as keys.
+//! A unit variant with an explicit discriminant `V = N` is `V:N`. As an extension, a data variant
+//! has its payload type after the colon: a newtype variant `V(T)` is `V:T` and a struct variant
+//! `V { f: T }` is `V:{T:f}`. The keys are the serde variant names, `#[serde(rename = "...")]` is
+//! honoured, `tag`, `content` and `untagged` enums are rejected.
+//!
+//! Note that serde serializes the enum externally tagged, a unit variant as the `"V"` string and
+//! a data variant as the `{"V":value}` map, the type string describes the variants only.
 //!
 //! The generated code refers to `crate::rpctype::RpcTypeStr` and `::const_format`.
 //!
@@ -198,11 +201,11 @@ fn named_fields_parts<'a>(
     Ok(parts)
 }
 
-/// Externally tagged enum, as serde serializes it by default.
+/// SHV Enum `i[KEY,KEY:INDEX,...]`, extended for data variants with `KEY:TYPE`.
 ///
-/// Unit variants are serialized as their names and form a string enum `s[A,B]`,
-/// a newtype variant `V(T)` is a map `{T:V}`, a struct variant `V { f: T }` is `{{T:f}:V}`.
-/// The alternatives are joined by `|`.
+/// Every variant is a `KEY` (its serde name). A unit variant with an explicit discriminant
+/// `V = N` is `V:N`, a newtype variant `V(T)` is `V:T` and a struct variant `V { f: T }` is
+/// `V:{T:f}`. The type is the variant payload as serde serializes it.
 fn expand_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<proc_macro2::TokenStream> {
     let name = &input.ident;
     if serde_attrs(&input.attrs)?.non_external_tagging {
@@ -211,18 +214,31 @@ fn expand_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<proc_ma
             "RpcTypeStr supports externally tagged enums only, not `tag`, `content` or `untagged`",
         ));
     }
+    if data.variants.is_empty() {
+        return Err(syn::Error::new_spanned(input, "RpcTypeStr does not support enums without variants"));
+    }
 
-    let mut unit_names = Vec::new();
-    let mut alternatives = Vec::new();
-    for variant in &data.variants {
-        let variant_name = match serde_attrs(&variant.attrs)?.rename {
+    let mut parts = vec![quote! { "i[" }];
+    for (i, variant) in data.variants.iter().enumerate() {
+        let mut key = if i > 0 { "," } else { "" }.to_string();
+        key.push_str(&match serde_attrs(&variant.attrs)?.rename {
             Some(rename) => rename,
             None => variant.ident.to_string(),
-        };
-        let value_parts = match &variant.fields {
+        });
+        let type_parts = match &variant.fields {
             Fields::Unit => {
-                unit_names.push(variant_name);
+                if let Some((_, expr)) = &variant.discriminant {
+                    key.push(':');
+                    key.push_str(&discriminant_value(expr)?);
+                }
+                parts.push(quote! { #key });
                 continue;
+            }
+            _ if variant.discriminant.is_some() => {
+                return Err(syn::Error::new_spanned(
+                    variant,
+                    "RpcTypeStr supports explicit discriminants on unit variants only",
+                ));
             }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 type_parts(&fields.unnamed[0].ty)
@@ -235,30 +251,33 @@ fn expand_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<proc_ma
                 ));
             }
         };
-        let key = format!(":{variant_name}}}");
-        let mut parts = vec![quote! { "{" }];
-        parts.extend(value_parts);
+        key.push(':');
         parts.push(quote! { #key });
-        alternatives.push(parts);
+        parts.extend(type_parts);
     }
-    if !unit_names.is_empty() {
-        let unit = format!("s[{}]", unit_names.join(","));
-        alternatives.insert(0, vec![quote! { #unit }]);
-    }
-    if alternatives.is_empty() {
-        return Err(syn::Error::new_spanned(input, "RpcTypeStr does not support enums without variants"));
-    }
-
-    let mut parts = Vec::new();
-    for (i, alternative) in alternatives.into_iter().enumerate() {
-        if i > 0 {
-            parts.push(quote! { "|" });
-        }
-        parts.extend(alternative);
-    }
+    parts.push(quote! { "]" });
     Ok(quote! {
         impl crate::rpctype::RpcTypeStr for #name {
             const RPC_TYPE_STR: &'static str = ::const_format::concatcp!(#(#parts),*);
         }
     })
+}
+
+/// Decimal value of an integer literal discriminant, optionally negated
+fn discriminant_value(expr: &syn::Expr) -> syn::Result<String> {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(lit), .. }) => {
+            Ok(lit.base10_digits().to_string())
+        }
+        syn::Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), expr, .. }) => {
+            Ok(format!("-{}", discriminant_value(expr)?))
+        }
+        syn::Expr::Paren(syn::ExprParen { expr, .. }) | syn::Expr::Group(syn::ExprGroup { expr, .. }) => {
+            discriminant_value(expr)
+        }
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            "RpcTypeStr requires an integer literal discriminant",
+        )),
+    }
 }

@@ -198,24 +198,32 @@ mod tests {
     }
 
     #[test]
-    fn unit_enum_is_string_enum() {
-        assert_eq!(Mode::RPC_TYPE_STR, "s[Archived,readOnly]");
-        assert_eq!(WithEnum::RPC_TYPE_STR, "{s[Archived,readOnly]:mode,s[Archived,readOnly]|n:opt_mode}");
+    fn unit_enum_is_int_enum() {
+        assert_eq!(Mode::RPC_TYPE_STR, "i[Archived,readOnly]");
+        assert_eq!(WithEnum::RPC_TYPE_STR, "{i[Archived,readOnly]:mode,i[Archived,readOnly]|n:opt_mode}");
         assert_eq!(shvproto::to_rpcvalue(&Mode::ReadOnly).unwrap().as_str(), "readOnly");
     }
 
     #[derive(Serialize, Deserialize, RpcTypeStr)]
+    #[repr(i32)]
     enum Mixed {
         None,
         Id(i64),
         #[serde(rename = "pos")]
         Position { x: i32, #[serde(rename = "Y")] y: Option<i32> },
-        Other,
+        Other = 123,
+    }
+
+    #[derive(Serialize, Deserialize, RpcTypeStr)]
+    enum Indexed {
+        Fail = -1,
+        Success,
     }
 
     #[test]
     fn data_enum_is_externally_tagged() {
-        assert_eq!(Mixed::RPC_TYPE_STR, "s[None,Other]|{i:Id}|{{i:x,i|n:Y}:pos}");
+        assert_eq!(Indexed::RPC_TYPE_STR, "i[Fail:-1,Success]");
+        assert_eq!(Mixed::RPC_TYPE_STR, "i[None,Id:i,pos:{i:x,i|n:Y},Other:123]");
         assert_eq!(shvproto::to_rpcvalue(&Mixed::None).unwrap().to_cpon(), r#""None""#);
         assert_eq!(shvproto::to_rpcvalue(&Mixed::Id(3)).unwrap().to_cpon(), r#"{"Id":3}"#);
         assert_eq!(
