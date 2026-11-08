@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::{collections::BTreeMap, sync::Arc};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -38,7 +39,7 @@ pub type SharedAppState = Arc<RwLock<State>>;
 
 pub(crate) struct State {
     pub db_pool: async_sqlite::Pool,
-    pub open_events: BTreeMap<EventId, Arc<RwLock<OpenEventCtl>>>,
+    pub open_events: BTreeMap<EventId, Arc<OpenEventCtl>>,
     /// Cache of event records, it has its own lock, so it can be used without
     /// the app state write lock, see [`State::event_record`].
     pub event_records: Arc<smol::lock::Mutex<HashMap<EventId, Arc<RwLock<EventRecord>>>>>,
@@ -136,7 +137,6 @@ impl State {
         let event = self.open_events.get(&event_id)
             .ok_or_else(|| anyhow!("Invalid event id: {event_id}"))?
             .clone();
-        let event = event.read().await;
         Ok(EventStatus {
             master_db_mode: EventDbMode::ReadOnly,
             open_at: event.open_at.with_timezone(&Local).fixed_offset(),
@@ -251,12 +251,11 @@ impl State {
             // The lock is held until the copy is done, so the event database cannot be
             // replaced, nor the event opened or closed meanwhile.
             let state = app_state.read().await;
-            let open_event_db = match state.open_events.get(&event_id).cloned() {
-                Some(event) => Some(event.read().await.db.clone()),
-                None => None,
-            };
-            match open_event_db {
-                Some(db) => backup_open_event_db(&db, event_id, &tmp_file).await,
+            match state.open_events.get(&event_id).cloned() {
+                Some(event) => match event.use_db().await {
+                    Ok(db) => backup_open_event_db(&db, event_id, &tmp_file).await,
+                    Err(err) => Err(err),
+                },
                 None => {
                     let db_file = event_db_file(event_id);
                     let tmp_file = tmp_file.clone();
@@ -329,12 +328,10 @@ impl State {
         let expired_events = {
             let mut state = app_state.write().await;
             let now = chrono::Utc::now();
-            let mut expired_ids = Vec::new();
-            for (event_id, event) in &state.open_events {
-                if event.read().await.expires_at() < now {
-                    expired_ids.push(*event_id);
-                }
-            }
+            let expired_ids = state.open_events.iter()
+                .filter(|(_, event)| event.expires_at() < now)
+                .map(|(event_id, _)| *event_id)
+                .collect::<Vec<_>>();
             expired_ids.into_iter()
                 .filter_map(|event_id| state.open_events.remove(&event_id).map(|event| (event_id, event)))
                 .collect::<Vec<_>>()
@@ -390,9 +387,8 @@ async fn load_event_record(db_pool: &async_sqlite::Pool, event_id: EventId) -> a
 }
 
 /// Close DB of an event already removed from open events and notify clients.
-async fn close_removed_event(event_id: EventId, event: &RwLock<OpenEventCtl>, client_command_sender: &ClientCommandSender) -> anyhow::Result<()> {
-    let db = event.read().await.db.clone();
-    let close_result = close_event_db(&db).await;
+async fn close_removed_event(event_id: EventId, event: &OpenEventCtl, client_command_sender: &ClientCommandSender) -> anyhow::Result<()> {
+    let close_result = event.close().await;
 
     let message = RpcMessage::new_signal("event", "lsmod").with_param(false);
     client_command_sender.send_message(message)
@@ -406,19 +402,14 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
     // commit_pushed_event_db after the pool is opened, nor can the event be opened twice.
     let mut state = app_state.write().await;
     if let Some(event) = state.open_events.get(&event_id).cloned() {
-        event.write().await.touched_at = chrono::Utc::now();
+        event.touch();
         return Ok(event_shv_path);
     }
 
     let event_record = state.load_event_record(event_id).await?;
     let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
     let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
-    let now = chrono::Utc::now();
-    let event = Arc::new(RwLock::new(OpenEventCtl {
-        db: pool,
-        open_at: now,
-        touched_at: now,
-    }));
+    let event = Arc::new(OpenEventCtl::new(pool));
     state.open_events.insert(event_id, event.clone());
     drop(state);
 
@@ -443,7 +434,7 @@ pub(crate) async fn setup_remote_db_recchng_monitoring(app_state: SharedAppState
     smol::spawn(remote_db_recchng_monitoring_task(app_state, event_id, event, rpc_client)).detach();
 }
 
-async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: EventId, event: Arc<RwLock<OpenEventCtl>>, rpc_client: ClientCommandSender) {
+async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: EventId, event: Arc<OpenEventCtl>, rpc_client: ClientCommandSender) {
     let ping_result: anyhow::Result<()> = rpc_client
         .call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>)
         .await
@@ -690,14 +681,67 @@ impl EventRecord {
 }
 
 pub(crate) struct OpenEventCtl {
-    pub db: async_sqlite::Pool,
+    /// Use it via [`OpenEventCtl::use_db`] only, so the pool cannot be closed under a running statement.
+    db: async_sqlite::Pool,
     pub open_at: DateTime<chrono::Utc>,
-    pub touched_at: DateTime<chrono::Utc>,
+    /// Time of last DB use in Unix msec, the event expires after a period of inactivity.
+    touched_at_ms: AtomicI64,
+    /// Held shared for each DB use and exclusive while closing; the value is `true` once closed.
+    /// Do not take the app state lock while holding it: `install_event_db()` closes the event
+    /// under the app state write lock, so it would deadlock.
+    usage: RwLock<bool>,
+}
+
+/// Shared usage of an open event DB, it keeps the DB pool open, see [`OpenEventCtl::use_db`].
+pub(crate) struct EventDbUsage<'a> {
+    _usage: smol::lock::RwLockReadGuard<'a, bool>,
+    db: &'a async_sqlite::Pool,
+}
+
+impl std::ops::Deref for EventDbUsage<'_> {
+    type Target = async_sqlite::Pool;
+    fn deref(&self) -> &Self::Target {
+        self.db
+    }
 }
 
 impl OpenEventCtl {
+    fn new(db: async_sqlite::Pool) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            db,
+            open_at: now,
+            touched_at_ms: AtomicI64::new(now.timestamp_millis()),
+            usage: RwLock::new(false),
+        }
+    }
+    pub fn touch(&self) {
+        self.touched_at_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+    }
+    pub fn touched_at(&self) -> DateTime<chrono::Utc> {
+        DateTime::from_timestamp_millis(self.touched_at_ms.load(Ordering::Relaxed)).unwrap_or(self.open_at)
+    }
     pub fn expires_at(&self) -> DateTime<chrono::Utc> {
-        self.open_at + global_config().event_expire_duration
+        self.touched_at() + global_config().event_expire_duration
+    }
+    /// Marks the event as used and returns the DB pool, which is kept open until the usage
+    /// is dropped. Fails if the event has been closed meanwhile.
+    pub async fn use_db(&self) -> anyhow::Result<EventDbUsage<'_>> {
+        let usage = self.usage.read().await;
+        if *usage {
+            bail!("Event is closed");
+        }
+        self.touch();
+        Ok(EventDbUsage { _usage: usage, db: &self.db })
+    }
+    /// Waits for running DB usages, then checkpoints WAL and closes the DB pool.
+    async fn close(&self) -> anyhow::Result<()> {
+        let mut closed = self.usage.write().await;
+        if *closed {
+            return Ok(());
+        }
+        *closed = true;
+        close_event_db(&self.db).await
     }
 }
 
@@ -740,4 +784,50 @@ pub fn remote_event_mount_point(event_id: EventId) -> String {
 
 pub fn remote_event_sql_path(event_id: EventId) -> String {
     format!("{}/sql", remote_event_mount_point(event_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn memory_event() -> OpenEventCtl {
+        let pool = async_sqlite::PoolBuilder::new().path(":memory:").open().await.unwrap();
+        OpenEventCtl::new(pool)
+    }
+
+    #[test]
+    fn close_waits_for_running_db_usage() {
+        smol::block_on(async {
+            let event = Arc::new(memory_event().await);
+            let usage = event.use_db().await.unwrap();
+            let closing = smol::spawn({
+                let event = event.clone();
+                async move { event.close().await }
+            });
+            // give the close task a chance to run, it must wait for the usage
+            for _ in 0..10 {
+                smol::future::yield_now().await;
+            }
+            assert!(!closing.is_finished());
+            let n: i64 = usage.conn(|conn| conn.query_row("SELECT 1", [], |row| row.get(0))).await.unwrap();
+            assert_eq!(n, 1);
+            drop(usage);
+            closing.await.unwrap();
+            assert!(event.use_db().await.is_err());
+            // closing twice is harmless
+            event.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn db_usage_touches_event() {
+        smol::block_on(async {
+            let event = memory_event().await;
+            event.touched_at_ms.store(0, Ordering::Relaxed);
+            assert_eq!(event.touched_at().timestamp_millis(), 0);
+            let before = chrono::Utc::now();
+            drop(event.use_db().await.unwrap());
+            assert!(event.touched_at() >= before - chrono::Duration::milliseconds(1));
+        });
+    }
 }

@@ -28,20 +28,20 @@ impl LocalEventSqlApi {
             rpc_client,
         }
     }
-    async fn opened_event(&self) -> anyhow::Result<Arc<smol::lock::RwLock<OpenEventCtl>>> {
+    /// The app state lock is released when this returns, it must not be held during
+    /// [`OpenEventCtl::use_db`] usage, see [`OpenEventCtl`].
+    async fn opened_event(&self) -> anyhow::Result<Arc<OpenEventCtl>> {
         self.app_state.read().await.open_events.get(&self.event_id)
             .cloned()
             .ok_or_else(|| anyhow!("Event id: {} is not open.", self.event_id))
-    }
-    async fn event_db(&self) -> anyhow::Result<Pool> {
-        Ok(self.opened_event().await?.read().await.db.clone())
     }
     /// Names of generated (computed) columns of `table`, see [`GENERATED_COLUMNS`].
     pub async fn generated_columns(&self, table: &str) -> anyhow::Result<Arc<Vec<String>>> {
         if let Some(columns) = GENERATED_COLUMNS.lock().unwrap_or_else(|e| e.into_inner()).get(table) {
             return Ok(columns.clone());
         }
-        let db = self.event_db().await?;
+        let event = self.opened_event().await?;
+        let db = event.use_db().await?;
         let table_name = table.to_string();
         // pragma_table_xinfo.hidden: 2 = VIRTUAL generated column, 3 = STORED generated column
         let columns = db
@@ -69,12 +69,16 @@ impl LocalEventSqlApi {
 #[async_trait]
 impl qxsql::QxSqlApi for LocalEventSqlApi {
     async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> {
-        let qxsql = LocalDbSqlApi::new(self.event_db().await?, self.rpc_client.clone());
+        let event = self.opened_event().await?;
+        let db = event.use_db().await?;
+        let qxsql = LocalDbSqlApi::new(Pool::clone(&db), self.rpc_client.clone());
         qxsql.query(query, params).await
     }
 
     async fn exec(&self, query: &str, params: Option<&Record>) -> anyhow::Result<ExecResult> {
-        let qxsql = LocalDbSqlApi::new(self.event_db().await?, self.rpc_client.clone());
+        let event = self.opened_event().await?;
+        let db = event.use_db().await?;
+        let qxsql = LocalDbSqlApi::new(Pool::clone(&db), self.rpc_client.clone());
         qxsql.exec(query, params).await
     }
 }
