@@ -14,7 +14,7 @@ use crate::state::SharedAppState;
 use crate::{
     state::{State},
     config::Config,
-    migrate::{create_db_connection, open_app_db},
+    migrate::{create_app_db_connection, open_app_db},
 };
 
 pub mod rpcvalueext;
@@ -97,7 +97,7 @@ pub fn set_global_config(config: Config) {
 /// Run qxeventd, connects to broker specified in global config.
 pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     eventdb::init_schema_columns();
-    let db_pool = create_db_connection().await?;
+    let db_pool = create_app_db_connection().await?;
     let (shutdown_sender, shutdown_receiver) = channel::bounded(1);
     let app_state = SharedAppState::new(RwLock::new(State {
         db_pool,

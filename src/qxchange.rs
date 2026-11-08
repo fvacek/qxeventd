@@ -17,6 +17,7 @@ pub struct QxChangeRecord {
     #[serde(with = "crate::rpctype::chrono_datetime")]
     #[record_change(with = "crate::rpctype::chrono_datetime_opt")]
     pub created: chrono::DateTime<chrono::FixedOffset>,
+    pub paid: bool,
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, RpcTypeStr)]
@@ -68,7 +69,6 @@ pub enum LateEntryKind {
     },
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub struct LateEntry {
     pub kind: LateEntryKind,
@@ -84,8 +84,6 @@ pub struct LateEntry {
     pub starttimems: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paid: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
@@ -109,10 +107,11 @@ mod tests {
             Data::RPC_TYPE_STR,
             concat!(
                 "i[LateEntry:{i[Update:{i:runId},NewEntry:{i:classId},DeleteEntry:{i:runId}]:kind,",
-                "s|n:firstname,s|n:lastname,s|n:registration,i|n:siid,i|n:starttimems,s|n:note,b|n:paid}]"
+                "s|n:firstname,s|n:lastname,s|n:registration,i|n:siid,i|n:starttimems,s|n:note}]"
             )
         );
         assert!(QxChangeRecord::RPC_TYPE_STR.contains(&format!("{}|n:data,", Data::RPC_TYPE_STR)));
         assert!(QxChangeRecord::RPC_TYPE_STR.contains(",i[Pending,Accepted,Rejected]:status,"));
+        assert!(QxChangeRecord::RPC_TYPE_STR.ends_with(",b:paid}"));
     }
 }

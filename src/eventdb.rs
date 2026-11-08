@@ -21,7 +21,7 @@ fn create_file_path(db_file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn migrate_db(db_file: &str, event_data: &EventRecord, client_command_sender: ClientCommandSender) -> anyhow::Result<Pool> {
+pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_command_sender: ClientCommandSender) -> anyhow::Result<Pool> {
     let db_file_exists = check_file_exists(db_file);
     if !db_file_exists {
         info!("Creating event database file {}", db_file);
@@ -36,7 +36,7 @@ pub async fn migrate_db(db_file: &str, event_data: &EventRecord, client_command_
                     .await?;
 
     // Update the database schema, atomically
-    pool.conn_mut(|conn| Ok(migrate_connection(conn))).await??;
+    pool.conn_mut(|conn| Ok(migrate_event_db_connection(conn))).await??;
     let qxsql = LocalDbSqlApi::new(pool.clone(), client_command_sender);
     if !db_file_exists {
         let config_entries = [
@@ -60,11 +60,11 @@ pub async fn migrate_db(db_file: &str, event_data: &EventRecord, client_command_
 
 /// Checks that the file can be opened as an event database and migrates it, so it can be
 /// installed without a risk of the event failing to open afterwards. Blocking.
-pub fn migrate_db_file(db_file: &str) -> anyhow::Result<()> {
-    migrate_connection(&mut Connection::open(db_file)?)
+pub fn migrate_event_db_file(db_file: &str) -> anyhow::Result<()> {
+    migrate_event_db_connection(&mut Connection::open(db_file)?)
 }
 
-fn migrate_connection(conn: &mut Connection) -> anyhow::Result<()> {
+fn migrate_event_db_connection(conn: &mut Connection) -> anyhow::Result<()> {
     // A database exported by QuickEvent has the tables, but it does not have the version set.
     // Such a database is considered to be migrated already.
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -72,7 +72,7 @@ fn migrate_connection(conn: &mut Connection) -> anyhow::Result<()> {
     if user_version == 0 && table_count > 0 {
         conn.pragma_update(None, "user_version", MIGRATION_ARRAY.len() as i64)?;
     }
-    MIGRATIONS.to_latest(conn)?;
+    EVENT_DB_MIGRATIONS.to_latest(conn)?;
     Ok(())
 }
 
@@ -117,7 +117,7 @@ pub fn column_default(table: &str, column: &str) -> Option<&'static DbValue> {
 
 fn load_schema_columns() -> anyhow::Result<HashMap<String, TableColumns>> {
     let mut conn = Connection::open_in_memory()?;
-    migrate_connection(&mut conn)?;
+    migrate_event_db_connection(&mut conn)?;
     // pragma_table_xinfo.hidden: 2 = VIRTUAL generated column, 3 = STORED generated column
     let mut stmt = conn.prepare(
         "SELECT m.name, x.name, x.hidden IN (2, 3), x.dflt_value FROM sqlite_master m, pragma_table_xinfo(m.name) x
@@ -184,7 +184,7 @@ pub fn is_default_value(value: &DbValue, default: &DbValue) -> bool {
     }
 }
 
-const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
+const EVENT_DB_MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 const MIGRATION_ARRAY: &[M] = &[
     M::up(

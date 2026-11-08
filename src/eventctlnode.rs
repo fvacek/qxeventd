@@ -417,6 +417,7 @@ pub(crate) async fn request_handler(
                                         data: params.late_entry.map(|le| Data::LateEntry(le)),
                                         user_id: Some(user_id),
                                         status: qxchange::Status::default(),
+                                        paid: false,
                                         status_message: None,
                                         created: chrono::Utc::now().fixed_offset(),
                                     };

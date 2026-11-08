@@ -27,9 +27,9 @@ const MIGRATION_ARRAY: &[M] = &[
          ALTER TABLE events DROP COLUMN master_db_mode;",
     ),
 ];
-const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
+const APP_DB_MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
-pub async fn create_db_connection() -> Result<Pool> {
+pub async fn create_app_db_connection() -> Result<Pool> {
     let config = GLOBAL_CONFIG.get().expect("Global config should be initialized");
     open_app_db(&config.data_dir).await
 }
@@ -56,7 +56,7 @@ pub async fn open_app_db(data_dir: &str) -> Result<Pool> {
 
     // Update the database schema, atomically
     pool.conn_mut(|conn| {
-        match MIGRATIONS.to_latest(conn) {
+        match APP_DB_MIGRATIONS.to_latest(conn) {
             Ok(_) => Ok(()),
             Err(e) => panic!("{}", e),
         }

@@ -320,6 +320,7 @@ CREATE TABLE qxchanges (
 	user_id character varying,
 	status character varying,
 	status_message character varying,
+	paid boolean NOT NULL DEFAULT 0,
 	created timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	source character varying,
 	change_id integer,

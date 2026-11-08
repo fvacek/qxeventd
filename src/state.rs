@@ -25,7 +25,7 @@ use smol::{lock::RwLock, channel};
 use shvrpc::util::join_path;
 
 use crate::localdbsqlapi::LocalDbSqlApi;
-use crate::eventdb::{migrate_db, migrate_db_file};
+use crate::eventdb::{migrate_event_db, migrate_event_db_file};
 use crate::eventsqlapi::LocalEventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
@@ -193,7 +193,7 @@ impl State {
                 if crate::filenode::sha1(std::path::Path::new(&tmp_file), 0, None)? != expected_sha1 {
                     bail!("Event {event_id} database does not match the expected SHA-1");
                 }
-                migrate_db_file(&tmp_file)
+                migrate_event_db_file(&tmp_file)
                     .map_err(|err| anyhow!("Invalid event {event_id} database: {err}"))
             }).await
         };
@@ -408,7 +408,7 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
 
     let event_record = state.load_event_record(event_id).await?;
     let db_file = format!("{}/{event_id}/event.qbe", global_config().data_dir);
-    let pool = migrate_db(&db_file, &event_record, rpc_client.clone()).await?;
+    let pool = migrate_event_db(&db_file, &event_record, rpc_client.clone()).await?;
     let event = Arc::new(OpenEventCtl::new(pool));
     state.open_events.insert(event_id, event.clone());
     drop(state);
@@ -472,7 +472,7 @@ async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: 
                 if message.is_signal() && message.method() == Some("recchng") {
                     let remote_sql_path = remote_event_sql_path(event_id);
                     if let Some(path) = message.shv_path() && path == &remote_sql_path {
-                        info!("Received event {event_id} subscription message: {:?}", message.shv_path());
+                        info!(target: "ApplyRecChng", "Received event {event_id} subscription message: {:?}", message.shv_path());
                         let db_mode = State::event_db_mode(&app_state, event_id).await;
                         let db_mode = match db_mode {
                             Ok(db_mode) => db_mode,
