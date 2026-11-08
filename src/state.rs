@@ -163,7 +163,7 @@ impl State {
 
     pub async fn event_db_mode(app_state: &SharedAppState, event_id: EventId) -> anyhow::Result<EventDbMode> {
         let record = Self::event_record(app_state, event_id).await?;
-        Ok(record.read().await.db_mode.clone())
+        Ok(record.read().await.db_mode)
     }
 
     async fn forget_event_record(app_state: &SharedAppState, event_id: EventId) {
@@ -471,7 +471,7 @@ async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: 
             Ok(message) => {
                 if message.is_signal() && message.method() == Some("recchng") {
                     let remote_sql_path = remote_event_sql_path(event_id);
-                    if let Some(path) = message.shv_path() && path == &remote_sql_path {
+                    if let Some(path) = message.shv_path() && path == remote_sql_path {
                         info!(target: "ApplyRecChng", "Received event {event_id} subscription message: {:?}", message.shv_path());
                         let db_mode = State::event_db_mode(&app_state, event_id).await;
                         let db_mode = match db_mode {
@@ -512,19 +512,19 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
         RecOp::Insert => match recchng.record.as_ref() {
             Some(record) => {
                 if recchng.id <= 0 {
-                    return Err(anyhow!("Insert recchng to table '{table}' has no id, replica mode requires id even for inserts", table = &recchng.table));
+                    return Err(anyhow!("Insert recchng to table '{table}' has no id, replica mode requires id even for inserts", table = recchng.table));
                 }
                 let mut record = remove_default_and_generated_columns(&recchng.table, record);
                 record.insert("id".to_owned(), recchng.id.into());
-                info!(target: "ApplyRecChng", "Insert recchng: table='{}', id={}", &recchng.table, recchng.id);
+                info!(target: "ApplyRecChng", "Insert recchng: table='{}', id={}", recchng.table, recchng.id);
                 sql_api.create_record_with_recchng(&recchng.table, &record, recchng.issuer.clone()).await?;
                 Ok(())
             }
-            None => Err(anyhow!("Insert recchng to table '{table}' has no record", table = &recchng.table)),
+            None => Err(anyhow!("Insert recchng to table '{table}' has no record", table = recchng.table)),
         },
         RecOp::Update => match recchng.record.as_ref() {
             Some(record) => {
-                info!(target: "ApplyRecChng", "Update recchng: table='{}', id={}", &recchng.table, recchng.id);
+                info!(target: "ApplyRecChng", "Update recchng: table='{}', id={}", recchng.table, recchng.id);
                 let mut record = record.clone();
                 remove_generated_columns(&recchng.table, &mut record);
                 if record.is_empty() {
@@ -538,7 +538,7 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
             None => Err(anyhow!("update recchng has no record")),
         },
         RecOp::Delete => {
-            info!(target: "ApplyRecChng", "Delete recchng: table='{}', id={}", &recchng.table, recchng.id);
+            info!(target: "ApplyRecChng", "Delete recchng: table='{}', id={}", recchng.table, recchng.id);
             sql_api
                 .delete_record_with_recchng(&recchng.table, recchng.id, recchng.issuer.clone())
                 .await?;

@@ -10,7 +10,7 @@ pub enum Role {
     Banned,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
+#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr, Default)]
 pub struct QxEventConfig {
     pub members: BTreeMap<String, Role>,
 }
@@ -22,10 +22,3 @@ impl From<QxEventConfig> for qxsql::DbValue {
     }
 }
 
-impl Default for QxEventConfig {
-    fn default() -> Self {
-        Self {
-            members: BTreeMap::new(),
-        }
-    }
-}

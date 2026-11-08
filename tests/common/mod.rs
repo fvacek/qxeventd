@@ -26,8 +26,7 @@ pub fn data_dir() -> &'static str {
     static DATA_DIR: OnceLock<String> = OnceLock::new();
     DATA_DIR.get_or_init(|| {
         let data_dir = tempfile::tempdir().expect("tempdir").keep().to_string_lossy().into_owned();
-        let mut config = Config::default();
-        config.data_dir = data_dir.clone();
+        let mut config = Config { data_dir: data_dir.clone(), ..Default::default() };
         config.client.mount = Some("test/qx/qxeventd".into());
         qxeventd::set_global_config(config);
         data_dir

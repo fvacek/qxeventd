@@ -394,7 +394,7 @@ pub(crate) async fn request_handler(
                                         return Ok(RpcValue::from(ok))
                                     }
                                     let qxchange = QxChangeRecordChange {
-                                        data: params.late_entry.map(|le| Data::LateEntry(le)),
+                                        data: params.late_entry.map(Data::LateEntry),
                                         ..Default::default()
                                     };
                                     let ok = qxsql.update_record_with_recchng("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
@@ -414,7 +414,7 @@ pub(crate) async fn request_handler(
                                         foreign_table: Some(foreign_table),
                                         foreign_id: Some(foreign_id),
                                         data_type: "LateEntry".to_string(),
-                                        data: params.late_entry.map(|le| Data::LateEntry(le)),
+                                        data: params.late_entry.map(Data::LateEntry),
                                         user_id: Some(user_id),
                                         status: qxchange::Status::default(),
                                         paid: false,

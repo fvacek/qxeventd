@@ -20,16 +20,12 @@ pub struct QxChangeRecord {
     pub paid: bool,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, RpcTypeStr)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, RpcTypeStr, Default)]
 pub enum Status {
+    #[default]
     Pending,
     Accepted,
     Rejected,
-}
-impl Default for Status {
-    fn default() -> Self {
-        Status::Pending
-    }
 }
 impl From<Status> for DbValue {
     fn from(value: Status) -> Self {
