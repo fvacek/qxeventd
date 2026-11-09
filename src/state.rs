@@ -22,7 +22,6 @@ use shvproto::make_map;
 use shvrpc::rpc::ShvRI;
 use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use smol::{lock::RwLock, channel};
-use shvrpc::util::join_path;
 
 use crate::eventctlnode::METH_EVENT_DB_MODE;
 use crate::localdbsqlapi::LocalDbSqlApi;
@@ -122,9 +121,6 @@ impl State {
         if let (Ok(true), Some(new_db_mode)) = (&ret, new_db_mode) && new_db_mode != event_record.db_mode {
             emit_event_db_mode_chng(&rpc_client, event_id, new_db_mode);
         }
-        if ret.is_ok() && matches!(new_db_mode, Some(EventDbMode::Replica)) {
-            setup_remote_db_recchng_monitoring(app_state.clone(), event_id, rpc_client).await;
-        }
         ret
     }
 
@@ -142,9 +138,6 @@ impl State {
         Self::forget_event_record(app_state, event_id).await;
         if matches!(result, Ok(true)) && db_mode != event_record.db_mode {
             emit_event_db_mode_chng(&rpc_client, event_id, db_mode);
-        }
-        if result.is_ok() && matches!(db_mode, EventDbMode::Replica) {
-            setup_remote_db_recchng_monitoring(app_state.clone(), event_id, rpc_client).await;
         }
         result
     }
@@ -433,37 +426,19 @@ pub(crate) async fn open_event(app_state: SharedAppState, event_id: EventId, rpc
     rpc_client.send_message(message)
         .map_err(|e| anyhow!("Failed to send message {}", e))?;
 
-    if matches!(event_record.db_mode, EventDbMode::Replica) {
-        setup_remote_db_recchng_monitoring(app_state.clone(), event_id, rpc_client.clone()).await;
-    }
-
     Ok(event_shv_path)
 }
 
-/// Starts remote DB recchng monitoring for an open event.
-/// Has to be called whenever event DB mode changes to Replica.
-pub(crate) async fn setup_remote_db_recchng_monitoring(app_state: SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) {
-    let Some(event) = app_state.read().await.open_events.get(&event_id).cloned() else {
-        // event is not open, monitoring will be started when it is opened
-        return;
-    };
-    smol::spawn(remote_db_recchng_monitoring_task(app_state, event_id, event, rpc_client)).detach();
-}
-
-async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: EventId, event: Arc<OpenEventCtl>, rpc_client: ClientCommandSender) {
-    let ping_result: anyhow::Result<()> = rpc_client
-        .call_rpc_method(join_path(remote_event_mount_point(event_id), ".app"), "ping", None, None, None, None::<fn(_)>)
-        .await
-        .map_err(|_| anyhow!("Failed to ping DB service."));
-    if let Err(err) = ping_result {
-        warn!("Remote DB connection for event {event_id} not available, error: {err}");
-        return;
-    }
-
-    let ri = match ShvRI::from_path_method_signal(&remote_event_sql_path(event_id), "", Some("recchng")) {
+/// Monitors recchng signals of all remote event DBs mounted under `remote_events_mount_point`
+/// and applies them to open events in Replica DB mode.
+/// Has to be started whenever the client connects to the broker, the subscription
+/// is dropped on disconnect and the task ends.
+pub(crate) async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, rpc_client: ClientCommandSender) {
+    let mount_point = global_config().remote_events_mount_point.clone();
+    let ri = match ShvRI::from_path_method_signal(&format!("{mount_point}/**"), "*", Some("recchng")) {
         Ok(ri) => ri,
         Err(err) => {
-            error!("Failed to create subscription request for event {event_id}: {err}");
+            error!("Failed to create remote DB recchng subscription request: {err}");
             return;
         }
     };
@@ -471,53 +446,55 @@ async fn remote_db_recchng_monitoring_task(app_state: SharedAppState, event_id: 
     let mut subscriber = match rpc_client.subscribe(ri).await {
         Ok(subscriber) => subscriber,
         Err(err) => {
-            warn!("Failed to subscribe to remote event {event_id}, using local DB only: {err}");
+            warn!("Failed to subscribe to remote events recchng, using local DB only: {err}");
             return;
         }
     };
 
     while let Some(frame) = subscriber.next().await {
-        let is_same_event_open = app_state.read().await.open_events.get(&event_id)
-            .is_some_and(|open_event| Arc::ptr_eq(open_event, &event));
-        if !is_same_event_open {
-            info!("Event {event_id} was closed, stopping remote DB synchronization");
-            break;
+        let message = match frame.to_rpcmesage() {
+            Ok(message) => message,
+            Err(err) => {
+                error!("Failed to decode remote DB subscription message: {err}");
+                continue;
+            }
+        };
+        if !message.is_signal() || message.method() != Some("recchng") {
+            continue;
         }
-        match frame.to_rpcmesage() {
-            Ok(message) => {
-                if message.is_signal() && message.method() == Some("recchng") {
-                    let remote_sql_path = remote_event_sql_path(event_id);
-                    if let Some(path) = message.shv_path() && path == remote_sql_path {
-                        info!(target: "ApplyRecChng", "Received event {event_id} subscription message: {:?}", message.shv_path());
-                        let db_mode = State::event_db_mode(&app_state, event_id).await;
-                        let db_mode = match db_mode {
-                            Ok(db_mode) => db_mode,
-                            Err(err) => {
-                                error!("Failed to load event {event_id} record: {err}");
-                                continue;
-                            }
-                        };
-                        if !matches!(db_mode, EventDbMode::Replica) {
-                            info!("Event {event_id} DB mode is {db_mode:?}, stopping remote DB synchronization");
-                            break;
-                        }
-                        match rechng_from_rpcvalue(message.param()) {
-                            Ok(recchng) => match apply_remote_db_recchng(app_state.clone(), event_id, &recchng, rpc_client.clone()).await {
-                                Ok(()) => {}
-                                Err(err) => error!("Failed to apply remote db recchng for event {event_id}: {err}"),
-                            },
-                            Err(err) => {
-                                error!("Failed to decode event {event_id} recchng signal: {err}");
-                                continue;
-                            }
-                        }
-                    }
+        let Some(event_id) = message.shv_path().and_then(|path| event_id_from_remote_sql_path(&mount_point, path)) else {
+            warn!("Received recchng signal on unexpected path: {:?}", message.shv_path());
+            continue;
+        };
+        if !app_state.read().await.open_events.contains_key(&event_id) {
+            continue;
+        }
+        info!(target: "ApplyRecChng", "Received event {event_id} subscription message: {:?}", message.shv_path());
+        match State::event_db_mode(&app_state, event_id).await {
+            Ok(EventDbMode::Replica) => {}
+            Ok(_) => continue,
+            Err(err) => {
+                error!("Failed to load event {event_id} record: {err}");
+                continue;
+            }
+        }
+        match rechng_from_rpcvalue(message.param()) {
+            Ok(recchng) => {
+                if let Err(err) = apply_remote_db_recchng(app_state.clone(), event_id, &recchng, rpc_client.clone()).await {
+                    error!("Failed to apply remote db recchng for event {event_id}: {err}");
                 }
-            },
-            Err(err) => error!("Failed to decode event {event_id} subscription message: {err}"),
+            }
+            Err(err) => error!("Failed to decode event {event_id} recchng signal: {err}"),
         }
     }
-    info!("SQL recchng {event_id} subscription ended");
+    info!("Remote DB recchng subscription ended");
+}
+
+/// Extracts event id from `<mount_point>/<event_id>/sql` path.
+fn event_id_from_remote_sql_path(mount_point: &str, path: &str) -> Option<EventId> {
+    let rest = path.strip_prefix(mount_point)?.strip_prefix('/')?;
+    let event_id = rest.strip_suffix("/sql")?;
+    event_id.parse().ok()
 }
 
 async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, recchng: &RecChng, rpc_client: ClientCommandSender) -> anyhow::Result<()> {

@@ -166,6 +166,7 @@ async fn app_task(
                 Ok(ClientEvent::Connected(api)) => {
                     is_connected = true;
                     info!("Device connected to broker API: {:?}", api);
+                    smol::spawn(state::remote_db_recchng_monitoring_task(app_state.clone(), client_cmd_tx.clone())).detach();
                 },
                 Ok(ClientEvent::Disconnected) => {
                     is_connected = false;
