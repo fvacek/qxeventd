@@ -24,6 +24,7 @@ use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use smol::{lock::RwLock, channel};
 use shvrpc::util::join_path;
 
+use crate::eventctlnode::METH_EVENT_DB_MODE;
 use crate::localdbsqlapi::LocalDbSqlApi;
 use crate::eventdb::{migrate_event_db, migrate_event_db_file};
 use crate::eventsqlapi::LocalEventSqlApi;
@@ -31,6 +32,7 @@ use crate::generate_api_token;
 use crate::global_config;
 use crate::qxeventconfig::QxEventConfig;
 use crate::rpctype::{RecordChange, RpcTypeStr};
+use crate::rpcvalueext::RpcValueExt;
 
 
 pub type EventId = i64;
@@ -109,12 +111,20 @@ impl State {
         let db_pool = app_state.read().await.db_pool.clone();
         // always update the mount point, for case than shvbroker config is reloaded from file
         let event_record = load_event_record(&db_pool, event_id).await?;
-        if matches!(event_record.db_mode, EventDbMode::Replica) {
-            Self::register_event_mount_point(event_id, &event_record.api_token, rpc_client.clone()).await?;
+        let new_db_mode = record.db_mode;
+        if matches!(new_db_mode.unwrap_or(event_record.db_mode), EventDbMode::Replica) {
+            let api_token = record.api_token.as_deref().unwrap_or(&event_record.api_token);
+            Self::register_event_mount_point(event_id, api_token, rpc_client.clone()).await?;
         }
         let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
         let ret = qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await;
         Self::forget_event_record(app_state, event_id).await;
+        if let (Ok(true), Some(new_db_mode)) = (&ret, new_db_mode) && new_db_mode != event_record.db_mode {
+            emit_event_db_mode_chng(&rpc_client, event_id, new_db_mode);
+        }
+        if ret.is_ok() && matches!(new_db_mode, Some(EventDbMode::Replica)) {
+            setup_remote_db_recchng_monitoring(app_state.clone(), event_id, rpc_client).await;
+        }
         ret
     }
 
@@ -127,9 +137,15 @@ impl State {
         }
         let mut record = Record::new();
         record.insert("db_mode".to_string(), db_mode.as_record_value().into());
-        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client);
+        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
         let result = qxsql.update_record_with_recchng("events", event_id, &record, None).await;
         Self::forget_event_record(app_state, event_id).await;
+        if matches!(result, Ok(true)) && db_mode != event_record.db_mode {
+            emit_event_db_mode_chng(&rpc_client, event_id, db_mode);
+        }
+        if result.is_ok() && matches!(db_mode, EventDbMode::Replica) {
+            setup_remote_db_recchng_monitoring(app_state.clone(), event_id, rpc_client).await;
+        }
         result
     }
 
@@ -785,6 +801,16 @@ pub fn pushed_event_db_file(event_id: EventId) -> String {
 /// Zlib compressed snapshot served by the pullDb file node
 pub fn pulled_event_db_file(event_id: EventId) -> String {
     format!("{}.pulldb", event_db_file(event_id))
+}
+
+pub(crate) const SIG_EVENT_DB_MODE_CHNG: &str = "eventDbModeChng";
+
+fn emit_event_db_mode_chng(rpc_client: &ClientCommandSender, event_id: EventId, db_mode: EventDbMode) {
+    let message = RpcMessage::new_signal_with_source(format!("eventctl/{event_id}"), SIG_EVENT_DB_MODE_CHNG, METH_EVENT_DB_MODE)
+        .with_param(db_mode.to_rpcvalue());
+    if let Err(err) = rpc_client.send_message(message) {
+        error!("Failed to send {SIG_EVENT_DB_MODE_CHNG} signal for event {event_id}: {err}");
+    }
 }
 
 pub fn event_api_shv_path(event_id: EventId) -> String {

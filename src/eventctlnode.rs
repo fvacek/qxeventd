@@ -16,7 +16,7 @@ use crate::qxchange::{self, Data, LateEntry, QxChangeRecord, QxChangeRecordChang
 use crate::qxeventconfig::Role;
 use crate::remotedbsqlapi::RemoteEventSqlApi;
 use crate::{anyhow_to_rpc_error, filenode, resolve_error, split_first_fragment, str_to_rpc_error};
-use crate::state::{open_event, setup_remote_db_recchng_monitoring, pulled_event_db_file, pushed_event_db_file, EventDbMode, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
+use crate::state::{SIG_EVENT_DB_MODE_CHNG, open_event, pulled_event_db_file, pushed_event_db_file, EventDbMode, EventId, EventListItem, EventRecord, EventRecordChange, SharedAppState, State};
 
 
 #[derive(Debug)]
@@ -78,16 +78,12 @@ fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
 
 pub const QX_API_TOKEN: &str = "qx_api_token";
 
+pub const METH_EVENT_DB_MODE: &str = "eventDbMode";
+
 #[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub struct UpdateEventRecordParams {
     event_id: EventId,
     change: EventRecordChange,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
-pub struct SetEventDbModeParams {
-    event_id: EventId,
-    db_mode: crate::state::EventDbMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
@@ -188,8 +184,6 @@ pub(crate) async fn request_handler(
             const METH_OPEN_EVENT_API_KEY: &str = "openEventApiKey";
             const METH_READ_EVENT_RECORD: &str = "readEventRecord";
             const METH_UPDATE_EVENT_RECORD: &str = "updateEventRecord";
-            const METH_SET_EVENT_DB_MODE: &str = "setEventDbMode";
-            const METH_EVENT_DB_MODE: &str = "eventDbMode";
             const METH_DELETE_EVENT: &str = "deleteEvent";
             const METH_LIST_EVENTS: &str = "listEvents";
             const METH_EVENT_DATA: &str = "eventData";
@@ -213,13 +207,6 @@ pub(crate) async fn request_handler(
                 MetaMethod::new_static(
                     // user with Service access or user_id == event_owner can update event records
                     METH_UPDATE_EVENT_RECORD, Flags::UserIDRequired, AccessLevel::Service, UpdateEventRecordParams::RPC_TYPE_STR, bool::RPC_TYPE_STR, &[], "",
-                ),
-                MetaMethod::new_static(
-                    // user with Service access or user_id == event_owner can change the database mode
-                    METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, SetEventDbModeParams::RPC_TYPE_STR, bool::RPC_TYPE_STR, &[], "",
-                ),
-                MetaMethod::new_static(
-                    METH_EVENT_DB_MODE, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE_STR, EventDbMode::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
                     METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE_STR, bool::RPC_TYPE_STR, &[], "",
@@ -298,31 +285,6 @@ pub(crate) async fn request_handler(
                                 Ok(res)
                             })
                         },
-                        METH_SET_EVENT_DB_MODE => {
-                            let p = match SetEventDbModeParams::try_from_rpcvalue(rq.param().unwrap_or_default()) {
-                                Ok(params) => params,
-                                Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
-                            };
-                            m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(p.event_id), method.to_owned(), EVENTCTL_ROOT_METHODS).await, async move || {
-                                let res = State::set_event_db_mode(&app_state, p.event_id, p.db_mode, client_cmd_tx.clone()).await
-                                    .map_err(anyhow_to_rpc_error)?;
-                                if matches!(p.db_mode, crate::state::EventDbMode::Replica) {
-                                    setup_remote_db_recchng_monitoring(app_state, p.event_id, client_cmd_tx).await;
-                                }
-                                Ok(res)
-                            })
-                        }
-                        METH_EVENT_DB_MODE => {
-                            let p = match EventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
-                                Ok(params) => params,
-                                Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
-                            };
-                            m.resolve(EVENTCTL_ROOT_METHODS, async move || {
-                                let db_mode = State::event_db_mode(&app_state, p.event_id).await
-                                    .map_err(anyhow_to_rpc_error)?;
-                                Ok(db_mode.to_rpcvalue())
-                            })
-                        }
                         METH_DELETE_EVENT => {
                             let p = match ApiTokenParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
                                 Ok(params) => params,
@@ -359,6 +321,7 @@ pub(crate) async fn request_handler(
             const METH_EVENT_STATUS: &str = "status";
             const METH_EVENT_UPDATE_LATE_ENTRY: &str = "updateLateEntry";
             const METH_EVENT_CLOSE: &str = "close";
+            const METH_SET_EVENT_DB_MODE: &str = "setEventDbMode";
             const EVENTCTL_NODE_METHODS: &[MetaMethod] = &[
                 META_METHOD_DIR,
                 META_METHOD_LS,
@@ -370,6 +333,14 @@ pub(crate) async fn request_handler(
                 ),
                 MetaMethod::new_static(
                     METH_EVENT_CLOSE, Flags::None, AccessLevel::Read, "",  "", &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_EVENT_DB_MODE, Flags::IsGetter, AccessLevel::Read, "", EventDbMode::RPC_TYPE_STR,
+                    &[(SIG_EVENT_DB_MODE_CHNG, Some(EventDbMode::RPC_TYPE_STR))], "",
+                ),
+                MetaMethod::new_static(
+                    // user with Service access or user_id == event_owner can change the database mode
+                    METH_SET_EVENT_DB_MODE, Flags::IsSetter.union(Flags::UserIDRequired), AccessLevel::Service, EventDbMode::RPC_TYPE_STR, bool::RPC_TYPE_STR, &[], "",
                 ),
             ];
 
@@ -446,6 +417,21 @@ pub(crate) async fn request_handler(
                             let res = State::close_event(&app_state, event_id, client_cmd_tx.clone()).await;
                             res.map_err(anyhow_to_rpc_error)
                         }),
+                        METH_EVENT_DB_MODE => m.resolve(EVENTCTL_NODE_METHODS, async move || {
+                            let db_mode = State::event_db_mode(&app_state, event_id).await
+                                .map_err(anyhow_to_rpc_error)?;
+                            Ok(db_mode.to_rpcvalue())
+                        }),
+                        METH_SET_EVENT_DB_MODE => {
+                            let db_mode = match EventDbMode::try_from_rpcvalue(rq.param().unwrap_or_default()) {
+                                Ok(db_mode) => db_mode,
+                                Err(err) => return resolve_error(&m, EVENTCTL_NODE_METHODS, err),
+                            };
+                            m.resolve(escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), EVENTCTL_NODE_METHODS).await, async move || {
+                                State::set_event_db_mode(&app_state, event_id, db_mode, client_cmd_tx).await
+                                    .map_err(anyhow_to_rpc_error)
+                            })
+                        }
                         _ => err_unresolved_request(),
                     }
                 }
@@ -668,18 +654,18 @@ mod tests {
     }
 
     #[test]
-    fn set_event_db_mode_params_try_from_rpcvalue() {
-        let value = RpcValue::from_cpon(r#"{"event_id":2,"db_mode":"Replica"}"#).unwrap();
-        let params = SetEventDbModeParams::try_from_rpcvalue(&value).unwrap();
+    fn event_db_mode_try_from_rpcvalue() {
+        let value = RpcValue::from_cpon(r#""Replica""#).unwrap();
+        let db_mode = EventDbMode::try_from_rpcvalue(&value).unwrap();
 
-        assert_eq!(params.event_id, 2);
-        assert_eq!(params.db_mode, crate::state::EventDbMode::Replica);
-        assert_eq!(params.to_rpcvalue().to_cpon(), r#"{"db_mode":"Replica","event_id":2}"#);
+        assert_eq!(db_mode, EventDbMode::Replica);
+        assert_eq!(db_mode.to_rpcvalue().to_cpon(), r#""Replica""#);
+        assert!(EventDbMode::try_from_rpcvalue(&RpcValue::from_cpon(r#""Foo""#).unwrap()).is_err());
     }
 
     #[test]
     fn params_reject_missing_field() {
-        assert!(SetEventDbModeParams::try_from_rpcvalue(&RpcValue::from_cpon(r#"{"event_id":2}"#).unwrap()).is_err());
+        assert!(UpdateEventRecordParams::try_from_rpcvalue(&RpcValue::from_cpon(r#"{"event_id":2}"#).unwrap()).is_err());
     }
 
     #[test]
@@ -692,7 +678,7 @@ mod tests {
             UpdateEventRecordParams::RPC_TYPE_STR,
             "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,{{i[Organizer,Banned]}:members}|n:config,i[Archived,ReadOnly,Master,Replica]|n:db_mode}:change}"
         );
-        assert_eq!(SetEventDbModeParams::RPC_TYPE_STR, "{i:event_id,i[Archived,ReadOnly,Master,Replica]:db_mode}");
+        assert_eq!(EventDbMode::RPC_TYPE_STR, "i[Archived,ReadOnly,Master,Replica]");
         assert_eq!(ListEventsResult::RPC_TYPE_STR, "[{i:id,s:name,i:stage_count,t:date,s:owner,i[Archived,ReadOnly,Master,Replica]:db_mode}]");
 
         let record = EventRecord {
