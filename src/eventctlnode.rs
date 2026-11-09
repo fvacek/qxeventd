@@ -189,6 +189,7 @@ pub(crate) async fn request_handler(
             const METH_READ_EVENT_RECORD: &str = "readEventRecord";
             const METH_UPDATE_EVENT_RECORD: &str = "updateEventRecord";
             const METH_SET_EVENT_DB_MODE: &str = "setEventDbMode";
+            const METH_EVENT_DB_MODE: &str = "eventDbMode";
             const METH_DELETE_EVENT: &str = "deleteEvent";
             const METH_LIST_EVENTS: &str = "listEvents";
             const METH_EVENT_DATA: &str = "eventData";
@@ -216,6 +217,9 @@ pub(crate) async fn request_handler(
                 MetaMethod::new_static(
                     // user with Service access or user_id == event_owner can change the database mode
                     METH_SET_EVENT_DB_MODE, Flags::UserIDRequired, AccessLevel::Service, SetEventDbModeParams::RPC_TYPE_STR, bool::RPC_TYPE_STR, &[], "",
+                ),
+                MetaMethod::new_static(
+                    METH_EVENT_DB_MODE, Flags::None, AccessLevel::Read, EventIdParam::RPC_TYPE_STR, EventDbMode::RPC_TYPE_STR, &[], "",
                 ),
                 MetaMethod::new_static(
                     METH_DELETE_EVENT, Flags::UserIDRequired, AccessLevel::Read, ApiTokenParam::RPC_TYPE_STR, bool::RPC_TYPE_STR, &[], "",
@@ -306,6 +310,17 @@ pub(crate) async fn request_handler(
                                     setup_remote_db_recchng_monitoring(app_state, p.event_id, client_cmd_tx).await;
                                 }
                                 Ok(res)
+                            })
+                        }
+                        METH_EVENT_DB_MODE => {
+                            let p = match EventIdParam::try_from_rpcvalue(rq.param().unwrap_or_default()) {
+                                Ok(params) => params,
+                                Err(err) => return resolve_error(&m, EVENTCTL_ROOT_METHODS, err),
+                            };
+                            m.resolve(EVENTCTL_ROOT_METHODS, async move || {
+                                let db_mode = State::event_db_mode(&app_state, p.event_id).await
+                                    .map_err(anyhow_to_rpc_error)?;
+                                Ok(db_mode.to_rpcvalue())
                             })
                         }
                         METH_DELETE_EVENT => {
