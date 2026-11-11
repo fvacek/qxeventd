@@ -199,8 +199,8 @@ mod tests {
 
     #[test]
     fn unit_enum_is_int_enum() {
-        assert_eq!(Mode::RPC_TYPE_STR, "i[Archived,readOnly]");
-        assert_eq!(WithEnum::RPC_TYPE_STR, "{i[Archived,readOnly]:mode,i[Archived,readOnly]|n:opt_mode}");
+        assert_eq!(Mode::RPC_TYPE_STR, "s[Archived,readOnly]");
+        assert_eq!(WithEnum::RPC_TYPE_STR, "{s[Archived,readOnly]:mode,s[Archived,readOnly]|n:opt_mode}");
         assert_eq!(shvproto::to_rpcvalue(&Mode::ReadOnly).unwrap().as_str(), "readOnly");
     }
 
@@ -222,8 +222,8 @@ mod tests {
 
     #[test]
     fn data_enum_is_externally_tagged() {
-        assert_eq!(Indexed::RPC_TYPE_STR, "i[Fail:-1,Success]");
-        assert_eq!(Mixed::RPC_TYPE_STR, "i[None,Id:i,pos:{i:x,i|n:Y},Other:123]");
+        assert_eq!(Indexed::RPC_TYPE_STR, "s[Fail,Success]");
+        assert_eq!(Mixed::RPC_TYPE_STR, "s[None,Id:i,pos:{i:x,i|n:Y},Other]");
         assert_eq!(shvproto::to_rpcvalue(&Mixed::None).unwrap().to_cpon(), r#""None""#);
         assert_eq!(shvproto::to_rpcvalue(&Mixed::Id(3)).unwrap().to_cpon(), r#"{"Id":3}"#);
         assert_eq!(

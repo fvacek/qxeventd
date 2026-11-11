@@ -94,20 +94,20 @@ mod tests {
 
     #[test]
     fn rpc_types() {
-        assert_eq!(Status::RPC_TYPE_STR, "i[Pending,Accepted,Rejected]");
+        assert_eq!(Status::RPC_TYPE_STR, "s[Pending,Accepted,Rejected]");
         assert_eq!(
             LateEntryKind::RPC_TYPE_STR,
-            "i[Update:{i:runId},NewEntry:{i:classId},DeleteEntry:{i:runId}]"
+            "s[Update:{i:runId},NewEntry:{i:classId},DeleteEntry:{i:runId}]"
         );
         assert_eq!(
             Data::RPC_TYPE_STR,
             concat!(
-                "i[LateEntry:{i[Update:{i:runId},NewEntry:{i:classId},DeleteEntry:{i:runId}]:kind,",
+                "s[LateEntry:{s[Update:{i:runId},NewEntry:{i:classId},DeleteEntry:{i:runId}]:kind,",
                 "s|n:firstname,s|n:lastname,s|n:registration,i|n:siid,i|n:starttimems,s|n:note}]"
             )
         );
         assert!(QxChangeRecord::RPC_TYPE_STR.contains(&format!("{}|n:data,", Data::RPC_TYPE_STR)));
-        assert!(QxChangeRecord::RPC_TYPE_STR.contains(",i[Pending,Accepted,Rejected]:status,"));
+        assert!(QxChangeRecord::RPC_TYPE_STR.contains(",s[Pending,Accepted,Rejected]:status,"));
         assert!(QxChangeRecord::RPC_TYPE_STR.ends_with(",b:paid}"));
     }
 }

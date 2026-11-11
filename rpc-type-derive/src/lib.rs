@@ -18,9 +18,9 @@
 //! type has to implement
 //! `RpcTypeStr` itself.
 //!
-//! An enum is described as an SHV Enum `i[KEY,KEY:INDEX,...]` with the variant names as keys.
-//! A unit variant with an explicit discriminant `V = N` is `V:N`. As an extension, a data variant
-//! has its payload type after the colon: a newtype variant `V(T)` is `V:T` and a struct variant
+//! An enum is described as an SHV String Enum `s[KEY,KEY:TYPE,...]` with the variant names as
+//! keys. Explicit discriminants are ignored, as serde ignores them. A data variant has its
+//! payload type after the colon: a newtype variant `V(T)` is `V:T` and a struct variant
 //! `V { f: T }` is `V:{T:f}`. The keys are the serde variant names, `#[serde(rename = "...")]` is
 //! honoured, `tag`, `content` and `untagged` enums are rejected.
 //!
@@ -201,11 +201,10 @@ fn named_fields_parts<'a>(
     Ok(parts)
 }
 
-/// SHV Enum `i[KEY,KEY:INDEX,...]`, extended for data variants with `KEY:TYPE`.
+/// SHV String Enum `s[KEY,KEY:TYPE,...]`.
 ///
-/// Every variant is a `KEY` (its serde name). A unit variant with an explicit discriminant
-/// `V = N` is `V:N`, a newtype variant `V(T)` is `V:T` and a struct variant `V { f: T }` is
-/// `V:{T:f}`. The type is the variant payload as serde serializes it.
+/// Every variant is a `KEY` (its serde name), explicit discriminants are ignored. A newtype
+/// variant `V(T)` is `V:T` and a struct variant `V { f: T }` is `V:{T:f}`. The type is the variant payload as serde serializes it.
 fn expand_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<proc_macro2::TokenStream> {
     let name = &input.ident;
     if serde_attrs(&input.attrs)?.non_external_tagging {
@@ -218,7 +217,7 @@ fn expand_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<proc_ma
         return Err(syn::Error::new_spanned(input, "RpcTypeStr does not support enums without variants"));
     }
 
-    let mut parts = vec![quote! { "i[" }];
+    let mut parts = vec![quote! { "s[" }];
     for (i, variant) in data.variants.iter().enumerate() {
         let mut key = if i > 0 { "," } else { "" }.to_string();
         key.push_str(&match serde_attrs(&variant.attrs)?.rename {
@@ -227,18 +226,8 @@ fn expand_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<proc_ma
         });
         let type_parts = match &variant.fields {
             Fields::Unit => {
-                if let Some((_, expr)) = &variant.discriminant {
-                    key.push(':');
-                    key.push_str(&discriminant_value(expr)?);
-                }
                 parts.push(quote! { #key });
                 continue;
-            }
-            _ if variant.discriminant.is_some() => {
-                return Err(syn::Error::new_spanned(
-                    variant,
-                    "RpcTypeStr supports explicit discriminants on unit variants only",
-                ));
             }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 type_parts(&fields.unnamed[0].ty)
@@ -263,21 +252,3 @@ fn expand_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<proc_ma
     })
 }
 
-/// Decimal value of an integer literal discriminant, optionally negated
-fn discriminant_value(expr: &syn::Expr) -> syn::Result<String> {
-    match expr {
-        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(lit), .. }) => {
-            Ok(lit.base10_digits().to_string())
-        }
-        syn::Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), expr, .. }) => {
-            Ok(format!("-{}", discriminant_value(expr)?))
-        }
-        syn::Expr::Paren(syn::ExprParen { expr, .. }) | syn::Expr::Group(syn::ExprGroup { expr, .. }) => {
-            discriminant_value(expr)
-        }
-        _ => Err(syn::Error::new_spanned(
-            expr,
-            "RpcTypeStr requires an integer literal discriminant",
-        )),
-    }
-}
