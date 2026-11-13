@@ -146,8 +146,7 @@ impl State {
         // a map with null mountPoint is rejected.
         let mount = match event_id {
             Some(id) => {
-                let remote_mount_point = format!("{}/{}", global_config().remote_events_mount_point, id);
-                make_map!( "mountPoint".to_string() => RpcValue::from(remote_mount_point),).into()
+                make_map!( "mountPoint".to_string() => RpcValue::from(remote_event_mount_point(id)),).into()
             }
             None => RpcValue::null(),
         };
@@ -338,16 +337,18 @@ impl State {
 
     pub async fn delete_event(app_state: &SharedAppState, event_id: EventId, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
         log::info!("Deleting event {}", event_id);
-        Self::close_event(app_state, event_id, rpc_client.clone()).await?;
         let db_pool = app_state.read().await.db_pool.clone();
+        // Load the record before closing the event, so a missing record does not leave it half deleted.
         let event_record = load_event_record(&db_pool, event_id).await?;
-        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
+        // Remove the broker mount point before the DB row, a broker failure aborts the deletion,
+        // so it can be retried. The removal is done regardless of db_mode, to clean up
+        // a stale mount point left by a failed mount point restore in set_event_db_mode().
+        Self::register_qe_mount_point_in_broker(None, &event_record.api_token, rpc_client.clone()).await
+            .map_err(|e| anyhow!("Failed to remove mount point of event {event_id}: {e}"))?;
+        Self::close_event(app_state, event_id, rpc_client.clone()).await?;
+        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client);
         let was_deleted = qxsql.delete_record_with_recchng("events", event_id, None).await?;
         Self::forget_event_record(app_state, event_id).await;
-        if was_deleted && event_record.db_mode == EventDbMode::Replica
-            && let Err(e) = Self::register_qe_mount_point_in_broker(None, &event_record.api_token, rpc_client).await {
-            error!("Failed to remove mount point of deleted event {event_id}: {e}");
-        }
         Ok(was_deleted)
     }
 
