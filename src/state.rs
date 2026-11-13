@@ -136,11 +136,16 @@ impl State {
     }
 
     async fn register_qe_mount_point_in_broker(event_id: Option<EventId>, api_token: &str, client_cmd_tx: ClientCommandSender) -> anyhow::Result<()> {
-        let remote_mount_point = event_id.map(|id| format!("{}/{}", global_config().remote_events_mount_point, id));
-        let param: Vec<RpcValue> = vec![
-            api_token.into(),
-            make_map!( "mountPoint".to_string() => RpcValue::from(remote_mount_point),).into(),
-        ];
+        // The broker deletes the mount only when the second param item itself is null,
+        // a map with null mountPoint is rejected.
+        let mount = match event_id {
+            Some(id) => {
+                let remote_mount_point = format!("{}/{}", global_config().remote_events_mount_point, id);
+                make_map!( "mountPoint".to_string() => RpcValue::from(remote_mount_point),).into()
+            }
+            None => RpcValue::null(),
+        };
+        let param: Vec<RpcValue> = vec![api_token.into(), mount];
         let _res: RpcValue = client_cmd_tx.call_rpc_method(".broker/access/mounts", "setValue", Some(param.into()), None, None, None::<fn(f64)>)
             .await.map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
