@@ -621,7 +621,7 @@ dependencies = [
  "chrono",
  "rust_decimal",
  "serde",
- "thiserror 2.0.21",
+ "thiserror",
  "time",
  "winnow",
 ]
@@ -635,7 +635,7 @@ dependencies = [
  "chrono",
  "rust_decimal",
  "serde",
- "thiserror 2.0.21",
+ "thiserror",
  "time",
  "winnow",
 ]
@@ -728,20 +728,6 @@ dependencies = [
 
 [[package]]
 name = "flexi_logger"
-version = "0.28.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cca927478b3747ba47f98af6ba0ac0daea4f12d12f55e9104071b3dc00276310"
-dependencies = [
- "chrono",
- "glob",
- "log",
- "nu-ansi-term",
- "regex",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "flexi_logger"
 version = "0.31.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4945fa9cdfd7571192cf559c186d45ab36c8034482a2d217a19bdc566f190cc"
@@ -750,7 +736,7 @@ dependencies = [
  "log",
  "nu-ansi-term",
  "regex",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -1186,7 +1172,7 @@ dependencies = [
  "jni-sys",
  "log",
  "simd_cesu8",
- "thiserror 2.0.21",
+ "thiserror",
  "walkdir",
  "windows-link",
 ]
@@ -1489,7 +1475,6 @@ dependencies = [
  "const_format",
  "duration-str 0.18.0",
  "flate2",
- "flexi_logger 0.28.5",
  "futures",
  "futures-lite 2.6.1",
  "futures-time",
@@ -1519,7 +1504,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "flexi_logger 0.31.10",
+ "flexi_logger",
  "log",
  "qxsql-derive",
  "regex",
@@ -1634,7 +1619,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
 dependencies = [
  "hashbrown 0.16.1",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -2164,31 +2149,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.21",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "thiserror-impl",
 ]
 
 [[package]]
