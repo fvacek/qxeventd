@@ -25,7 +25,7 @@ use smol::{lock::RwLock, channel};
 
 use crate::eventctlnode::METH_EVENT_DB_MODE;
 use crate::localdbsqlapi::LocalDbSqlApi;
-use crate::eventdb::{migrate_event_db, migrate_event_db_file};
+use crate::eventdb::{import_event_db_file, migrate_event_db};
 use crate::eventsqlapi::LocalEventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
@@ -207,7 +207,7 @@ impl State {
 
         // Decode and verify before closing the event so an invalid upload does not interrupt
         // a currently running event.
-        let inflate_result = {
+        let imported_event_info = {
             let pushed_file = pushed_file.clone();
             let tmp_file = tmp_file.clone();
             smol::unblock(move || {
@@ -216,21 +216,30 @@ impl State {
                 if crate::filenode::sha1(std::path::Path::new(&tmp_file), 0, None)? != expected_sha1 {
                     bail!("Event {event_id} database does not match the expected SHA-1");
                 }
-                migrate_event_db_file(&tmp_file)
+                import_event_db_file(&tmp_file)
                     .map_err(|err| anyhow!("Invalid event {event_id} database: {err}"))
             }).await
         };
-        let install_result = match inflate_result {
-            Ok(()) => Self::install_event_db(app_state, event_id, &tmp_file, client_command_sender).await,
+        let install_result = match imported_event_info {
+            Ok(record_change) => Self::install_event_db(app_state.clone(), event_id, &tmp_file, client_command_sender.clone()).await
+                .map(|()| record_change),
             Err(err) => Err(err),
         };
-        if install_result.is_err() {
-            let _ = std::fs::remove_file(&tmp_file);
-        }
-        install_result?;
-
+        // The upload is kept on failure, so it can be inspected or fixed and committed again.
+        let record_change = match install_result {
+            Ok(record_change) => record_change,
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp_file);
+                return Err(err);
+            }
+        };
         if let Err(err) = std::fs::remove_file(&pushed_file) {
             warn!("Failed to remove pushed event DB file {pushed_file}: {err}");
+        }
+
+        if let rec = record_change.to_record() && !rec.is_empty() {
+            Self::update_event_record(&app_state, event_id, record_change, client_command_sender).await
+                .map_err(|err| anyhow!("Event {event_id} database installed, but the event record update failed: {err}"))?;
         }
         Ok(())
     }

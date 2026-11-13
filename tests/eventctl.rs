@@ -605,6 +605,82 @@ fn pull_db_snapshot_is_stable_until_refreshed() {
 }
 
 #[test]
+fn push_db_commit_updates_event_record() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        write_event_db(event_id, b"old");
+
+        let ((), db_image) = with_event_db_image(b"", |conn| {
+            conn.execute_batch("
+                CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT);
+                INSERT INTO config (ckey, cvalue) VALUES
+                    ('event.name', 'Pushed event'),
+                    ('event.stage_count', '3'),
+                    ('event.date', '2024-05-01'),
+                    ('event.time', '10:30:00');
+                PRAGMA user_version = 1;
+            ").unwrap();
+        });
+        push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
+        push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
+
+        let res = client.call(request("eventctl", "readEventRecord", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+        let record = res.as_map();
+        assert_eq!(record["name"].as_str(), "Pushed event");
+        assert_eq!(record["stage_count"].as_int(), 3);
+        let date = record["date"].as_datetime().to_chrono_datetime();
+        assert_eq!(date.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-05-01 10:30:00", "{}", res.to_cpon());
+
+        // fields missing in the pushed DB are kept
+        let ((), db_image) = with_event_db_image(b"", |conn| {
+            conn.execute_batch("
+                CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT);
+                INSERT INTO config (ckey, cvalue) VALUES ('event.name', 'Renamed');
+                PRAGMA user_version = 1;
+            ").unwrap();
+        });
+        push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
+        push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
+        push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
+        let res = client.call(request("eventctl", "readEventRecord", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+        assert_eq!(res.as_map()["name"].as_str(), "Renamed");
+        assert_eq!(res.as_map()["stage_count"].as_int(), 3);
+    });
+}
+
+#[test]
+fn push_db_commit_updates_event_record_from_quickevent_config() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        write_event_db(event_id, b"old");
+
+        // QuickEvent keys take precedence, ints are stored as SQLite integers
+        let ((), db_image) = with_event_db_image(b"", |conn| {
+            conn.execute_batch("
+                CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT, ctype TEXT);
+                INSERT INTO config (ckey, cvalue, ctype) VALUES
+                    ('event.name', 'QE event', 'QString'),
+                    ('event.stageCount', 4, 'int'),
+                    ('event.stage_count', '2', 'int'),
+                    ('event.dateTime', '2024-06-02T09:15:00+02:00', 'QDateTime'),
+                    ('event.date', '2020-01-01', 'QDate');
+                PRAGMA user_version = 1;
+            ").unwrap();
+        });
+        push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
+        push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
+
+        let res = client.call(request("eventctl", "readEventRecord", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+        let record = res.as_map();
+        assert_eq!(record["name"].as_str(), "QE event");
+        assert_eq!(record["stage_count"].as_int(), 4);
+        assert_eq!(record["date"].as_datetime().to_chrono_datetime().to_rfc3339(), "2024-06-02T09:15:00+02:00", "{}", res.to_cpon());
+    });
+}
+
+#[test]
 fn pulled_db_can_be_pushed_back() {
     smol::block_on(async {
         let mut client = TestClient::new().await;

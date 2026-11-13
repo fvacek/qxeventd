@@ -4,13 +4,14 @@ use std::sync::LazyLock;
 
 use async_sqlite::rusqlite::Connection;
 use async_sqlite::{JournalMode, Pool, PoolBuilder};
-use log::info;
+use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
+use log::*;
 use qxsql::DbValue;
 use qxsql::sql::{QxSqlApi, record_from_slice};
 use rusqlite_migration::{M, Migrations};
 use shvclient::ClientCommandSender;
 
-use crate::{localdbsqlapi::LocalDbSqlApi, state::EventRecord};
+use crate::{localdbsqlapi::LocalDbSqlApi, state::{EventRecord, EventRecordChange}};
 
 fn check_file_exists(path: &str) -> bool {
     std::fs::metadata(path).is_ok()
@@ -58,10 +59,51 @@ pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_co
     Ok(pool)
 }
 
-/// Checks that the file can be opened as an event database and migrates it, so it can be
-/// installed without a risk of the event failing to open afterwards. Blocking.
-pub fn migrate_event_db_file(db_file: &str) -> anyhow::Result<()> {
-    migrate_event_db_connection(&mut Connection::open(db_file)?)
+/// Checks that the file can be opened as an event database, migrates it, so it can be
+/// installed without a risk of the event failing to open afterwards, and reads the event
+/// record values from its config. Failure to read them is not an error, empty change is
+/// returned then. Blocking.
+///
+/// A single read-write connection is used: closing a read-only connection to a WAL mode
+/// database would leave `-wal` and `-shm` files behind, a read-write one checkpoints and
+/// removes them.
+pub fn import_event_db_file(db_file: &str) -> anyhow::Result<EventRecordChange> {
+    let mut conn = Connection::open(db_file)?;
+    migrate_event_db_connection(&mut conn)?;
+    Ok(read_event_record_change(&conn).unwrap_or_else(|err| {
+        warn!("Failed to read event record change from {db_file}: {err}");
+        EventRecordChange::default()
+    }))
+}
+
+fn read_event_record_change(conn: &Connection) -> anyhow::Result<EventRecordChange> {
+    let mut change = EventRecordChange::default();
+    let mut stmt = conn.prepare("SELECT ckey, CAST(cvalue AS TEXT) FROM config WHERE ckey LIKE 'event.%' AND cvalue IS NOT NULL")?;
+    let config = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?.trim().to_string())))?
+        .filter(|row| row.as_ref().map_or(true, |(_, value)| !value.is_empty()))
+        .collect::<Result<HashMap<_, _>, _>>()?;
+
+    change.name = config.get("event.name").cloned();
+    change.stage_count = config.get("event.stageCount").and_then(|v| v.parse::<i64>().ok());
+    let event_date = config.get("event.date").cloned();
+    let event_time = config.get("event.time").cloned();
+    change.date = if let Some(event_date) = event_date && let Some(event_time) = event_time {
+        parse_local_date_time(&event_date, &event_time)
+    } else {
+        None
+    };
+    Ok(change)
+}
+
+/// Local date time from `event.date` (`YYYY-MM-DD`) and optional `event.time` (`HH:MM[:SS]`)
+/// config values, midnight if time is missing or empty.
+fn parse_local_date_time(date: &str, time: &str) -> Option<DateTime<FixedOffset>> {
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let time = NaiveTime::parse_from_str(time, "%H:%M:%S")
+            .or_else(|_| NaiveTime::parse_from_str(time, "%H:%M"))
+            .ok()?;
+    let local = Local.from_local_datetime(&date.and_time(time)).earliest()?;
+    Some(local.fixed_offset())
 }
 
 fn migrate_event_db_connection(conn: &mut Connection) -> anyhow::Result<()> {
@@ -211,6 +253,17 @@ mod tests {
         assert_eq!(column_default("classdefs", "startSlotIndex"), Some(&DbValue::Int(-1)));
         assert_eq!(column_default("runs", "id"), None);
         assert_eq!(column_default("no_such_table", "id"), None);
+    }
+
+    #[test]
+    fn event_date_parsing() {
+        let dt = parse_local_date_time("2024-05-01", "10:30:15").unwrap();
+        assert_eq!(dt.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-05-01 10:30:15");
+        let dt = parse_local_date_time("2024-05-01", "10:30").unwrap();
+        assert_eq!(dt.format("%H:%M:%S").to_string(), "10:30:00");
+        let dt = parse_local_date_time("2024-05-01", "00:00").unwrap();
+        assert_eq!(dt.format("%H:%M:%S").to_string(), "00:00:00");
+        assert!(parse_local_date_time("2024-05-01", "xx").is_none());
     }
 
     #[test]
