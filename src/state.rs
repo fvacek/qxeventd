@@ -463,7 +463,7 @@ pub(crate) async fn remote_db_recchng_monitoring_task(app_state: SharedAppState,
             return;
         }
     };
-    info!("Subscribing SQL recchng: {ri:?}");
+    info!("Subscribing SQL recchng: {ri}", ri = ri.as_str());
     let mut subscriber = match rpc_client.subscribe(ri).await {
         Ok(subscriber) => subscriber,
         Err(err) => {

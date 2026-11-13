@@ -41,6 +41,10 @@ pub struct TestClient {
     pub signals: Vec<RpcMessage>,
     /// Whether the mocked remote event DB service answers ping
     pub remote_db_available: bool,
+    /// Whether the mocked broker accepts `.broker/access/mounts:setValue`
+    pub broker_mounts_available: bool,
+    /// Requests sent by qxeventd to the broker, collected while waiting for responses
+    pub broker_requests: Vec<RpcMessage>,
     _client_task: smol::Task<()>,
 }
 
@@ -54,7 +58,7 @@ impl TestClient {
         });
         let (conn_cmd_tx, conn_cmd_rx) = unbounded();
         conn_evt_tx.unbounded_send(ConnectionEvent::Connected(conn_cmd_tx)).unwrap();
-        Self { conn_evt_tx, conn_cmd_rx, signals: vec![], remote_db_available: true, _client_task: client_task }
+        Self { conn_evt_tx, conn_cmd_rx, signals: vec![], remote_db_available: true, broker_mounts_available: true, broker_requests: vec![], _client_task: client_task }
     }
 
     fn send(&self, msg: &RpcMessage) {
@@ -75,7 +79,7 @@ impl TestClient {
     /// Mocked responses of broker to requests sent by qxeventd
     fn mock_broker_response(&self, rq: &RpcMessage) -> Result<RpcValue, RpcError> {
         match (rq.shv_path().unwrap_or_default(), rq.method().unwrap_or_default()) {
-            (".broker/access/mounts", "setValue") => Ok(true.into()),
+            (".broker/access/mounts", "setValue") if self.broker_mounts_available => Ok(true.into()),
             (".broker", "ls") => Ok(vec![RpcValue::from("client")].into()),
             (".broker/currentClient", "subscribe") => Ok(true.into()),
             (path, "ping") if path.ends_with("/.app") && self.remote_db_available => Ok(RpcValue::null()),
@@ -102,6 +106,7 @@ impl TestClient {
                     Err(err) => resp.set_error(err),
                 };
                 self.send(&resp);
+                self.broker_requests.push(msg);
             } else if msg.is_signal() {
                 self.signals.push(msg);
             }

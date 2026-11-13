@@ -9,7 +9,7 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use sha1::{Digest, Sha1};
 use shvproto::RpcValue;
-use shvrpc::RpcMessage;
+use shvrpc::{RpcMessage, RpcMessageMetaTags};
 use shvrpc::metamethod::AccessLevel;
 
 use common::{TestClient, assert_permission_denied, create_event, create_event_with_own_db, data_dir, request};
@@ -784,5 +784,151 @@ fn sql_api_access_rights() {
             .expect("api token holder can create");
         client.call(request(&path, "create", create, "writer", AccessLevel::Write)).await
             .expect("user with Write access can create");
+    });
+}
+
+/// Params of `.broker/access/mounts:setValue` requests sent by qxeventd, the collected requests are cleared
+fn take_mount_requests(client: &mut TestClient) -> Vec<String> {
+    std::mem::take(&mut client.broker_requests).into_iter()
+        .filter(|rq| rq.shv_path() == Some(".broker/access/mounts") && rq.method() == Some("setValue"))
+        .map(|rq| rq.param().map(RpcValue::to_cpon).unwrap_or_default())
+        .collect()
+}
+
+/// `eventDbModeChng` signal params collected by the client, the collected signals are cleared
+fn take_db_mode_chng_signals(client: &mut TestClient, event_id: i64) -> Vec<String> {
+    std::mem::take(&mut client.signals).into_iter()
+        .filter(|sig| sig.method() == Some("eventDbModeChng"))
+        .inspect(|sig| assert!(sig.shv_path().unwrap_or_default().ends_with(&format!("eventctl/{event_id}")), "{sig}"))
+        .map(|sig| sig.param().map(RpcValue::to_cpon).unwrap_or_default())
+        .collect()
+}
+
+async fn set_db_mode(client: &mut TestClient, event_id: i64, db_mode: &str, user: &str) -> Result<RpcValue, shvrpc::rpcmessage::RpcError> {
+    client.call(request(&format!("eventctl/{event_id}"), "setEventDbMode", &format!(r#""{db_mode}""#), user, AccessLevel::Read)).await
+}
+
+async fn db_mode(client: &mut TestClient, event_id: i64) -> String {
+    client.call(request(&format!("eventctl/{event_id}"), "eventDbMode", "", "fanda", AccessLevel::Read)).await
+        .unwrap().as_str().to_string()
+}
+
+#[test]
+fn set_event_db_mode_replica_mounts_remote_db() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, api_token) = create_event(&mut client, "fanda").await;
+        assert_eq!(db_mode(&mut client, event_id).await, "Archived");
+        take_mount_requests(&mut client);
+        client.signals.clear();
+
+        let res = set_db_mode(&mut client, event_id, "Replica", "fanda").await.unwrap();
+        assert_eq!(res, RpcValue::from(true));
+        assert_eq!(
+            take_mount_requests(&mut client),
+            vec![format!(r#"["{api_token}",{{"mountPoint":"test/qx/remotedb/{event_id}"}}]"#)],
+        );
+        assert_eq!(take_db_mode_chng_signals(&mut client, event_id), vec![r#""Replica""#.to_string()]);
+        assert_eq!(db_mode(&mut client, event_id).await, "Replica");
+    });
+}
+
+#[test]
+fn set_event_db_mode_leaving_replica_removes_mount() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, api_token) = create_event(&mut client, "fanda").await;
+        set_db_mode(&mut client, event_id, "Replica", "fanda").await.unwrap();
+        take_mount_requests(&mut client);
+        client.signals.clear();
+
+        let res = set_db_mode(&mut client, event_id, "Master", "fanda").await.unwrap();
+        assert_eq!(res, RpcValue::from(true));
+        assert_eq!(take_mount_requests(&mut client), vec![format!(r#"["{api_token}",null]"#)]);
+        assert_eq!(take_db_mode_chng_signals(&mut client, event_id), vec![r#""Master""#.to_string()]);
+        assert_eq!(db_mode(&mut client, event_id).await, "Master");
+    });
+}
+
+#[test]
+fn set_event_db_mode_same_mode_resyncs_mount_only() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, api_token) = create_event(&mut client, "fanda").await;
+        set_db_mode(&mut client, event_id, "Replica", "fanda").await.unwrap();
+        take_mount_requests(&mut client);
+        client.signals.clear();
+
+        // mount point is registered again, DB is not changed
+        let res = set_db_mode(&mut client, event_id, "Replica", "fanda").await.unwrap();
+        assert_eq!(res, RpcValue::from(false));
+        assert_eq!(
+            take_mount_requests(&mut client),
+            vec![format!(r#"["{api_token}",{{"mountPoint":"test/qx/remotedb/{event_id}"}}]"#)],
+        );
+        assert!(take_db_mode_chng_signals(&mut client, event_id).is_empty());
+        assert_eq!(db_mode(&mut client, event_id).await, "Replica");
+
+        // non replica mode removes a possibly stale mount point
+        let res = set_db_mode(&mut client, event_id, "Master", "fanda").await.unwrap();
+        assert_eq!(res, RpcValue::from(true));
+        take_mount_requests(&mut client);
+        let res = set_db_mode(&mut client, event_id, "Master", "fanda").await.unwrap();
+        assert_eq!(res, RpcValue::from(false));
+        assert_eq!(take_mount_requests(&mut client), vec![format!(r#"["{api_token}",null]"#)]);
+    });
+}
+
+#[test]
+fn set_event_db_mode_broker_failure_keeps_db_mode() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event(&mut client, "fanda").await;
+        client.broker_mounts_available = false;
+        client.signals.clear();
+
+        set_db_mode(&mut client, event_id, "Replica", "fanda").await.expect_err("broker failure is reported");
+        assert!(take_db_mode_chng_signals(&mut client, event_id).is_empty());
+        assert_eq!(db_mode(&mut client, event_id).await, "Archived");
+
+        // the change can be retried once the broker accepts mounts
+        client.broker_mounts_available = true;
+        let res = set_db_mode(&mut client, event_id, "Replica", "fanda").await.unwrap();
+        assert_eq!(res, RpcValue::from(true));
+        assert_eq!(db_mode(&mut client, event_id).await, "Replica");
+    });
+}
+
+#[test]
+fn set_event_db_mode_access_rights_and_params() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event(&mut client, "fanda").await;
+        take_mount_requests(&mut client);
+
+        // stranger with Read access is denied, the broker is not touched
+        assert_permission_denied(set_db_mode(&mut client, event_id, "Replica", "eve").await);
+        assert!(take_mount_requests(&mut client).is_empty());
+
+        // user with Service access can change the mode
+        let rq = request(&format!("eventctl/{event_id}"), "setEventDbMode", r#""Master""#, "admin", AccessLevel::Service);
+        assert_eq!(client.call(rq).await.unwrap(), RpcValue::from(true));
+        assert_eq!(db_mode(&mut client, event_id).await, "Master");
+
+        // invalid mode is rejected
+        take_mount_requests(&mut client);
+        set_db_mode(&mut client, event_id, "Foo", "fanda").await.expect_err("invalid db mode");
+        assert!(take_mount_requests(&mut client).is_empty());
+        assert_eq!(db_mode(&mut client, event_id).await, "Master");
+    });
+}
+
+#[test]
+fn set_event_db_mode_of_missing_event_fails() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let rq = request("eventctl/999999", "setEventDbMode", r#""Replica""#, "admin", AccessLevel::Service);
+        client.call(rq).await.expect_err("missing event");
+        assert!(take_mount_requests(&mut client).is_empty());
     });
 }
