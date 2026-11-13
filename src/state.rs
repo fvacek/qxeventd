@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::{collections::BTreeMap, sync::Arc};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::mem::DropGuard;
 
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -205,7 +206,7 @@ impl State {
         let pushed_file = pushed_event_db_file(event_id);
         // Removes the decompressed file on any failure, including a panic or cancellation
         // of this future. Once it is installed, there is nothing left to remove.
-        let tmp_file = TmpDbFileGuard(format!("{pushed_file}.inflate-tmp-{:016x}", rand::random::<u64>()));
+        let tmp_file = tmp_db_file_guard(format!("{pushed_file}.inflate-tmp-{:016x}", rand::random::<u64>()));
 
         // Decode and verify before closing the event so an invalid upload does not interrupt
         // a currently running event.
@@ -215,12 +216,12 @@ impl State {
             let pushed_file = pushed_file.clone();
             smol::unblock(move || {
                 let result = (|| {
-                    inflate_file(&pushed_file, tmp_file.path())
+                    inflate_file(&pushed_file, &tmp_file)
                         .map_err(|err| anyhow!("Failed to decompress event {event_id} database: {err}"))?;
-                    if crate::filenode::sha1(std::path::Path::new(tmp_file.path()), 0, None)? != expected_sha1 {
+                    if crate::filenode::sha1(std::path::Path::new(&*tmp_file), 0, None)? != expected_sha1 {
                         bail!("Event {event_id} database does not match the expected SHA-1");
                     }
-                    import_event_db_file(tmp_file.path())
+                    import_event_db_file(&tmp_file)
                         .map_err(|err| anyhow!("Invalid event {event_id} database: {err}"))
                 })();
                 (tmp_file, result)
@@ -228,7 +229,7 @@ impl State {
         };
         // The upload is kept on failure, so it can be inspected or fixed and committed again.
         let record_change = imported_event_info?;
-        Self::install_event_db(app_state.clone(), event_id, tmp_file.path(), client_command_sender.clone()).await?;
+        Self::install_event_db(app_state.clone(), event_id, &tmp_file, client_command_sender.clone()).await?;
         drop(tmp_file);
         if let Err(err) = std::fs::remove_file(&pushed_file) {
             warn!("Failed to remove pushed event DB file {pushed_file}: {err}");
@@ -780,23 +781,15 @@ impl OpenEventCtl {
 
 /// Temporary SQLite database file, it is removed together with its journal files when
 /// the guard is dropped, so they are not left behind on error, panic or future cancellation.
-struct TmpDbFileGuard(String);
-
-impl TmpDbFileGuard {
-    fn path(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Drop for TmpDbFileGuard {
-    fn drop(&mut self) {
-        let path = &self.0;
-        for file in [path.clone(), format!("{path}-journal"), format!("{path}-wal"), format!("{path}-shm")] {
+/// Removes the temporary SQLite database `path` together with its journal files when dropped.
+fn tmp_db_file_guard(path: String) -> DropGuard<String, impl FnOnce(String)> {
+    DropGuard::new(path, |path| {
+        for file in [format!("{path}-journal"), format!("{path}-wal"), format!("{path}-shm"), path] {
             if let Err(err) = std::fs::remove_file(&file) && err.kind() != std::io::ErrorKind::NotFound {
                 warn!("Failed to remove temporary file {file}: {err}");
             }
         }
-    }
+    })
 }
 
 fn inflate_file(zlib_file: &str, out_file: &str) -> std::io::Result<()> {
