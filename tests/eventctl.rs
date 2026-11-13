@@ -57,6 +57,15 @@ fn with_event_db_image<T>(data: &[u8], f: impl FnOnce(&Connection) -> T) -> (T, 
     (result, std::fs::read(&path).unwrap())
 }
 
+/// Commit must not leave the decompressed upload or its SQLite journal files behind
+fn assert_no_commit_tmp_files(event_id: i64) {
+    let leftovers: Vec<_> = std::fs::read_dir(format!("{}/{event_id}", data_dir())).unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".inflate-tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
 fn read_config(conn: &Connection, key: &str) -> String {
     conn.query_row("SELECT cvalue FROM config WHERE ckey = ?1", [key], |row| row.get(0)).unwrap()
 }
@@ -230,6 +239,7 @@ fn push_db_upload_in_chunks_and_commit() {
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
         assert_eq!(pull_event_db(&mut client, event_id).await, db_image);
         assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), 0);
+        assert_no_commit_tmp_files(event_id);
     });
 }
 
@@ -247,6 +257,7 @@ fn push_db_commit_rejects_invalid_compressed_data() {
             push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
             push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
             push_db_call(&mut client, event_id, "commit", sha1_of(&snapshot)).await.expect_err("invalid data");
+            assert_no_commit_tmp_files(event_id);
 
             // upload is kept, running event is not interrupted
             assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), data.len() as i64);
@@ -256,6 +267,33 @@ fn push_db_commit_rejects_invalid_compressed_data() {
             let (expected_name, _) = with_event_db_image(&snapshot, |conn| read_config(conn, "event.name"));
             assert_eq!(event_name, expected_name);
         }
+    });
+}
+
+#[test]
+fn push_db_commit_wal_mode_database() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        write_event_db(event_id, b"old");
+
+        let ((), mut db_image) = with_event_db_image(b"", |conn| {
+            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 1;").unwrap();
+        });
+        // file format read and write versions of a WAL mode database
+        db_image[18] = 2;
+        db_image[19] = 2;
+        push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
+        push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
+        assert_no_commit_tmp_files(event_id);
+
+        // installed in rollback journal mode, so no changes can be left in a WAL file
+        let installed = pull_event_db(&mut client, event_id).await;
+        assert_eq!(&installed[18..20], &[1, 1]);
+        let (rows, _) = with_event_db_image(&installed, |conn| {
+            conn.query_row("SELECT count(*) FROM t", [], |row| row.get::<_, i64>(0)).unwrap()
+        });
+        assert_eq!(rows, 0);
     });
 }
 
@@ -278,6 +316,7 @@ fn push_db_commit_rejects_sha1_mismatch() {
         for sha1 in [sha1_of(&snapshot), sha1_of(&compressed)] {
             let err = push_db_call(&mut client, event_id, "commit", sha1).await.expect_err("SHA-1 mismatch");
             assert!(err.to_string().contains("SHA-1"), "{err}");
+            assert_no_commit_tmp_files(event_id);
 
             // upload is kept, running event is not interrupted
             assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), compressed.len() as i64);
@@ -440,6 +479,7 @@ fn push_db_commit_rejects_invalid_database() {
         let compressed = compress(&data);
         push_db_call(&mut client, event_id, "append", RpcValue::from(&compressed[..])).await.unwrap();
         push_db_call(&mut client, event_id, "commit", sha1_of(&data)).await.expect_err("not a database");
+        assert_no_commit_tmp_files(event_id);
 
         // upload is kept, running event is not interrupted
         assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), compressed.len() as i64);
@@ -616,7 +656,7 @@ fn push_db_commit_updates_event_record() {
                 CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT);
                 INSERT INTO config (ckey, cvalue) VALUES
                     ('event.name', 'Pushed event'),
-                    ('event.stage_count', '3'),
+                    ('event.stageCount', '3'),
                     ('event.date', '2024-05-01'),
                     ('event.time', '10:30:00');
                 PRAGMA user_version = 1;
@@ -656,16 +696,15 @@ fn push_db_commit_updates_event_record_from_quickevent_config() {
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
         write_event_db(event_id, b"old");
 
-        // QuickEvent keys take precedence, ints are stored as SQLite integers
+        // QuickEvent stores typed values, ints as SQLite integers
         let ((), db_image) = with_event_db_image(b"", |conn| {
             conn.execute_batch("
                 CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT, ctype TEXT);
                 INSERT INTO config (ckey, cvalue, ctype) VALUES
                     ('event.name', 'QE event', 'QString'),
                     ('event.stageCount', 4, 'int'),
-                    ('event.stage_count', '2', 'int'),
-                    ('event.dateTime', '2024-06-02T09:15:00+02:00', 'QDateTime'),
-                    ('event.date', '2020-01-01', 'QDate');
+                    ('event.date', '2024-06-02', 'QDate'),
+                    ('event.time', '09:15', 'QTime');
                 PRAGMA user_version = 1;
             ").unwrap();
         });
@@ -676,7 +715,8 @@ fn push_db_commit_updates_event_record_from_quickevent_config() {
         let record = res.as_map();
         assert_eq!(record["name"].as_str(), "QE event");
         assert_eq!(record["stage_count"].as_int(), 4);
-        assert_eq!(record["date"].as_datetime().to_chrono_datetime().to_rfc3339(), "2024-06-02T09:15:00+02:00", "{}", res.to_cpon());
+        let date = record["date"].as_datetime().to_chrono_datetime();
+        assert_eq!(date.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-06-02 09:15:00", "{}", res.to_cpon());
     });
 }
 
@@ -695,7 +735,7 @@ fn pulled_db_can_be_pushed_back() {
         }
         let snapshot = decompress(&compressed);
         push_db_call(&mut client, event_id, "commit", sha1_of(&snapshot)).await.unwrap();
-        let (stage_count, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, |conn| read_config(conn, "event.stage_count"));
+        let (stage_count, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, |conn| read_config(conn, "event.stageCount"));
         assert_eq!(stage_count, "1");
     });
 }
@@ -709,7 +749,7 @@ fn pull_db_snapshot_of_opened_event() {
 
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
         let data = pull_db_read_all(&mut client, event_id).await;
-        let (stage_count, _) = with_event_db_image(&data, |conn| read_config(conn, "event.stage_count"));
+        let (stage_count, _) = with_event_db_image(&data, |conn| read_config(conn, "event.stageCount"));
         assert_eq!(stage_count, "1");
 
         // event stays opened
@@ -753,7 +793,7 @@ fn pull_closed_event_db_contains_data_written_while_opened() {
         client.call(request(&format!("eventctl/{event_id}"), "close", "", "fanda", AccessLevel::Read)).await.unwrap();
 
         let data = pull_event_db(&mut client, event_id).await;
-        let (stage_count, _) = with_event_db_image(&data, |conn| read_config(conn, "event.stage_count"));
+        let (stage_count, _) = with_event_db_image(&data, |conn| read_config(conn, "event.stageCount"));
         assert_eq!(stage_count, "1");
     });
 }

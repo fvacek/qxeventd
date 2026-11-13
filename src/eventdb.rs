@@ -42,7 +42,7 @@ pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_co
     if !db_file_exists {
         let config_entries = [
             ("event.name", event_data.name.clone()),
-            ("event.stage_count", event_data.stage_count.to_string()),
+            ("event.stageCount", event_data.stage_count.to_string()),
             ("event.date", event_data.date.format("%Y-%m-%d").to_string()),
             ("event.time", event_data.date.format("%H:%M:%S").to_string()),
         ];
@@ -64,16 +64,23 @@ pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_co
 /// record values from its config. Failure to read them is not an error, empty change is
 /// returned then. Blocking.
 ///
-/// A single read-write connection is used: closing a read-only connection to a WAL mode
-/// database would leave `-wal` and `-shm` files behind, a read-write one checkpoints and
-/// removes them.
+/// The database is switched to the rollback journal mode, so all changes are in the main file
+/// once the connection is closed, and no `-wal` or `-shm` file is left next to it, the file
+/// can be moved then. The event pool switches it back to WAL mode when it is opened.
+/// The connection is closed explicitly, so a failure to close it is reported.
 pub fn import_event_db_file(db_file: &str) -> anyhow::Result<EventRecordChange> {
     let mut conn = Connection::open(db_file)?;
+    let journal_mode: String = conn.query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))?;
+    if !journal_mode.eq_ignore_ascii_case("delete") {
+        anyhow::bail!("Cannot switch {db_file} to rollback journal mode, journal mode is {journal_mode}");
+    }
     migrate_event_db_connection(&mut conn)?;
-    Ok(read_event_record_change(&conn).unwrap_or_else(|err| {
+    let change = read_event_record_change(&conn).unwrap_or_else(|err| {
         warn!("Failed to read event record change from {db_file}: {err}");
         EventRecordChange::default()
-    }))
+    });
+    conn.close().map_err(|(_, err)| err)?;
+    Ok(change)
 }
 
 fn read_event_record_change(conn: &Connection) -> anyhow::Result<EventRecordChange> {
@@ -95,8 +102,8 @@ fn read_event_record_change(conn: &Connection) -> anyhow::Result<EventRecordChan
     Ok(change)
 }
 
-/// Local date time from `event.date` (`YYYY-MM-DD`) and optional `event.time` (`HH:MM[:SS]`)
-/// config values, midnight if time is missing or empty.
+/// Local date time from `event.date` (`YYYY-MM-DD`) and `event.time` (`HH:MM[:SS]`)
+/// config values, both are required.
 fn parse_local_date_time(date: &str, time: &str) -> Option<DateTime<FixedOffset>> {
     let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
     let time = NaiveTime::parse_from_str(time, "%H:%M:%S")

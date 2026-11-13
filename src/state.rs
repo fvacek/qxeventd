@@ -203,36 +203,33 @@ impl State {
     /// `expected_sha1` is the SHA-1 of the uncompressed database.
     pub async fn commit_pushed_event_db(app_state: SharedAppState, event_id: EventId, expected_sha1: Vec<u8>, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
         let pushed_file = pushed_event_db_file(event_id);
-        let tmp_file = format!("{pushed_file}.inflate-tmp-{:016x}", rand::random::<u64>());
+        // Removes the decompressed file on any failure, including a panic or cancellation
+        // of this future. Once it is installed, there is nothing left to remove.
+        let tmp_file = TmpDbFileGuard(format!("{pushed_file}.inflate-tmp-{:016x}", rand::random::<u64>()));
 
         // Decode and verify before closing the event so an invalid upload does not interrupt
         // a currently running event.
-        let imported_event_info = {
+        // The blocking task owns the guard, so the file is not removed while the task, which
+        // keeps running when this future is dropped, is still writing it.
+        let (tmp_file, imported_event_info) = {
             let pushed_file = pushed_file.clone();
-            let tmp_file = tmp_file.clone();
             smol::unblock(move || {
-                inflate_file(&pushed_file, &tmp_file)
-                    .map_err(|err| anyhow!("Failed to decompress event {event_id} database: {err}"))?;
-                if crate::filenode::sha1(std::path::Path::new(&tmp_file), 0, None)? != expected_sha1 {
-                    bail!("Event {event_id} database does not match the expected SHA-1");
-                }
-                import_event_db_file(&tmp_file)
-                    .map_err(|err| anyhow!("Invalid event {event_id} database: {err}"))
+                let result = (|| {
+                    inflate_file(&pushed_file, tmp_file.path())
+                        .map_err(|err| anyhow!("Failed to decompress event {event_id} database: {err}"))?;
+                    if crate::filenode::sha1(std::path::Path::new(tmp_file.path()), 0, None)? != expected_sha1 {
+                        bail!("Event {event_id} database does not match the expected SHA-1");
+                    }
+                    import_event_db_file(tmp_file.path())
+                        .map_err(|err| anyhow!("Invalid event {event_id} database: {err}"))
+                })();
+                (tmp_file, result)
             }).await
         };
-        let install_result = match imported_event_info {
-            Ok(record_change) => Self::install_event_db(app_state.clone(), event_id, &tmp_file, client_command_sender.clone()).await
-                .map(|()| record_change),
-            Err(err) => Err(err),
-        };
         // The upload is kept on failure, so it can be inspected or fixed and committed again.
-        let record_change = match install_result {
-            Ok(record_change) => record_change,
-            Err(err) => {
-                let _ = std::fs::remove_file(&tmp_file);
-                return Err(err);
-            }
-        };
+        let record_change = imported_event_info?;
+        Self::install_event_db(app_state.clone(), event_id, tmp_file.path(), client_command_sender.clone()).await?;
+        drop(tmp_file);
         if let Err(err) = std::fs::remove_file(&pushed_file) {
             warn!("Failed to remove pushed event DB file {pushed_file}: {err}");
         }
@@ -778,6 +775,27 @@ impl OpenEventCtl {
         }
         *closed = true;
         close_event_db(&self.db).await
+    }
+}
+
+/// Temporary SQLite database file, it is removed together with its journal files when
+/// the guard is dropped, so they are not left behind on error, panic or future cancellation.
+struct TmpDbFileGuard(String);
+
+impl TmpDbFileGuard {
+    fn path(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for TmpDbFileGuard {
+    fn drop(&mut self) {
+        let path = &self.0;
+        for file in [path.clone(), format!("{path}-journal"), format!("{path}-wal"), format!("{path}-shm")] {
+            if let Err(err) = std::fs::remove_file(&file) && err.kind() != std::io::ErrorKind::NotFound {
+                warn!("Failed to remove temporary file {file}: {err}");
+            }
+        }
     }
 }
 
