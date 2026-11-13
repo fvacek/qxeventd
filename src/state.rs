@@ -115,6 +115,16 @@ impl State {
     pub async fn set_event_db_mode(app_state: &SharedAppState, event_id: EventId, db_mode: EventDbMode, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
         let db_pool = app_state.read().await.db_pool.clone();
         let orig_event_record = load_event_record(&db_pool, event_id).await?;
+
+        // Update the broker mount point first, so a broker failure leaves the DB untouched.
+        // Replica mode needs the mount point, other modes must not have it.
+        let mount_event_id = |mode: EventDbMode| (mode == EventDbMode::Replica).then_some(event_id);
+        Self::register_qe_mount_point_in_broker(mount_event_id(db_mode), &orig_event_record.api_token, rpc_client.clone()).await?;
+        if orig_event_record.db_mode == db_mode {
+            // mount point re-synced, nothing to change in DB
+            return Ok(false);
+        }
+
         let mut record = Record::new();
         record.insert("db_mode".to_string(), db_mode.as_record_value().into());
         let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
@@ -122,17 +132,13 @@ impl State {
         Self::forget_event_record(app_state, event_id).await;
         if matches!(result, Ok(true)) {
             emit_event_db_mode_chng(&rpc_client, event_id, db_mode);
-            if db_mode == EventDbMode::Replica {
-                // create mount point
-                Self::register_qe_mount_point_in_broker(Some(event_id), &orig_event_record.api_token, rpc_client.clone()).await?;
-            } else {
-                // delete mount point
-                Self::register_qe_mount_point_in_broker(None, &orig_event_record.api_token, rpc_client.clone()).await?;
-            }
-            Ok(true)
-        } else {
-            Ok(false)
+            return Ok(true);
         }
+        // DB not updated, restore the mount point of the original mode.
+        if let Err(e) = Self::register_qe_mount_point_in_broker(mount_event_id(orig_event_record.db_mode), &orig_event_record.api_token, rpc_client).await {
+            error!("Event {event_id}: failed to restore broker mount point after db_mode update failure: {e}");
+        }
+        result
     }
 
     async fn register_qe_mount_point_in_broker(event_id: Option<EventId>, api_token: &str, client_cmd_tx: ClientCommandSender) -> anyhow::Result<()> {
