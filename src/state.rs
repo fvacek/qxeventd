@@ -73,29 +73,62 @@ impl State {
             return Err(anyhow::anyhow!("Owner cannot be empty"));
         }
         let api_token = generate_api_token();
-        let event_data = EventRecord {
-            db_mode: EventDbMode::Replica,
+        let event_record = EventRecord {
+            id: None,
+            db_mode: EventDbMode::Archived,
             name: String::new(),
             date: chrono::Local::now().fixed_offset(),
             owner: owner.clone(),
             api_token: api_token.clone(),
-            id: None,
             stage_count: default_stage_count(),
             config: QxEventConfig::default(),
         };
-        let rec = event_data.to_record();
         let db_pool = app_state.read().await.db_pool.clone();
         let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
-        let event_id = qxsql.create_record_with_recchng("events", &rec, Some(owner)).await?;
+        let event_id = qxsql.create_record_with_recchng("events", &event_record.to_record(), Some(owner)).await?;
         info!("Created event {event_id}");
-        if matches!(event_data.db_mode, EventDbMode::Replica) {
-            Self::register_event_mount_point(event_id, &api_token, rpc_client).await?;
-        }
         Ok((event_id, api_token))
     }
 
-    async fn register_event_mount_point(event_id: EventId, api_token: &str, client_cmd_tx: ClientCommandSender) -> anyhow::Result<()> {
-        let remote_mount_point = format!("{}/{}", global_config().remote_events_mount_point, event_id);
+    /// The app state lock is not held during the broker call.
+    pub async fn update_event_record(app_state: &SharedAppState, event_id: EventId, mut record: EventRecordChange, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
+        let db_pool = app_state.read().await.db_pool.clone();
+        let orig_event_record = load_event_record(&db_pool, event_id).await?;
+        let new_db_mode = record.db_mode.take();
+        // api_token is read-only, so it is not updated
+        record.api_token.take();
+        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
+        let mut updated = qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await?;
+        Self::forget_event_record(app_state, event_id).await;
+        if let Some(new_db_mode) = new_db_mode && new_db_mode != orig_event_record.db_mode {
+            updated |= Self::set_event_db_mode(app_state, event_id, new_db_mode, rpc_client).await?;
+        }
+        Ok(updated)
+    }
+
+    pub async fn set_event_db_mode(app_state: &SharedAppState, event_id: EventId, db_mode: EventDbMode, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
+        let db_pool = app_state.read().await.db_pool.clone();
+        let orig_event_record = load_event_record(&db_pool, event_id).await?;
+        let mut record = Record::new();
+        record.insert("db_mode".to_string(), db_mode.as_record_value().into());
+        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
+        let result = qxsql.update_record_with_recchng("events", event_id, &record, None).await;
+        Self::forget_event_record(app_state, event_id).await;
+        if matches!(result, Ok(true)) && db_mode != orig_event_record.db_mode {
+            emit_event_db_mode_chng(&rpc_client, event_id, db_mode);
+            if orig_event_record.db_mode == EventDbMode::Replica {
+                // delete mount point
+                Self::register_qe_mount_point_in_broker(None, &orig_event_record.api_token, rpc_client.clone()).await?;
+            } else if db_mode == EventDbMode::Replica {
+                // create mount point
+                Self::register_qe_mount_point_in_broker(Some(event_id), &orig_event_record.api_token, rpc_client.clone()).await?;
+            }
+        }
+        result
+    }
+
+    async fn register_qe_mount_point_in_broker(event_id: Option<EventId>, api_token: &str, client_cmd_tx: ClientCommandSender) -> anyhow::Result<()> {
+        let remote_mount_point = event_id.map(|id| format!("{}/{}", global_config().remote_events_mount_point, id));
         let param: Vec<RpcValue> = vec![
             api_token.into(),
             make_map!( "mountPoint".to_string() => RpcValue::from(remote_mount_point),).into(),
@@ -103,43 +136,6 @@ impl State {
         let _res: RpcValue = client_cmd_tx.call_rpc_method(".broker/access/mounts", "setValue", Some(param.into()), None, None, None::<fn(f64)>)
             .await.map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
-    }
-
-    /// The app state lock is not held during the broker call.
-    pub async fn update_event_record(app_state: &SharedAppState, event_id: EventId, record: EventRecordChange, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
-        let db_pool = app_state.read().await.db_pool.clone();
-        // always update the mount point, for case than shvbroker config is reloaded from file
-        let event_record = load_event_record(&db_pool, event_id).await?;
-        let new_db_mode = record.db_mode;
-        if matches!(new_db_mode.unwrap_or(event_record.db_mode), EventDbMode::Replica) {
-            let api_token = record.api_token.as_deref().unwrap_or(&event_record.api_token);
-            Self::register_event_mount_point(event_id, api_token, rpc_client.clone()).await?;
-        }
-        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
-        let ret = qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await;
-        Self::forget_event_record(app_state, event_id).await;
-        if let (Ok(true), Some(new_db_mode)) = (&ret, new_db_mode) && new_db_mode != event_record.db_mode {
-            emit_event_db_mode_chng(&rpc_client, event_id, new_db_mode);
-        }
-        ret
-    }
-
-    /// The app state lock is not held during the broker call.
-    pub async fn set_event_db_mode(app_state: &SharedAppState, event_id: EventId, db_mode: EventDbMode, rpc_client: ClientCommandSender) -> anyhow::Result<bool> {
-        let db_pool = app_state.read().await.db_pool.clone();
-        let event_record = load_event_record(&db_pool, event_id).await?;
-        if matches!(db_mode, EventDbMode::Replica) {
-            Self::register_event_mount_point(event_id, &event_record.api_token, rpc_client.clone()).await?;
-        }
-        let mut record = Record::new();
-        record.insert("db_mode".to_string(), db_mode.as_record_value().into());
-        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
-        let result = qxsql.update_record_with_recchng("events", event_id, &record, None).await;
-        Self::forget_event_record(app_state, event_id).await;
-        if matches!(result, Ok(true)) && db_mode != event_record.db_mode {
-            emit_event_db_mode_chng(&rpc_client, event_id, db_mode);
-        }
-        result
     }
 
     pub async fn opened_event_status(&self, event_id: EventId) -> anyhow::Result<EventStatus> {
