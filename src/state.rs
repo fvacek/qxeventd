@@ -204,9 +204,15 @@ impl State {
     /// `expected_sha1` is the SHA-1 of the uncompressed database.
     pub async fn commit_pushed_event_db(app_state: SharedAppState, event_id: EventId, expected_sha1: Vec<u8>, client_command_sender: ClientCommandSender) -> anyhow::Result<()> {
         let pushed_file = pushed_event_db_file(event_id);
-        // Removes the decompressed file on any failure, including a panic or cancellation
-        // of this future. Once it is installed, there is nothing left to remove.
-        let tmp_file = tmp_db_file_guard(format!("{pushed_file}.inflate-tmp-{:016x}", rand::random::<u64>()));
+        // Removes the decompressed file and its SQLite journal files on any failure, including
+        // a panic or cancellation of this future. Once it is installed, there is nothing left to remove.
+        let tmp_file = DropGuard::new(format!("{pushed_file}.inflate-tmp-{:016x}", rand::random::<u64>()), |path| {
+            for file in [format!("{path}-journal"), format!("{path}-wal"), format!("{path}-shm"), path] {
+                if let Err(err) = std::fs::remove_file(&file) && err.kind() != std::io::ErrorKind::NotFound {
+                    warn!("Failed to remove temporary file {file}: {err}");
+                }
+            }
+        });
 
         // Decode and verify before closing the event so an invalid upload does not interrupt
         // a currently running event.
@@ -777,19 +783,6 @@ impl OpenEventCtl {
         *closed = true;
         close_event_db(&self.db).await
     }
-}
-
-/// Temporary SQLite database file, it is removed together with its journal files when
-/// the guard is dropped, so they are not left behind on error, panic or future cancellation.
-/// Removes the temporary SQLite database `path` together with its journal files when dropped.
-fn tmp_db_file_guard(path: String) -> DropGuard<String, impl FnOnce(String)> {
-    DropGuard::new(path, |path| {
-        for file in [format!("{path}-journal"), format!("{path}-wal"), format!("{path}-shm"), path] {
-            if let Err(err) = std::fs::remove_file(&file) && err.kind() != std::io::ErrorKind::NotFound {
-                warn!("Failed to remove temporary file {file}: {err}");
-            }
-        }
-    })
 }
 
 fn inflate_file(zlib_file: &str, out_file: &str) -> std::io::Result<()> {
