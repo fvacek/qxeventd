@@ -236,7 +236,8 @@ impl State {
         // The upload is kept on failure, so it can be inspected or fixed and committed again.
         let record_change = imported_event_info?;
         Self::install_event_db(app_state.clone(), event_id, &tmp_file, client_command_sender.clone()).await?;
-        drop(tmp_file);
+        // The file has been moved into place, there is nothing left to clean up.
+        DropGuard::dismiss(tmp_file);
         if let Err(err) = std::fs::remove_file(&pushed_file) {
             warn!("Failed to remove pushed event DB file {pushed_file}: {err}");
         }
