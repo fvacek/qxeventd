@@ -97,9 +97,15 @@ impl State {
         let new_db_mode = record.db_mode.take();
         // api_token is read-only, so it is not updated
         record.api_token.take();
-        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
-        let mut updated = qxsql.update_record_with_recchng("events", event_id, &record.to_record(), None).await?;
-        Self::forget_event_record(app_state, event_id).await;
+        let rec = record.to_record();
+        let mut updated = if rec.is_empty() {
+            false
+        } else {
+            let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
+            let updated = qxsql.update_record_with_recchng("events", event_id, &rec, None).await?;
+            Self::forget_event_record(app_state, event_id).await;
+            updated
+        };
         if let Some(new_db_mode) = new_db_mode && new_db_mode != orig_event_record.db_mode {
             updated |= Self::set_event_db_mode(app_state, event_id, new_db_mode, rpc_client).await?;
         }
@@ -114,17 +120,19 @@ impl State {
         let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
         let result = qxsql.update_record_with_recchng("events", event_id, &record, None).await;
         Self::forget_event_record(app_state, event_id).await;
-        if matches!(result, Ok(true)) && db_mode != orig_event_record.db_mode {
+        if matches!(result, Ok(true)) {
             emit_event_db_mode_chng(&rpc_client, event_id, db_mode);
-            if orig_event_record.db_mode == EventDbMode::Replica {
-                // delete mount point
-                Self::register_qe_mount_point_in_broker(None, &orig_event_record.api_token, rpc_client.clone()).await?;
-            } else if db_mode == EventDbMode::Replica {
+            if db_mode == EventDbMode::Replica {
                 // create mount point
                 Self::register_qe_mount_point_in_broker(Some(event_id), &orig_event_record.api_token, rpc_client.clone()).await?;
+            } else {
+                // delete mount point
+                Self::register_qe_mount_point_in_broker(None, &orig_event_record.api_token, rpc_client.clone()).await?;
             }
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        result
     }
 
     async fn register_qe_mount_point_in_broker(event_id: Option<EventId>, api_token: &str, client_cmd_tx: ClientCommandSender) -> anyhow::Result<()> {
@@ -321,9 +329,14 @@ impl State {
         log::info!("Deleting event {}", event_id);
         Self::close_event(app_state, event_id, rpc_client.clone()).await?;
         let db_pool = app_state.read().await.db_pool.clone();
-        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client);
+        let event_record = load_event_record(&db_pool, event_id).await?;
+        let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
         let was_deleted = qxsql.delete_record_with_recchng("events", event_id, None).await?;
         Self::forget_event_record(app_state, event_id).await;
+        if was_deleted && event_record.db_mode == EventDbMode::Replica
+            && let Err(e) = Self::register_qe_mount_point_in_broker(None, &event_record.api_token, rpc_client).await {
+            error!("Failed to remove mount point of deleted event {event_id}: {e}");
+        }
         Ok(was_deleted)
     }
 
