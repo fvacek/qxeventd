@@ -1060,29 +1060,43 @@ fn event_config_node_get_set() {
         assert!(res.to_cpon().contains(r#""config""#), "{}", res.to_cpon());
 
         let config = format!("eventctl/{event_id}/config");
-        let res = client.call(request(&config, "ls", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
-        assert!(res.contains(r#""event""#) && res.contains(r#""db""#), "{res}");
-        let res = client.call(request(&format!("{config}/event"), "ls", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
-        assert!(res.contains(r#""name""#) && res.contains(r#""stageCount""#), "{res}");
-        assert!(client.call(request(&format!("{config}/foo"), "ls", "", "fanda", AccessLevel::Browse)).await.is_err());
+        let ls = async |client: &mut TestClient, path: &str| client.call(request(path, "ls", "", "fanda", AccessLevel::Browse)).await.map(|v| v.to_cpon());
+        assert_eq!(ls(&mut client, &config).await.unwrap(),
+            r#"["name","place","country","stageCount","currentStage","dateTime","director","mainReferee","stages"]"#);
+        assert_eq!(ls(&mut client, &format!("{config}/stages")).await.unwrap(), r#"["1"]"#);
+        assert_eq!(ls(&mut client, &format!("{config}/stages/1")).await.unwrap(), r#"["startDateTime"]"#);
+        assert!(ls(&mut client, &format!("{config}/stages/2")).await.is_err());
+        assert!(ls(&mut client, &format!("{config}/foo")).await.is_err());
 
-        let name = format!("{config}/event/name");
+        let get = async |client: &mut TestClient, path: &str| client.call(request(&format!("{config}/{path}"), "get", "", "eve", AccessLevel::Read)).await.unwrap();
+        let set = async |client: &mut TestClient, path: &str, value: &str| client.call(request(&format!("{config}/{path}"), "set", value, "fanda", AccessLevel::Read)).await;
+
+        let name = format!("{config}/name");
         let res = client.call(request(&name, "dir", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
         assert!(res.contains(r#""get""#) && res.contains(r#""set""#), "{res}");
-        let res = client.call(request(&format!("{config}/event/stageCount"), "get", "", "eve", AccessLevel::Read)).await.unwrap();
-        assert_eq!(res, RpcValue::from("1"));
+        assert_eq!(get(&mut client, "stageCount").await, RpcValue::from(1));
 
         // stranger with Read access cannot set, owner can
         assert_permission_denied(client.call(request(&name, "set", r#""hacked""#, "eve", AccessLevel::Read)).await);
         client.signals.clear();
-        let res = client.call(request(&name, "set", r#""Renamed""#, "fanda", AccessLevel::Read)).await.unwrap();
-        assert_eq!(res, RpcValue::from(true));
-        let res = client.call(request(&name, "get", "", "eve", AccessLevel::Read)).await.unwrap();
-        assert_eq!(res, RpcValue::from("Renamed"));
-
+        set(&mut client, "name", r#""Renamed""#).await.unwrap();
+        assert_eq!(get(&mut client, "name").await, RpcValue::from("Renamed"));
         let chng = client.signals.iter().find(|s| s.method() == Some("chng")).expect("chng signal");
         assert_eq!(chng.shv_path(), Some(name.as_str()));
         assert_eq!(chng.param(), Some(&RpcValue::from("Renamed")));
-        assert!(!client.signals.iter().any(|s| s.method() == Some("recchng")), "no recchng expected");
+
+        // wrong value type is rejected
+        assert!(set(&mut client, "name", "1").await.is_err());
+        assert!(set(&mut client, "stageCount", "0").await.is_err());
+
+        // a new stage appears with the stage count
+        set(&mut client, "stageCount", "2").await.unwrap();
+        assert_eq!(ls(&mut client, &format!("{config}/stages")).await.unwrap(), r#"["1","2"]"#);
+        set(&mut client, "stages/2/startDateTime", r#"d"2026-11-21T10:30:00+01""#).await.unwrap();
+        assert_eq!(get(&mut client, "stages/2/startDateTime").await.to_cpon(), r#"d"2026-11-21T10:30:00+01""#);
+
+        set(&mut client, "dateTime", r#"d"2026-11-21T09:00:00Z""#).await.unwrap();
+        let dt = get(&mut client, "dateTime").await.as_datetime().to_chrono_datetime();
+        assert_eq!(dt.timestamp(), chrono::DateTime::parse_from_rfc3339("2026-11-21T09:00:00Z").unwrap().timestamp());
     });
 }

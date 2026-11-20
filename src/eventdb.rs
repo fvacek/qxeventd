@@ -104,7 +104,7 @@ fn read_event_record_change(conn: &Connection) -> anyhow::Result<EventRecordChan
 
 /// Local date time from `event.date` (`YYYY-MM-DD`) and `event.time` (`HH:MM[:SS]`)
 /// config values, both are required.
-fn parse_local_date_time(date: &str, time: &str) -> Option<DateTime<FixedOffset>> {
+pub(crate) fn parse_local_date_time(date: &str, time: &str) -> Option<DateTime<FixedOffset>> {
     let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
     let time = NaiveTime::parse_from_str(time, "%H:%M:%S")
             .or_else(|_| NaiveTime::parse_from_str(time, "%H:%M"))

@@ -1,134 +1,227 @@
-use std::collections::BTreeSet;
-
-use qxsql::{QxSqlApi, sql::{DbValue, record_from_slice}};
+use chrono::{DateTime, FixedOffset};
 use shvclient::{ClientCommandSender, clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request}};
-use shvproto::RpcValue;
+use shvproto::{RpcValue, Value};
 use shvrpc::{RpcMessage, metamethod::{AccessLevel, Flags, MetaMethod}};
 
+use super::{EventConfig, KEY_COUNTRY, KEY_CURRENT_STAGE, KEY_DATE, KEY_DIRECTOR, KEY_MAIN_REFEREE, KEY_NAME, KEY_PLACE, KEY_STAGE_COUNT, KEY_TIME, save_config_values, stage_start_date_time_key};
 use crate::eventctlnode::escalate_event_owner_rights;
 use crate::eventsqlapi::LocalEventSqlApi;
-use crate::{anyhow_to_rpc_error, str_to_rpc_error};
+use crate::{anyhow_to_rpc_error, split_first_fragment, str_to_rpc_error};
 use crate::state::{EventId, SharedAppState};
 
 const METH_GET: &str = "get";
 const METH_SET: &str = "set";
 const SIG_CHNG: &str = "chng";
 
-const DIR_NODE_METHODS: &[MetaMethod] = &[META_METHOD_DIR, META_METHOD_LS];
-const VALUE_NODE_METHODS: &[MetaMethod] = &[
-    META_METHOD_DIR,
-    META_METHOD_LS,
-    MetaMethod::new_static(
-        METH_GET, Flags::IsGetter, AccessLevel::Read, "", "s|n", &[(SIG_CHNG, Some("s|n"))], "",
-    ),
-    MetaMethod::new_static(
-        // user with Write access or event organizer can change the event config
-        METH_SET, Flags::IsSetter.union(Flags::UserIDRequired), AccessLevel::Write, "s|i|d|b|n", "b", &[], "",
-    ),
-];
+const EVENT_FIELDS: &[&str] = &["name", "place", "country", "stageCount", "currentStage", "dateTime", "director", "mainReferee", "stages"];
+const STAGE_FIELDS: &[&str] = &["startDateTime"];
 
-/// Event database `config` table exposed as a node tree, config key `event.name`
-/// is accessible on path `event/name` relative to the event `config` node.
+const DIR_NODE_METHODS: &[MetaMethod] = &[META_METHOD_DIR, META_METHOD_LS];
+
+macro_rules! value_node_methods {
+    ($type:literal) => {
+        &[
+            META_METHOD_DIR,
+            META_METHOD_LS,
+            MetaMethod::new_static(
+                METH_GET, Flags::IsGetter, AccessLevel::Read, "", $type, &[(SIG_CHNG, Some($type))], "",
+            ),
+            MetaMethod::new_static(
+                // user with Write access or event organizer can change the event config
+                METH_SET, Flags::IsSetter.union(Flags::UserIDRequired), AccessLevel::Write, $type, "", &[], "",
+            ),
+        ]
+    };
+}
+const STRING_NODE_METHODS: &[MetaMethod] = value_node_methods!("s");
+const INT_NODE_METHODS: &[MetaMethod] = value_node_methods!("i");
+const DATETIME_NODE_METHODS: &[MetaMethod] = value_node_methods!("t");
+
+#[derive(Debug, Clone, Copy)]
+enum ValueType {
+    String,
+    Int,
+    DateTime,
+}
+
+/// Node of the [`EventConfig`] tree.
+#[derive(Debug, Clone, Copy)]
+enum ConfigNode {
+    Root,
+    Name,
+    Place,
+    Country,
+    StageCount,
+    CurrentStage,
+    DateTime,
+    Director,
+    MainReferee,
+    Stages,
+    Stage,
+    StageStartDateTime(usize),
+}
+
+impl ConfigNode {
+    /// `None` if the path does not exist, stages are numbered from 1 to `stage_count`.
+    fn from_path(path: &str, config: &EventConfig) -> Option<Self> {
+        let (field, rest) = split_first_fragment(path, '/');
+        let node = match field {
+            "" => Self::Root,
+            "name" => Self::Name,
+            "place" => Self::Place,
+            "country" => Self::Country,
+            "stageCount" => Self::StageCount,
+            "currentStage" => Self::CurrentStage,
+            "dateTime" => Self::DateTime,
+            "director" => Self::Director,
+            "mainReferee" => Self::MainReferee,
+            "stages" => {
+                let (stage, rest) = split_first_fragment(rest, '/');
+                if stage.is_empty() {
+                    Self::Stages
+                } else {
+                    let stage = stage.parse::<usize>().ok().filter(|&stage| config.stage(stage).is_some())?;
+                    return match rest {
+                        "" => Some(Self::Stage),
+                        "startDateTime" => Some(Self::StageStartDateTime(stage)),
+                        _ => None,
+                    };
+                }
+            }
+            _ => return None,
+        };
+        rest.is_empty().then_some(node)
+    }
+
+    fn value_type(self) -> Option<ValueType> {
+        match self {
+            Self::Root | Self::Stages | Self::Stage => None,
+            Self::Name | Self::Place | Self::Country | Self::Director | Self::MainReferee => Some(ValueType::String),
+            Self::StageCount | Self::CurrentStage => Some(ValueType::Int),
+            Self::DateTime | Self::StageStartDateTime(_) => Some(ValueType::DateTime),
+        }
+    }
+
+    fn methods(self) -> &'static [MetaMethod] {
+        match self.value_type() {
+            None => DIR_NODE_METHODS,
+            Some(ValueType::String) => STRING_NODE_METHODS,
+            Some(ValueType::Int) => INT_NODE_METHODS,
+            Some(ValueType::DateTime) => DATETIME_NODE_METHODS,
+        }
+    }
+
+    fn children(self, config: &EventConfig) -> Vec<String> {
+        match self {
+            Self::Root => EVENT_FIELDS.iter().map(|f| f.to_string()).collect(),
+            Self::Stages => (1..=config.stages.len()).map(|stage| stage.to_string()).collect(),
+            Self::Stage => STAGE_FIELDS.iter().map(|f| f.to_string()).collect(),
+            _ => vec![],
+        }
+    }
+
+    fn get(self, config: &EventConfig) -> RpcValue {
+        let datetime = |dt: &DateTime<FixedOffset>| RpcValue::from(shvproto::DateTime::from_datetime(dt));
+        match self {
+            Self::Root | Self::Stages | Self::Stage => RpcValue::null(),
+            Self::Name => config.name.as_str().into(),
+            Self::Place => config.place.as_str().into(),
+            Self::Country => config.country.as_str().into(),
+            Self::StageCount => (config.stage_count as i64).into(),
+            Self::CurrentStage => (config.current_stage as i64).into(),
+            Self::DateTime => datetime(&config.date_time),
+            Self::Director => config.director.as_str().into(),
+            Self::MainReferee => config.main_referee.as_str().into(),
+            Self::StageStartDateTime(stage) => config.stage(stage).map_or_else(RpcValue::null, |s| datetime(&s.start_date_time)),
+        }
+    }
+
+    /// Config table values to be written for `value`, it must be of the node value type.
+    fn config_values(self, value: &RpcValue) -> Result<Vec<(String, String)>, String> {
+        let string = || match &value.value {
+            Value::String(s) => Ok(s.to_string()),
+            _ => Err(format!("String expected, got: {}", value.type_name())),
+        };
+        let int = || match &value.value {
+            Value::Int(i) if *i >= 0 => Ok(i.to_string()),
+            Value::UInt(i) => Ok(i.to_string()),
+            _ => Err(format!("Non-negative Int expected, got: {}", value.to_cpon())),
+        };
+        let datetime = || match &value.value {
+            Value::DateTime(dt) => Ok(dt.to_chrono_datetime()),
+            _ => Err(format!("DateTime expected, got: {}", value.type_name())),
+        };
+        let one = |key: &str, value: String| vec![(key.to_string(), value)];
+        Ok(match self {
+            Self::Root | Self::Stages | Self::Stage => return Err("Node has no value".to_string()),
+            Self::Name => one(KEY_NAME, string()?),
+            Self::Place => one(KEY_PLACE, string()?),
+            Self::Country => one(KEY_COUNTRY, string()?),
+            Self::StageCount => {
+                let count = int()?;
+                if count == "0" {
+                    return Err("Stage count must be at least 1".to_string());
+                }
+                one(KEY_STAGE_COUNT, count)
+            }
+            Self::CurrentStage => one(KEY_CURRENT_STAGE, int()?),
+            Self::DateTime => {
+                // stored as local date and time, see [`crate::eventdb::parse_local_date_time`]
+                let local = datetime()?.with_timezone(&chrono::Local);
+                vec![
+                    (KEY_DATE.to_string(), local.format("%Y-%m-%d").to_string()),
+                    (KEY_TIME.to_string(), local.format("%H:%M:%S").to_string()),
+                ]
+            }
+            Self::Director => one(KEY_DIRECTOR, string()?),
+            Self::MainReferee => one(KEY_MAIN_REFEREE, string()?),
+            Self::StageStartDateTime(stage) => one(&stage_start_date_time_key(stage), datetime()?.to_rfc3339()),
+        })
+    }
+}
+
+/// [`EventConfig`] exposed as a node tree, `stages/<n>` is the stage `n` config.
 pub(crate) async fn resolve_event_config_request(rq: RpcMessage, event_id: EventId, path: String, app_state: SharedAppState, client_cmd_tx: ClientCommandSender) -> RequestHandlerResult {
     let sql_api = LocalEventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
-    let keys = match config_keys(&sql_api).await {
-        Ok(keys) => keys,
+    let config = match EventConfig::load(&sql_api).await {
+        Ok(config) => config,
         Err(err) => {
-            log::warn!("Cannot read event {event_id} config keys: {err}");
+            log::warn!("Cannot load event {event_id} config: {err}");
             return err_unresolved_request();
         }
     };
-    let prefix = if path.is_empty() { String::new() } else { format!("{}.", path.replace('/', ".")) };
-    let ckey = path.replace('/', ".");
-    let is_value_node = !path.is_empty() && keys.contains(&ckey);
-    let children = keys.iter()
-        .filter_map(|key| key.strip_prefix(&prefix))
-        .map(|rest| rest.split('.').next().unwrap_or(rest).to_string())
-        .filter(|child| !child.is_empty())
-        .collect::<BTreeSet<_>>();
-    if !is_value_node && children.is_empty() && !path.is_empty() {
+    let Some(node) = ConfigNode::from_path(&path, &config) else {
         return err_unresolved_request();
-    }
-    let methods = if is_value_node { VALUE_NODE_METHODS } else { DIR_NODE_METHODS };
+    };
+    let methods = node.methods();
 
     match Method::from_request(&rq) {
         Method::Dir(dir) => dir.resolve(methods),
-        Method::Ls(ls) => ls.resolve(methods, async move || Ok(children.into_iter().collect())),
+        Method::Ls(ls) => ls.resolve(methods, async move || Ok(node.children(&config))),
         Method::Other(m) => {
-            if !is_value_node {
+            if node.value_type().is_none() {
                 return err_unresolved_request();
             }
             let method = m.method();
             match method {
-                METH_GET => m.resolve(methods, async move || {
-                    read_config_value(&sql_api, &ckey).await
-                        .map(|value| value.map_or_else(RpcValue::null, RpcValue::from))
-                        .map_err(anyhow_to_rpc_error)
-                }),
+                METH_GET => m.resolve(methods, async move || Ok(node.get(&config))),
                 METH_SET => {
                     let rights = escalate_event_owner_rights(&rq, app_state, Some(event_id), method.to_owned(), methods).await;
                     m.resolve(rights, async move || {
-                        let value = rpcvalue_to_config_value(rq.param().unwrap_or_default())
+                        let values = node.config_values(rq.param().unwrap_or_default())
                             .map_err(|err| str_to_rpc_error(&err))?;
+                        let values = values.iter().map(|(k, v)| (k.as_str(), v.clone())).collect::<Vec<_>>();
+                        save_config_values(&sql_api, &values).await.map_err(anyhow_to_rpc_error)?;
+                        // signal the value as stored, date time loses its sub-second part for example
+                        let config = EventConfig::load(&sql_api).await.map_err(anyhow_to_rpc_error)?;
                         let shv_path = format!("eventctl/{event_id}/config/{path}");
-                        write_config_value(&sql_api, &ckey, value, &shv_path, &client_cmd_tx).await
-                            .map(RpcValue::from)
-                            .map_err(anyhow_to_rpc_error)
+                        client_cmd_tx.send_message(RpcMessage::new_signal(&shv_path, SIG_CHNG).with_param(node.get(&config)))
+                            .map_err(|err| anyhow_to_rpc_error(err.into()))?;
+                        Ok(RpcValue::null())
                     })
                 }
                 _ => err_unresolved_request(),
             }
         }
     }
-}
-
-async fn config_keys(sql_api: &LocalEventSqlApi) -> anyhow::Result<BTreeSet<String>> {
-    let result = sql_api.query("SELECT ckey FROM config WHERE ckey IS NOT NULL", None).await?;
-    Ok(result.rows.iter()
-        .filter_map(|row| row.first().and_then(DbValue::as_str).map(str::to_string))
-        .filter(|key| !key.is_empty())
-        .collect())
-}
-
-async fn read_config_value(sql_api: &LocalEventSqlApi, ckey: &str) -> anyhow::Result<Option<String>> {
-    let result = sql_api.query(
-        "SELECT CAST(cvalue AS TEXT) AS cvalue FROM config WHERE ckey = :ckey",
-        Some(&record_from_slice(&[("ckey", ckey.into())])),
-    ).await?;
-    Ok(result.value(0, 0).and_then(DbValue::as_str).map(str::to_string))
-}
-
-/// Config values are stored as text, `null` clears the value.
-fn rpcvalue_to_config_value(value: &RpcValue) -> Result<Option<String>, String> {
-    use shvproto::Value;
-    match &value.value {
-        Value::Null => Ok(None),
-        Value::String(s) => Ok(Some(s.to_string())),
-        Value::Int(i) => Ok(Some(i.to_string())),
-        Value::UInt(i) => Ok(Some(i.to_string())),
-        Value::Double(d) => Ok(Some(d.to_string())),
-        Value::Bool(b) => Ok(Some(b.to_string())),
-        _ => Err(format!("Unsupported config value type: {}", value.type_name())),
-    }
-}
-
-/// Writes the value and notifies about the change by the `chng` signal on the config node.
-async fn write_config_value(
-    sql_api: &LocalEventSqlApi,
-    ckey: &str,
-    value: Option<String>,
-    shv_path: &str,
-    client_cmd_tx: &ClientCommandSender,
-) -> anyhow::Result<bool> {
-    let cvalue = value.clone().map_or(DbValue::Null, DbValue::from);
-    let result = sql_api.exec(
-        "UPDATE config SET cvalue = :cvalue WHERE ckey = :ckey",
-        Some(&record_from_slice(&[("ckey", ckey.into()), ("cvalue", cvalue)])),
-    ).await?;
-    if result.rows_affected == 0 {
-        return Ok(false);
-    }
-    let chng = value.map_or_else(RpcValue::null, RpcValue::from);
-    client_cmd_tx.send_message(RpcMessage::new_signal(shv_path, SIG_CHNG).with_param(chng))?;
-    Ok(true)
 }
