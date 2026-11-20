@@ -1060,6 +1060,19 @@ fn event_config_node_get_set() {
         assert!(res.to_cpon().contains(r#""config""#), "{}", res.to_cpon());
 
         let config = format!("eventctl/{event_id}/config");
+        let dir = client
+            .call(request(&config, "dir", "", "fanda", AccessLevel::Browse))
+            .await
+            .unwrap()
+            .to_cpon();
+        assert!(dir.contains(r#""get""#), "{dir}");
+        let root_config = client
+            .call(request(&config, "get", "", "eve", AccessLevel::Read))
+            .await
+            .unwrap();
+        assert!(root_config.as_map().contains_key("stage_count"));
+        assert_eq!(root_config.as_map()["stages"].as_list().len(), 1);
+
         let ls = async |client: &mut TestClient, path: &str| client.call(request(path, "ls", "", "fanda", AccessLevel::Browse)).await.map(|v| v.to_cpon());
         assert_eq!(ls(&mut client, &config).await.unwrap(),
             r#"["name","place","country","stageCount","currentStage","dateTime","director","mainReferee","stages"]"#);
@@ -1094,6 +1107,15 @@ fn event_config_node_get_set() {
         assert_eq!(ls(&mut client, &format!("{config}/stages")).await.unwrap(), r#"["1","2"]"#);
         set(&mut client, "stages/2/startDateTime", r#"d"2026-11-21T10:30:00+01""#).await.unwrap();
         assert_eq!(get(&mut client, "stages/2/startDateTime").await.to_cpon(), r#"d"2026-11-21T10:30:00+01""#);
+        let root_config = client
+            .call(request(&config, "get", "", "eve", AccessLevel::Read))
+            .await
+            .unwrap();
+        assert_eq!(root_config.as_map()["stages"].as_list().len(), 2);
+        assert_eq!(
+            root_config.as_map()["stages"].as_list()[1].as_map()["start_date_time"].to_cpon(),
+            r#"d"2026-11-21T10:30:00+01""#
+        );
 
         set(&mut client, "dateTime", r#"d"2026-11-21T09:00:00Z""#).await.unwrap();
         let dt = get(&mut client, "dateTime").await.as_datetime().to_chrono_datetime();

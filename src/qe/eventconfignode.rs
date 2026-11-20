@@ -6,6 +6,8 @@ use shvrpc::{RpcMessage, metamethod::{AccessLevel, Flags, MetaMethod}};
 use super::{EventConfig, KEY_COUNTRY, KEY_CURRENT_STAGE, KEY_DATE, KEY_DIRECTOR, KEY_MAIN_REFEREE, KEY_NAME, KEY_PLACE, KEY_STAGE_COUNT, KEY_TIME, save_config_values, stage_start_date_time_key};
 use crate::eventctlnode::escalate_event_owner_rights;
 use crate::eventsqlapi::LocalEventSqlApi;
+use crate::rpctype::RpcTypeStr;
+use crate::rpcvalueext::RpcValueExt;
 use crate::{anyhow_to_rpc_error, split_first_fragment, str_to_rpc_error};
 use crate::state::{EventId, SharedAppState};
 
@@ -17,6 +19,11 @@ const EVENT_FIELDS: &[&str] = &["name", "place", "country", "stageCount", "curre
 const STAGE_FIELDS: &[&str] = &["startDateTime"];
 
 const DIR_NODE_METHODS: &[MetaMethod] = &[META_METHOD_DIR, META_METHOD_LS];
+const ROOT_NODE_METHODS: &[MetaMethod] = &[
+    META_METHOD_DIR,
+    META_METHOD_LS,
+    MetaMethod::new_static(METH_GET, Flags::IsGetter, AccessLevel::Read, "", EventConfig::RPC_TYPE_STR, &[], ""),
+];
 
 macro_rules! value_node_methods {
     ($type:literal) => {
@@ -103,11 +110,15 @@ impl ConfigNode {
     }
 
     fn methods(self) -> &'static [MetaMethod] {
-        match self.value_type() {
-            None => DIR_NODE_METHODS,
-            Some(ValueType::String) => STRING_NODE_METHODS,
-            Some(ValueType::Int) => INT_NODE_METHODS,
-            Some(ValueType::DateTime) => DATETIME_NODE_METHODS,
+        if matches!(self, Self::Root) {
+            ROOT_NODE_METHODS
+        } else {
+            match self.value_type() {
+                None => DIR_NODE_METHODS,
+                Some(ValueType::String) => STRING_NODE_METHODS,
+                Some(ValueType::Int) => INT_NODE_METHODS,
+                Some(ValueType::DateTime) => DATETIME_NODE_METHODS,
+            }
         }
     }
 
@@ -123,7 +134,8 @@ impl ConfigNode {
     fn get(self, config: &EventConfig) -> RpcValue {
         let datetime = |dt: &DateTime<FixedOffset>| RpcValue::from(shvproto::DateTime::from_datetime(dt));
         match self {
-            Self::Root | Self::Stages | Self::Stage => RpcValue::null(),
+            Self::Root => config.to_rpcvalue(),
+            Self::Stages | Self::Stage => RpcValue::null(),
             Self::Name => config.name.as_str().into(),
             Self::Place => config.place.as_str().into(),
             Self::Country => config.country.as_str().into(),
@@ -199,10 +211,12 @@ pub(crate) async fn resolve_event_config_request(rq: RpcMessage, event_id: Event
         Method::Dir(dir) => dir.resolve(methods),
         Method::Ls(ls) => ls.resolve(methods, async move || Ok(node.children(&config))),
         Method::Other(m) => {
-            if node.value_type().is_none() {
+            let method = m.method();
+            if node.value_type().is_none()
+                && !(matches!(node, ConfigNode::Root) && method == METH_GET)
+            {
                 return err_unresolved_request();
             }
-            let method = m.method();
             match method {
                 METH_GET => m.resolve(methods, async move || Ok(node.get(&config))),
                 METH_SET => {

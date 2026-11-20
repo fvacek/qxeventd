@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, FixedOffset};
 use qxsql::{QxSqlApi, sql::{DbValue, record_from_slice}};
+use rpc_type_derive::RpcTypeStr;
+use serde::{Deserialize, Serialize};
 
 use crate::eventdb::parse_local_date_time;
 
@@ -22,13 +24,14 @@ fn stage_start_date_time_key(stage: usize) -> String {
 }
 
 /// Event config stored in the event database `config` table.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, RpcTypeStr)]
 pub(crate) struct EventConfig {
     name: String,
     place: String,
     country: String,
     stage_count: usize,
     current_stage: usize,
+    #[serde(with = "crate::rpctype::chrono_datetime")]
     date_time: DateTime<FixedOffset>,
     director: String,
     main_referee: String,
@@ -36,8 +39,9 @@ pub(crate) struct EventConfig {
     stages: Vec<StageConfig>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, RpcTypeStr)]
 struct StageConfig {
+    #[serde(with = "crate::rpctype::chrono_datetime")]
     start_date_time: DateTime<FixedOffset>,
 }
 
