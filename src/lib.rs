@@ -31,6 +31,7 @@ mod eventdb;
 mod filenode;
 mod qxchange;
 mod qxeventconfig;
+mod qe;
 
 pub use eventctlnode::QX_API_TOKEN;
 pub use filenode::FileStat;

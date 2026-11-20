@@ -23,6 +23,7 @@ use crate::state::{SIG_EVENT_DB_MODE_CHNG, open_event, pulled_event_db_file, pus
 enum EventCtlNode {
     Root,
     Event(EventId),
+    EventConfig(EventId, String),
     EventSqlApi(EventId),
     PushEventDbFileNode(EventId),
     PullEventDbFileNode(EventId),
@@ -35,8 +36,10 @@ impl EventCtlNode {
         }
         let (event_id_str, dir) = split_first_fragment(path, '/');
         let event_id = event_id_str.parse::<i64>()?;
+        let (dir, path) = split_first_fragment(dir, '/');
         match dir {
             "" => Ok(Self::Event(event_id)),
+            "config" => Ok(Self::EventConfig(event_id, path.to_string())),
             "sql" => Ok(Self::EventSqlApi(event_id)),
             "pushDb" => Ok(Self::PushEventDbFileNode(event_id)),
             "pullDb" => Ok(Self::PullEventDbFileNode(event_id)),
@@ -92,7 +95,7 @@ struct ListEventsResult {
     events: Vec<EventListItem>,
 }
 
-async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
+pub(crate) async fn escalate_event_owner_rights(rq: &RpcMessage, app_state: SharedAppState, event_id: Option<EventId>, method_name: String, methods: &'static [MetaMethod]) -> Vec<MetaMethod> {
     // log::info!("escalate_event_owner_rights, method_name: {method_name}, event id: {event_id:?}");
     let Some(mm) = methods.iter().find(|&m| m.name == method_name) else {
         warn!("Unknown method: {method_name}");
@@ -347,7 +350,7 @@ pub(crate) async fn request_handler(
             match Method::from_request(&rq) {
                 Method::Dir(dir) => dir.resolve(EVENTCTL_NODE_METHODS),
                 Method::Ls(ls) => ls.resolve(EVENTCTL_NODE_METHODS, async move || {
-                    Ok(vec!["sql".into(), "pushDb".into(), "pullDb".into()])
+                    Ok(vec!["config".into(), "sql".into(), "pushDb".into(), "pullDb".into()])
                 }),
                 Method::Other(m) => {
                     let method = m.method();
@@ -436,6 +439,9 @@ pub(crate) async fn request_handler(
                     }
                 }
             }
+        }
+        EventCtlNode::EventConfig(event_id, path) => {
+            crate::qe::eventconfignode::resolve_event_config_request(rq, event_id, path, app_state.clone(), client_cmd_tx).await
         }
         EventCtlNode::EventSqlApi(event_id) => {
             const METH_SQL_QUERY: &str = "query";

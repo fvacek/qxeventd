@@ -1048,3 +1048,41 @@ fn set_event_db_mode_of_missing_event_fails() {
         assert!(take_mount_requests(&mut client).is_empty());
     });
 }
+
+#[test]
+fn event_config_node_get_set() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+
+        let res = client.call(request(&format!("eventctl/{event_id}"), "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
+        assert!(res.to_cpon().contains(r#""config""#), "{}", res.to_cpon());
+
+        let config = format!("eventctl/{event_id}/config");
+        let res = client.call(request(&config, "ls", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
+        assert!(res.contains(r#""event""#) && res.contains(r#""db""#), "{res}");
+        let res = client.call(request(&format!("{config}/event"), "ls", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
+        assert!(res.contains(r#""name""#) && res.contains(r#""stageCount""#), "{res}");
+        assert!(client.call(request(&format!("{config}/foo"), "ls", "", "fanda", AccessLevel::Browse)).await.is_err());
+
+        let name = format!("{config}/event/name");
+        let res = client.call(request(&name, "dir", "", "fanda", AccessLevel::Browse)).await.unwrap().to_cpon();
+        assert!(res.contains(r#""get""#) && res.contains(r#""set""#), "{res}");
+        let res = client.call(request(&format!("{config}/event/stageCount"), "get", "", "eve", AccessLevel::Read)).await.unwrap();
+        assert_eq!(res, RpcValue::from("1"));
+
+        // stranger with Read access cannot set, owner can
+        assert_permission_denied(client.call(request(&name, "set", r#""hacked""#, "eve", AccessLevel::Read)).await);
+        client.signals.clear();
+        let res = client.call(request(&name, "set", r#""Renamed""#, "fanda", AccessLevel::Read)).await.unwrap();
+        assert_eq!(res, RpcValue::from(true));
+        let res = client.call(request(&name, "get", "", "eve", AccessLevel::Read)).await.unwrap();
+        assert_eq!(res, RpcValue::from("Renamed"));
+
+        let chng = client.signals.iter().find(|s| s.method() == Some("chng")).expect("chng signal");
+        assert_eq!(chng.shv_path(), Some(name.as_str()));
+        assert_eq!(chng.param(), Some(&RpcValue::from("Renamed")));
+        assert!(!client.signals.iter().any(|s| s.method() == Some("recchng")), "no recchng expected");
+    });
+}

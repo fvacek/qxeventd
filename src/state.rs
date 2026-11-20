@@ -30,6 +30,7 @@ use crate::eventdb::{import_event_db_file, migrate_event_db};
 use crate::eventsqlapi::LocalEventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
+use crate::qe::EventConfig;
 use crate::qxeventconfig::QxEventConfig;
 use crate::rpctype::{RecordChange, RpcTypeStr};
 use crate::rpcvalueext::RpcValueExt;
@@ -743,6 +744,7 @@ pub(crate) struct OpenEventCtl {
     /// Do not take the app state lock while holding it: `install_event_db()` closes the event
     /// under the app state write lock, so it would deadlock.
     usage: RwLock<bool>,
+    event_config: RwLock<EventConfig>,
 }
 
 /// Shared usage of an open event DB, it keeps the DB pool open, see [`OpenEventCtl::use_db`].
@@ -766,6 +768,7 @@ impl OpenEventCtl {
             open_at: now,
             touched_at_ms: AtomicI64::new(now.timestamp_millis()),
             usage: RwLock::new(false),
+            event_config: RwLock::new(EventConfig::default()),
         }
     }
     pub fn touch(&self) {
