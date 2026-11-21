@@ -242,10 +242,13 @@ const MIGRATION_ARRAY: &[M] = &[
     M::up(
         include_str!("create_event_db.sql"),
     ),
-    // `config` gets an `id`, so it can be changed by record API with `recchng`,
-    // SQLite cannot add a primary key column, the table is rebuilt.
-    M::up(
-        "CREATE TABLE config_new (
+    M::up("
+        ALTER TABLE qxchanges ADD COLUMN paid boolean NOT NULL DEFAULT 0;
+        UPDATE config SET cvalue = '30900' WHERE ckey = 'db.version';
+    "),
+    M::up("
+        ALTER TABLE qxchanges ADD COLUMN paid boolean NOT NULL DEFAULT 0;
+        CREATE TABLE config_new (
             id integer PRIMARY KEY AUTOINCREMENT,
             ckey character varying,
             cname character varying,
@@ -255,8 +258,9 @@ const MIGRATION_ARRAY: &[M] = &[
         );
         INSERT INTO config_new (id, ckey, cname, cvalue, ctype) SELECT ROW_NUMBER() OVER (ORDER BY ckey), ckey, cname, cvalue, ctype FROM config;
         DROP TABLE config;
-        ALTER TABLE config_new RENAME TO config;",
-    ),
+        ALTER TABLE config_new RENAME TO config;
+        UPDATE config SET cvalue = '31000' WHERE ckey = 'db.version';
+    "),
 ];
 
 #[cfg(test)]
