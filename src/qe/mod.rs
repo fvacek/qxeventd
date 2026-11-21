@@ -3,7 +3,7 @@ pub mod eventconfignode;
 use std::collections::HashMap;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime};
-use qxsql::{QxSqlApi, sql::{DbValue, record_from_slice}};
+use qxsql::{QxSqlApi, sql::DbValue};
 use rpc_type_derive::RpcTypeStr;
 use serde::{Deserialize, Serialize};
 
@@ -97,15 +97,4 @@ fn normalize_time(time: &str) -> Option<String> {
         .or_else(|_| NaiveTime::parse_from_str(time, "%H:%M"))
         .ok()
         .map(|t| t.format("%H:%M:%S").to_string())
-}
-
-/// Inserts or replaces config values.
-async fn save_config_values(sql_api: &impl QxSqlApi, values: &[(&str, String)]) -> anyhow::Result<()> {
-    for (key, value) in values {
-        sql_api.exec(
-            "INSERT INTO config (ckey, cvalue) VALUES (:ckey, :cvalue) ON CONFLICT(ckey) DO UPDATE SET cvalue = excluded.cvalue",
-            Some(&record_from_slice(&[("ckey", (*key).into()), ("cvalue", value.as_str().into())])),
-        ).await?;
-    }
-    Ok(())
 }

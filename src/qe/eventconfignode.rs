@@ -1,10 +1,12 @@
+use anyhow::anyhow;
 use chrono::{DateTime, FixedOffset};
+use qxsql::{DbValue, QxSqlApi, QxSqlApiRecChng, sql::record_from_slice};
 use shvclient::{ClientCommandSender, clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request}};
 use shvproto::{RpcValue, Value};
 use shvrpc::{RpcMessage, metamethod::{AccessLevel, Flags, MetaMethod}};
 
-use super::{EventConfig, KEY_COUNTRY, KEY_CURRENT_STAGE, KEY_DATE, KEY_DIRECTOR, KEY_MAIN_REFEREE, KEY_NAME, KEY_PLACE, KEY_STAGE_COUNT, KEY_TIME, normalize_date, normalize_time, save_config_values, stage_start_date_time_key};
-use crate::eventctlnode::escalate_event_owner_rights;
+use super::{EventConfig, KEY_COUNTRY, KEY_CURRENT_STAGE, KEY_DATE, KEY_DIRECTOR, KEY_MAIN_REFEREE, KEY_NAME, KEY_PLACE, KEY_STAGE_COUNT, KEY_TIME, normalize_date, normalize_time, stage_start_date_time_key};
+use crate::eventctlnode::{escalate_event_owner_rights, sanitize_user_id};
 use crate::eventsqlapi::LocalEventSqlApi;
 use crate::rpctype::RpcTypeStr;
 use crate::rpcvalueext::RpcValueExt;
@@ -189,6 +191,22 @@ impl ConfigNode {
     }
 }
 
+/// Inserts or updates the event `config` table value of `key` and emits `recchng`.
+async fn set_config_value(sql_api: &LocalEventSqlApi, key: &str, value: &str, issuer: Option<String>) -> anyhow::Result<()> {
+    let result = sql_api.query("SELECT id FROM config WHERE ckey = :ckey", Some(&record_from_slice(&[("ckey", key.into())]))).await?;
+    let record = record_from_slice(&[("ckey", key.into()), ("cvalue", value.into())]);
+    match result.rows.first().and_then(|row| row.first()) {
+        Some(DbValue::Int(id)) => {
+            sql_api.update_record_with_recchng("config", *id, &record, issuer).await?;
+        }
+        Some(id) => return Err(anyhow!("Config key '{key}' has invalid id: {id:?}")),
+        None => {
+            sql_api.create_record_with_recchng("config", &record, issuer).await?;
+        }
+    }
+    Ok(())
+}
+
 /// [`EventConfig`] exposed as a node tree, `stages/<n>` is the stage `n` config.
 pub(crate) async fn resolve_event_config_request(rq: RpcMessage, event_id: EventId, path: String, app_state: SharedAppState, client_cmd_tx: ClientCommandSender) -> RequestHandlerResult {
     let sql_api = LocalEventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
@@ -218,10 +236,11 @@ pub(crate) async fn resolve_event_config_request(rq: RpcMessage, event_id: Event
                 METH_GET => m.resolve(methods, async move || Ok(node.get(&config))),
                 METH_SET => {
                     let rights = escalate_event_owner_rights(&rq, app_state, Some(event_id), method.to_owned(), methods).await;
+                    let issuer = sanitize_user_id(&rq).map(str::to_owned);
                     m.resolve(rights, async move || {
                         let (key, value) = node.config_value(rq.param().unwrap_or_default())
                             .map_err(|err| str_to_rpc_error(&err))?;
-                        save_config_values(&sql_api, &[(key.as_str(), value)]).await.map_err(anyhow_to_rpc_error)?;
+                        set_config_value(&sql_api, &key, &value, issuer).await.map_err(anyhow_to_rpc_error)?;
                         // signal the value as stored, date time loses its sub-second part for example
                         let config = EventConfig::load(&sql_api).await.map_err(anyhow_to_rpc_error)?;
                         let shv_path = format!("eventctl/{event_id}/config/{path}");

@@ -231,7 +231,7 @@ fn push_db_upload_in_chunks_and_commit() {
 
         push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
         let ((), db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 1;").unwrap();
+            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 2;").unwrap();
         });
         for data in compress(&db_image).chunks(4) {
             push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
@@ -278,7 +278,7 @@ fn push_db_commit_wal_mode_database() {
         write_event_db(event_id, b"old");
 
         let ((), mut db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 1;").unwrap();
+            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 2;").unwrap();
         });
         // file format read and write versions of a WAL mode database
         db_image[18] = 2;
@@ -399,7 +399,7 @@ fn push_db_commit_removes_stale_wal_files() {
         }
 
         let ((), db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 1;").unwrap();
+            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 2;").unwrap();
         });
         push_db_call(&mut client, event_id, "append", RpcValue::from(&compress(&db_image)[..])).await.unwrap();
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
@@ -462,7 +462,7 @@ fn push_db_commit_adopts_database_without_version() {
             (read_config(conn, "event.name"), user_version)
         });
         assert_eq!(event_name, "pushed");
-        assert_eq!(user_version, 1);
+        assert_eq!(user_version, 2);
     });
 }
 
@@ -659,7 +659,7 @@ fn push_db_commit_updates_event_record() {
                     ('event.stageCount', '3'),
                     ('event.date', '2024-05-01'),
                     ('event.time', '10:30:00');
-                PRAGMA user_version = 1;
+                PRAGMA user_version = 2;
             ").unwrap();
         });
         push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
@@ -677,7 +677,7 @@ fn push_db_commit_updates_event_record() {
             conn.execute_batch("
                 CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT);
                 INSERT INTO config (ckey, cvalue) VALUES ('event.name', 'Renamed');
-                PRAGMA user_version = 1;
+                PRAGMA user_version = 2;
             ").unwrap();
         });
         push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
@@ -705,7 +705,7 @@ fn push_db_commit_updates_event_record_from_quickevent_config() {
                     ('event.stageCount', 4, 'int'),
                     ('event.date', '2024-06-02', 'QDate'),
                     ('event.time', '09:15', 'QTime');
-                PRAGMA user_version = 1;
+                PRAGMA user_version = 2;
             ").unwrap();
         });
         push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
@@ -1125,5 +1125,58 @@ fn event_config_node_get_set() {
         assert_eq!(get(&mut client, "time").await, RpcValue::from("09:30:00"));
         assert!(set(&mut client, "time", r#""25:00""#).await.is_err());
         assert!(set(&mut client, "time", r#"d"2026-11-21T09:00:00Z""#).await.is_err());
+    });
+}
+
+/// `recchng` signal params of the event `sql` node collected by the client, the collected signals are cleared
+fn take_recchng_signals(client: &mut TestClient, event_id: i64) -> Vec<RpcValue> {
+    std::mem::take(&mut client.signals).into_iter()
+        .filter(|sig| sig.method() == Some("recchng"))
+        .inspect(|sig| assert!(sig.shv_path().unwrap_or_default().ends_with(&format!("eventctl/{event_id}/sql")), "{sig}"))
+        .map(|sig| sig.param().cloned().unwrap_or_else(RpcValue::null))
+        .collect()
+}
+
+#[test]
+fn event_config_set_emits_recchng() {
+    smol::block_on(async {
+        let mut client = TestClient::new().await;
+        let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
+        client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+        let config_path = |node: &str| format!("eventctl/{event_id}/config/{node}");
+        client.signals.clear();
+
+        // existing key is updated
+        client.call(request(&config_path("name"), "set", r#""Renamed""#, "fanda", AccessLevel::Write)).await.unwrap();
+        let recchngs = take_recchng_signals(&mut client, event_id);
+        assert_eq!(recchngs.len(), 1, "{recchngs:?}");
+        let recchng = recchngs[0].as_map();
+        assert_eq!(recchng["table"].as_str(), "config");
+        assert!(recchng["id"].as_int() > 0, "{}", recchngs[0].to_cpon());
+        assert_eq!(recchng["op"].as_str(), "Update");
+        assert_eq!(recchng["issuer"].as_str(), "fanda");
+        assert_eq!(recchng["record"].as_map()["ckey"].as_str(), "event.name");
+        assert_eq!(recchng["record"].as_map()["cvalue"].as_str(), "Renamed");
+        let name_id = recchng["id"].as_int();
+
+        // the same row is updated again
+        client.call(request(&config_path("name"), "set", r#""Renamed again""#, "fanda", AccessLevel::Write)).await.unwrap();
+        let recchngs = take_recchng_signals(&mut client, event_id);
+        assert_eq!(recchngs.len(), 1, "{recchngs:?}");
+        assert_eq!(recchngs[0].as_map()["id"].as_int(), name_id);
+        let res = client.call(request(&config_path("name"), "get", "", "fanda", AccessLevel::Read)).await.unwrap();
+        assert_eq!(res.as_str(), "Renamed again");
+
+        // missing key is inserted
+        client.call(request(&config_path("place"), "set", r#""Prague""#, "fanda", AccessLevel::Write)).await.unwrap();
+        let recchngs = take_recchng_signals(&mut client, event_id);
+        assert_eq!(recchngs.len(), 1, "{recchngs:?}");
+        let recchng = recchngs[0].as_map();
+        assert_eq!(recchng["op"].as_str(), "Insert");
+        assert!(recchng["id"].as_int() > 0, "{}", recchngs[0].to_cpon());
+        assert_ne!(recchng["id"].as_int(), name_id);
+        assert_eq!(recchng["record"].as_map()["ckey"].as_str(), "event.place");
+        let res = client.call(request(&config_path("place"), "get", "", "fanda", AccessLevel::Read)).await.unwrap();
+        assert_eq!(res.as_str(), "Prague");
     });
 }

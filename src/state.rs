@@ -18,7 +18,7 @@ use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
 use shvclient::ClientCommandSender;
 
-use shvproto::{RpcValue, to_rpcvalue};
+use shvproto::{RpcValue};
 use shvproto::make_map;
 use shvrpc::rpc::ShvRI;
 use shvrpc::{RpcMessage, RpcMessageMetaTags};

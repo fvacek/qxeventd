@@ -75,7 +75,7 @@ struct OpenEventResult {
     mount_point: String,
 }
 
-fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
+pub(crate) fn sanitize_user_id(rq: &RpcMessage) -> Option<&str> {
     rq.user_id().map(|user_id| user_id.split(':').next().unwrap_or(user_id))
 }
 

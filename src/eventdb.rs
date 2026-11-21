@@ -115,11 +115,11 @@ pub(crate) fn parse_local_date_time(date: &str, time: &str) -> Option<DateTime<F
 
 fn migrate_event_db_connection(conn: &mut Connection) -> anyhow::Result<()> {
     // A database exported by QuickEvent has the tables, but it does not have the version set.
-    // Such a database is considered to be migrated already.
+    // Such a database has the QuickEvent schema, the later migrations still have to be applied.
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let table_count: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
     if user_version == 0 && table_count > 0 {
-        conn.pragma_update(None, "user_version", MIGRATION_ARRAY.len() as i64)?;
+        conn.pragma_update(None, "user_version", QE_SCHEMA_MIGRATION_COUNT as i64)?;
     }
     EVENT_DB_MIGRATIONS.to_latest(conn)?;
     Ok(())
@@ -235,9 +235,27 @@ pub fn is_default_value(value: &DbValue, default: &DbValue) -> bool {
 
 const EVENT_DB_MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
+/// Number of [`MIGRATION_ARRAY`] migrations a database exported by QuickEvent already has.
+const QE_SCHEMA_MIGRATION_COUNT: usize = 1;
+
 const MIGRATION_ARRAY: &[M] = &[
     M::up(
         include_str!("create_event_db.sql"),
+    ),
+    // `config` gets an `id`, so it can be changed by record API with `recchng`,
+    // SQLite cannot add a primary key column, the table is rebuilt.
+    M::up(
+        "CREATE TABLE config_new (
+            id integer PRIMARY KEY AUTOINCREMENT,
+            ckey character varying,
+            cname character varying,
+            cvalue character varying,
+            ctype character varying,
+            CONSTRAINT config_ckey_unique UNIQUE (ckey)
+        );
+        INSERT INTO config_new (id, ckey, cname, cvalue, ctype) SELECT ROW_NUMBER() OVER (ORDER BY ckey), ckey, cname, cvalue, ctype FROM config;
+        DROP TABLE config;
+        ALTER TABLE config_new RENAME TO config;",
     ),
 ];
 
