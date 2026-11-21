@@ -555,24 +555,12 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
                 info!(target: "ApplyRecChng", "Update recchng: table='{}', id={}", recchng.table, recchng.id);
                 let mut record = record.clone();
                 remove_generated_columns(&recchng.table, &mut record);
-                if record.is_empty() {
+                if record.is_empty() || recchng.id == 0 {
                     return Ok(());
                 }
-                if recchng.id == 0 {
-                    if recchng.table == "config" {
-                        // config table has no id, skip update, just forward recchng
-                        if let Some(client_cmd_tx) = sql_api.client_command_sender().await {
-                            let rec = to_rpcvalue(&recchng)?;
-                            client_cmd_tx.send_message(shvrpc::RpcMessage::new_signal(&sql_api.recchng_shv_path(), "recchng").with_param(rec))?;
-                        }
-                    } else {
-                        return Err(anyhow!("Invalid recchng: table='{}', id must be greater than 0", recchng.table))
-                    }
-                } else {
-                    sql_api
-                        .update_record_with_recchng(&recchng.table, recchng.id, &record, recchng.issuer.clone())
-                        .await?;
-                }
+                sql_api
+                    .update_record_with_recchng(&recchng.table, recchng.id, &record, recchng.issuer.clone())
+                    .await?;
                 Ok(())
             }
             None => Err(anyhow!("update recchng has no record")),
