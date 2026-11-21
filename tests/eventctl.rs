@@ -20,6 +20,14 @@ const SHA1_123456789: [u8; 20] = [
     0x67, 0x99, 0x65, 0xcc, 0xc3, 0x4c, 0xa7, 0xae, 0x34, 0x41,
 ];
 
+/// Latest event DB `db.version`, a pushed DB with this version is not migrated.
+const LATEST_EVENT_DB_VERSION: i64 = 31000;
+
+/// Minimal event DB `config` table with the latest `db.version`.
+fn minimal_config_sql() -> String {
+    format!("CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT); INSERT INTO config (ckey, cvalue) VALUES ('db.version', '{LATEST_EVENT_DB_VERSION}');")
+}
+
 fn compress(data: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(data).unwrap();
@@ -231,7 +239,7 @@ fn push_db_upload_in_chunks_and_commit() {
 
         push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
         let ((), db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 2;").unwrap();
+            conn.execute_batch(&format!("CREATE TABLE t (id INTEGER); {}", minimal_config_sql())).unwrap();
         });
         for data in compress(&db_image).chunks(4) {
             push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
@@ -278,7 +286,7 @@ fn push_db_commit_wal_mode_database() {
         write_event_db(event_id, b"old");
 
         let ((), mut db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 2;").unwrap();
+            conn.execute_batch(&format!("CREATE TABLE t (id INTEGER); {}", minimal_config_sql())).unwrap();
         });
         // file format read and write versions of a WAL mode database
         db_image[18] = 2;
@@ -399,7 +407,7 @@ fn push_db_commit_removes_stale_wal_files() {
         }
 
         let ((), db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch("CREATE TABLE t (id INTEGER); PRAGMA user_version = 2;").unwrap();
+            conn.execute_batch(&format!("CREATE TABLE t (id INTEGER); {}", minimal_config_sql())).unwrap();
         });
         push_db_call(&mut client, event_id, "append", RpcValue::from(&compress(&db_image)[..])).await.unwrap();
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
@@ -436,7 +444,7 @@ fn push_db_commit_replaces_opened_event_db() {
 }
 
 #[test]
-fn push_db_commit_adopts_database_without_version() {
+fn push_db_commit_migrates_older_database() {
     smol::block_on(async {
         let mut client = TestClient::new().await;
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
@@ -445,7 +453,7 @@ fn push_db_commit_adopts_database_without_version() {
         let snapshot = pull_event_db(&mut client, event_id).await;
         let ((), modified) = with_event_db_image(&snapshot, |conn| {
             conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
-            conn.pragma_update(None, "user_version", 0).unwrap();
+            conn.execute("UPDATE config SET cvalue = '30800' WHERE ckey = 'db.version'", []).unwrap();
         });
 
         let max_write = push_db_max_write(&mut client, event_id).await;
@@ -457,12 +465,11 @@ fn push_db_commit_adopts_database_without_version() {
         let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
         assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
         let snapshot = pull_event_db(&mut client, event_id).await;
-        let ((event_name, user_version), _) = with_event_db_image(&snapshot, |conn| {
-            let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
-            (read_config(conn, "event.name"), user_version)
+        let ((event_name, db_version), _) = with_event_db_image(&snapshot, |conn| {
+            (read_config(conn, "event.name"), read_config(conn, "db.version"))
         });
         assert_eq!(event_name, "pushed");
-        assert_eq!(user_version, 2);
+        assert_eq!(db_version, LATEST_EVENT_DB_VERSION.to_string());
     });
 }
 
@@ -652,15 +659,15 @@ fn push_db_commit_updates_event_record() {
         write_event_db(event_id, b"old");
 
         let ((), db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch("
+            conn.execute_batch(&format!("
                 CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT);
                 INSERT INTO config (ckey, cvalue) VALUES
+                    ('db.version', '{LATEST_EVENT_DB_VERSION}'),
                     ('event.name', 'Pushed event'),
                     ('event.stageCount', '3'),
                     ('event.date', '2024-05-01'),
                     ('event.time', '10:30:00');
-                PRAGMA user_version = 2;
-            ").unwrap();
+            ")).unwrap();
         });
         push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
@@ -674,11 +681,12 @@ fn push_db_commit_updates_event_record() {
 
         // fields missing in the pushed DB are kept
         let ((), db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch("
+            conn.execute_batch(&format!("
                 CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT);
-                INSERT INTO config (ckey, cvalue) VALUES ('event.name', 'Renamed');
-                PRAGMA user_version = 2;
-            ").unwrap();
+                INSERT INTO config (ckey, cvalue) VALUES
+                    ('db.version', '{LATEST_EVENT_DB_VERSION}'),
+                    ('event.name', 'Renamed');
+            ")).unwrap();
         });
         push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
         push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
@@ -698,15 +706,15 @@ fn push_db_commit_updates_event_record_from_quickevent_config() {
 
         // QuickEvent stores typed values, ints as SQLite integers
         let ((), db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch("
+            conn.execute_batch(&format!("
                 CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT, ctype TEXT);
                 INSERT INTO config (ckey, cvalue, ctype) VALUES
+                    ('db.version', {LATEST_EVENT_DB_VERSION}, 'int'),
                     ('event.name', 'QE event', 'QString'),
                     ('event.stageCount', 4, 'int'),
                     ('event.date', '2024-06-02', 'QDate'),
                     ('event.time', '09:15', 'QTime');
-                PRAGMA user_version = 2;
-            ").unwrap();
+            ")).unwrap();
         });
         push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();

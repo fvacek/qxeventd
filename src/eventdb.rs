@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
-use async_sqlite::rusqlite::Connection;
+use anyhow::Context;
+use async_sqlite::rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use async_sqlite::{JournalMode, Pool, PoolBuilder};
 use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
 use log::*;
 use qxsql::DbValue;
 use qxsql::sql::{QxSqlApi, record_from_slice};
-use rusqlite_migration::{M, Migrations};
 use shvclient::ClientCommandSender;
 
 use crate::{localdbsqlapi::LocalDbSqlApi, state::{EventRecord, EventRecordChange}};
@@ -113,16 +113,44 @@ pub(crate) fn parse_local_date_time(date: &str, time: &str) -> Option<DateTime<F
     Some(local.fixed_offset())
 }
 
+/// Migrates the event DB to the latest version, atomically. The version is stored
+/// in the `db.version` config value, a database exported by QuickEvent has it set too.
+/// An empty database gets the [`CREATE_EVENT_DB_SQL`] schema first.
 fn migrate_event_db_connection(conn: &mut Connection) -> anyhow::Result<()> {
-    // A database exported by QuickEvent has the tables, but it does not have the version set.
-    // Such a database has the QuickEvent schema, the later migrations still have to be applied.
-    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let table_count: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
-    if user_version == 0 && table_count > 0 {
-        conn.pragma_update(None, "user_version", QE_SCHEMA_MIGRATION_COUNT as i64)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let table_count: i64 = tx.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
+    if table_count == 0 {
+        info!("Creating event DB schema, version {CREATE_EVENT_DB_VERSION}");
+        tx.execute_batch(CREATE_EVENT_DB_SQL)?;
     }
-    EVENT_DB_MIGRATIONS.to_latest(conn)?;
+    let mut version = read_db_version(&tx)?;
+    let latest = latest_db_version();
+    if version > latest {
+        anyhow::bail!("Event DB version {version} is newer than the latest supported version {latest}");
+    }
+    let current = version;
+    for migration in MIGRATIONS.iter().filter(|m| m.version > current) {
+        info!("Migrating event DB from version {version} to {}", migration.version);
+        (migration.up)(&tx)
+            .with_context(|| format!("Event DB migration to version {} failed", migration.version))?;
+        let updated = tx.execute("UPDATE config SET cvalue = ?1 WHERE ckey = 'db.version'", [migration.version.to_string()])?;
+        if updated != 1 {
+            anyhow::bail!("Event DB migration to version {} lost the 'db.version' config value", migration.version);
+        }
+        version = migration.version;
+    }
+    tx.commit()?;
     Ok(())
+}
+
+fn read_db_version(conn: &Connection) -> anyhow::Result<i64> {
+    let version: Option<String> = conn
+        .query_row("SELECT CAST(cvalue AS TEXT) FROM config WHERE ckey = 'db.version'", [], |row| row.get(0))
+        .optional()
+        .context("Cannot read event DB config, it is not an event database")?
+        .flatten();
+    let version = version.context("Event DB has no 'db.version' config value")?;
+    version.trim().parse().with_context(|| format!("Invalid event DB 'db.version' config value: {version:?}"))
 }
 
 /// Special columns of one event DB table, all names lower case.
@@ -233,21 +261,28 @@ pub fn is_default_value(value: &DbValue, default: &DbValue) -> bool {
     }
 }
 
-const EVENT_DB_MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
+/// Event DB schema, QuickEvent exports have this version or later.
+const CREATE_EVENT_DB_SQL: &str = include_str!("create_event_db.sql");
+/// `db.version` set by [`CREATE_EVENT_DB_SQL`].
+const CREATE_EVENT_DB_VERSION: i64 = 30800;
 
-/// Number of [`MIGRATION_ARRAY`] migrations a database exported by QuickEvent already has.
-const QE_SCHEMA_MIGRATION_COUNT: usize = 1;
+/// Event DB migration, `version` is the `db.version` config value once `up` is applied.
+/// The `db.version` is updated by the migration runner, not by the `up`.
+struct Migration {
+    version: i64,
+    up: fn(&Connection) -> anyhow::Result<()>,
+}
 
-const MIGRATION_ARRAY: &[M] = &[
-    M::up(
-        include_str!("create_event_db.sql"),
-    ),
-    M::up("
-        ALTER TABLE qxchanges ADD COLUMN paid boolean NOT NULL DEFAULT 0;
-        UPDATE config SET cvalue = '30900' WHERE ckey = 'db.version';
-    "),
-    M::up("
-        ALTER TABLE qxchanges ADD COLUMN paid boolean NOT NULL DEFAULT 0;
+/// Migrations after [`CREATE_EVENT_DB_VERSION`], ordered by version.
+const MIGRATIONS: &[Migration] = &[
+    // Event DBs created by qxeventd before the migrations were versioned by `db.version`
+    // might have the column already.
+    Migration { version: 30900, up: |conn| {
+        add_column_if_missing(conn, "qxchanges", "paid", "boolean NOT NULL DEFAULT 0")
+    } },
+    // `config` gets an `id`, so it can be changed by record API with `recchng`,
+    // SQLite cannot add a primary key column, the table is rebuilt.
+    Migration { version: 31000, up: |conn| Ok(conn.execute_batch("
         CREATE TABLE config_new (
             id integer PRIMARY KEY AUTOINCREMENT,
             ckey character varying,
@@ -259,9 +294,22 @@ const MIGRATION_ARRAY: &[M] = &[
         INSERT INTO config_new (id, ckey, cname, cvalue, ctype) SELECT ROW_NUMBER() OVER (ORDER BY ckey), ckey, cname, cvalue, ctype FROM config;
         DROP TABLE config;
         ALTER TABLE config_new RENAME TO config;
-        UPDATE config SET cvalue = '31000' WHERE ckey = 'db.version';
-    "),
+    ")?) },
 ];
+
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, definition: &str) -> anyhow::Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 COLLATE NOCASE)",
+        [table, column], |row| row.get(0))?;
+    if !exists {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
+    }
+    Ok(())
+}
+
+fn latest_db_version() -> i64 {
+    MIGRATIONS.last().map_or(CREATE_EVENT_DB_VERSION, |m| m.version)
+}
 
 #[cfg(test)]
 mod tests {
@@ -303,5 +351,61 @@ mod tests {
         assert!(!is_default_value(&DbValue::Bool(true), &DbValue::Int(0)));
         assert!(!is_default_value(&DbValue::Null, &DbValue::Int(0)));
         assert!(is_default_value(&DbValue::String("a".into()), &DbValue::String("a".into())));
+    }
+
+    #[test]
+    fn migration_versions_are_increasing() {
+        let mut prev = CREATE_EVENT_DB_VERSION;
+        for migration in MIGRATIONS {
+            assert!(migration.version > prev, "migration {} is not after {prev}", migration.version);
+            prev = migration.version;
+        }
+    }
+
+    #[test]
+    fn new_db_is_migrated_to_latest_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_event_db_connection(&mut conn).unwrap();
+        assert_eq!(read_db_version(&conn).unwrap(), latest_db_version());
+        // migrating again is a no-op
+        migrate_event_db_connection(&mut conn).unwrap();
+        assert_eq!(read_db_version(&conn).unwrap(), latest_db_version());
+    }
+
+    #[test]
+    fn quickevent_db_is_migrated_from_its_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(CREATE_EVENT_DB_SQL).unwrap();
+        assert_eq!(read_db_version(&conn).unwrap(), CREATE_EVENT_DB_VERSION);
+        migrate_event_db_connection(&mut conn).unwrap();
+        assert_eq!(read_db_version(&conn).unwrap(), latest_db_version());
+        let paid: i64 = conn.query_row("SELECT count(*) FROM pragma_table_info('qxchanges') WHERE name = 'paid'", [], |row| row.get(0)).unwrap();
+        assert_eq!(paid, 1);
+        let id: i64 = conn.query_row("SELECT count(*) FROM pragma_table_info('config') WHERE name = 'id'", [], |row| row.get(0)).unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn db_with_paid_column_at_30800_is_migrated() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(CREATE_EVENT_DB_SQL).unwrap();
+        conn.execute_batch("ALTER TABLE qxchanges ADD COLUMN paid boolean NOT NULL DEFAULT 0").unwrap();
+        migrate_event_db_connection(&mut conn).unwrap();
+        assert_eq!(read_db_version(&conn).unwrap(), latest_db_version());
+    }
+
+    #[test]
+    fn newer_db_is_rejected() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_event_db_connection(&mut conn).unwrap();
+        conn.execute("UPDATE config SET cvalue = ?1 WHERE ckey = 'db.version'", [(latest_db_version() + 1).to_string()]).unwrap();
+        assert!(migrate_event_db_connection(&mut conn).is_err());
+    }
+
+    #[test]
+    fn non_event_db_is_rejected() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE foo (id integer)").unwrap();
+        assert!(migrate_event_db_connection(&mut conn).is_err());
     }
 }
