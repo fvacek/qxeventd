@@ -275,26 +275,26 @@ struct Migration {
 
 /// Migrations after [`CREATE_EVENT_DB_VERSION`], ordered by version.
 const MIGRATIONS: &[Migration] = &[
-    // Event DBs created by qxeventd before the migrations were versioned by `db.version`
-    // might have the column already.
-    Migration { version: 30900, up: |conn| {
-        add_column_if_missing(conn, "qxchanges", "paid", "boolean NOT NULL DEFAULT 0")
-    } },
-    // `config` gets an `id`, so it can be changed by record API with `recchng`,
-    // SQLite cannot add a primary key column, the table is rebuilt.
-    Migration { version: 31000, up: |conn| Ok(conn.execute_batch("
-        CREATE TABLE config_new (
-            id integer PRIMARY KEY AUTOINCREMENT,
-            ckey character varying,
-            cname character varying,
-            cvalue character varying,
-            ctype character varying,
-            CONSTRAINT config_ckey_unique UNIQUE (ckey)
-        );
-        INSERT INTO config_new (id, ckey, cname, cvalue, ctype) SELECT ROW_NUMBER() OVER (ORDER BY ckey), ckey, cname, cvalue, ctype FROM config;
-        DROP TABLE config;
-        ALTER TABLE config_new RENAME TO config;
-    ")?) },
+    Migration {
+        version: 31000,
+        up: |conn| {
+            add_column_if_missing(conn, "qxchanges", "paid", "boolean NOT NULL DEFAULT 0")?;
+            conn.execute_batch("
+            CREATE TABLE config_new (
+                id integer PRIMARY KEY,
+                ckey character varying,
+                cname character varying,
+                cvalue character varying,
+                ctype character varying,
+                CONSTRAINT config_ckey_unique UNIQUE (ckey)
+            );
+            INSERT INTO config_new (id, ckey, cname, cvalue, ctype) SELECT ROW_NUMBER() OVER (ORDER BY ckey), ckey, cname, cvalue, ctype FROM config;
+            DROP TABLE config;
+            ALTER TABLE config_new RENAME TO config;
+            ")?;
+            Ok(())
+        }
+    },
 ];
 
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, definition: &str) -> anyhow::Result<()> {
