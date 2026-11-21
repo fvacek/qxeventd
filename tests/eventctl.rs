@@ -1075,7 +1075,7 @@ fn event_config_node_get_set() {
 
         let ls = async |client: &mut TestClient, path: &str| client.call(request(path, "ls", "", "fanda", AccessLevel::Browse)).await.map(|v| v.to_cpon());
         assert_eq!(ls(&mut client, &config).await.unwrap(),
-            r#"["name","place","country","stageCount","currentStage","dateTime","director","mainReferee","stages"]"#);
+            r#"["name","place","country","stageCount","currentStage","date","time","director","mainReferee","stages"]"#);
         assert_eq!(ls(&mut client, &format!("{config}/stages")).await.unwrap(), r#"["1"]"#);
         assert_eq!(ls(&mut client, &format!("{config}/stages/1")).await.unwrap(), r#"["startDateTime"]"#);
         assert!(ls(&mut client, &format!("{config}/stages/2")).await.is_err());
@@ -1117,8 +1117,13 @@ fn event_config_node_get_set() {
             r#"d"2026-11-21T10:30:00+01""#
         );
 
-        set(&mut client, "dateTime", r#"d"2026-11-21T09:00:00Z""#).await.unwrap();
-        let dt = get(&mut client, "dateTime").await.as_datetime().to_chrono_datetime();
-        assert_eq!(dt.timestamp(), chrono::DateTime::parse_from_rfc3339("2026-11-21T09:00:00Z").unwrap().timestamp());
+        set(&mut client, "date", r#""2026-11-21""#).await.unwrap();
+        assert_eq!(get(&mut client, "date").await, RpcValue::from("2026-11-21"));
+        assert!(set(&mut client, "date", r#""21.11.2026""#).await.is_err());
+        // time is normalized to HH:MM:SS
+        set(&mut client, "time", r#""09:30""#).await.unwrap();
+        assert_eq!(get(&mut client, "time").await, RpcValue::from("09:30:00"));
+        assert!(set(&mut client, "time", r#""25:00""#).await.is_err());
+        assert!(set(&mut client, "time", r#"d"2026-11-21T09:00:00Z""#).await.is_err());
     });
 }

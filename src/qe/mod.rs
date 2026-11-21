@@ -2,12 +2,10 @@ pub mod eventconfignode;
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime};
 use qxsql::{QxSqlApi, sql::{DbValue, record_from_slice}};
 use rpc_type_derive::RpcTypeStr;
 use serde::{Deserialize, Serialize};
-
-use crate::eventdb::parse_local_date_time;
 
 const KEY_NAME: &str = "event.name";
 const KEY_PLACE: &str = "event.place";
@@ -31,8 +29,10 @@ pub(crate) struct EventConfig {
     country: String,
     stage_count: usize,
     current_stage: usize,
-    #[serde(with = "crate::rpctype::chrono_datetime")]
-    date_time: DateTime<FixedOffset>,
+    /// Local date `YYYY-MM-DD`, empty if not set.
+    date: String,
+    /// Local time `HH:MM:SS`, empty if not set.
+    time: String,
     director: String,
     main_referee: String,
     /// Stage `n` is `stages[n - 1]`, there are `stage_count` of them.
@@ -73,9 +73,8 @@ impl EventConfig {
             country: string(KEY_COUNTRY),
             stage_count,
             current_stage: int(KEY_CURRENT_STAGE).unwrap_or(1),
-            date_time: config.get(KEY_DATE).zip(config.get(KEY_TIME))
-                .and_then(|(date, time)| parse_local_date_time(date, time))
-                .unwrap_or_default(),
+            date: config.get(KEY_DATE).and_then(|v| normalize_date(v)).unwrap_or_default(),
+            time: config.get(KEY_TIME).and_then(|v| normalize_time(v)).unwrap_or_default(),
             director: string(KEY_DIRECTOR),
             main_referee: string(KEY_MAIN_REFEREE),
             stages,
@@ -85,6 +84,19 @@ impl EventConfig {
     fn stage(&self, stage: usize) -> Option<&StageConfig> {
         stage.checked_sub(1).and_then(|ix| self.stages.get(ix))
     }
+}
+
+/// `YYYY-MM-DD` date, `None` if invalid.
+fn normalize_date(date: &str) -> Option<String> {
+    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok().map(|d| d.format("%Y-%m-%d").to_string())
+}
+
+/// `HH:MM:SS` time from `HH:MM[:SS]`, `None` if invalid.
+fn normalize_time(time: &str) -> Option<String> {
+    NaiveTime::parse_from_str(time, "%H:%M:%S")
+        .or_else(|_| NaiveTime::parse_from_str(time, "%H:%M"))
+        .ok()
+        .map(|t| t.format("%H:%M:%S").to_string())
 }
 
 /// Inserts or replaces config values.

@@ -3,7 +3,7 @@ use shvclient::{ClientCommandSender, clientnode::{META_METHOD_DIR, META_METHOD_L
 use shvproto::{RpcValue, Value};
 use shvrpc::{RpcMessage, metamethod::{AccessLevel, Flags, MetaMethod}};
 
-use super::{EventConfig, KEY_COUNTRY, KEY_CURRENT_STAGE, KEY_DATE, KEY_DIRECTOR, KEY_MAIN_REFEREE, KEY_NAME, KEY_PLACE, KEY_STAGE_COUNT, KEY_TIME, save_config_values, stage_start_date_time_key};
+use super::{EventConfig, KEY_COUNTRY, KEY_CURRENT_STAGE, KEY_DATE, KEY_DIRECTOR, KEY_MAIN_REFEREE, KEY_NAME, KEY_PLACE, KEY_STAGE_COUNT, KEY_TIME, normalize_date, normalize_time, save_config_values, stage_start_date_time_key};
 use crate::eventctlnode::escalate_event_owner_rights;
 use crate::eventsqlapi::LocalEventSqlApi;
 use crate::rpctype::RpcTypeStr;
@@ -15,7 +15,7 @@ const METH_GET: &str = "get";
 const METH_SET: &str = "set";
 const SIG_CHNG: &str = "chng";
 
-const EVENT_FIELDS: &[&str] = &["name", "place", "country", "stageCount", "currentStage", "dateTime", "director", "mainReferee", "stages"];
+const EVENT_FIELDS: &[&str] = &["name", "place", "country", "stageCount", "currentStage", "date", "time", "director", "mainReferee", "stages"];
 const STAGE_FIELDS: &[&str] = &["startDateTime"];
 
 const DIR_NODE_METHODS: &[MetaMethod] = &[META_METHOD_DIR, META_METHOD_LS];
@@ -60,7 +60,8 @@ enum ConfigNode {
     Country,
     StageCount,
     CurrentStage,
-    DateTime,
+    Date,
+    Time,
     Director,
     MainReferee,
     Stages,
@@ -79,7 +80,8 @@ impl ConfigNode {
             "country" => Self::Country,
             "stageCount" => Self::StageCount,
             "currentStage" => Self::CurrentStage,
-            "dateTime" => Self::DateTime,
+            "date" => Self::Date,
+            "time" => Self::Time,
             "director" => Self::Director,
             "mainReferee" => Self::MainReferee,
             "stages" => {
@@ -103,9 +105,9 @@ impl ConfigNode {
     fn value_type(self) -> Option<ValueType> {
         match self {
             Self::Root | Self::Stages | Self::Stage => None,
-            Self::Name | Self::Place | Self::Country | Self::Director | Self::MainReferee => Some(ValueType::String),
+            Self::Name | Self::Place | Self::Country | Self::Date | Self::Time | Self::Director | Self::MainReferee => Some(ValueType::String),
             Self::StageCount | Self::CurrentStage => Some(ValueType::Int),
-            Self::DateTime | Self::StageStartDateTime(_) => Some(ValueType::DateTime),
+            Self::StageStartDateTime(_) => Some(ValueType::DateTime),
         }
     }
 
@@ -141,15 +143,16 @@ impl ConfigNode {
             Self::Country => config.country.as_str().into(),
             Self::StageCount => (config.stage_count as i64).into(),
             Self::CurrentStage => (config.current_stage as i64).into(),
-            Self::DateTime => datetime(&config.date_time),
+            Self::Date => config.date.as_str().into(),
+            Self::Time => config.time.as_str().into(),
             Self::Director => config.director.as_str().into(),
             Self::MainReferee => config.main_referee.as_str().into(),
             Self::StageStartDateTime(stage) => config.stage(stage).map_or_else(RpcValue::null, |s| datetime(&s.start_date_time)),
         }
     }
 
-    /// Config table values to be written for `value`, it must be of the node value type.
-    fn config_values(self, value: &RpcValue) -> Result<Vec<(String, String)>, String> {
+    /// Config table `(key, value)` to be written for `value`, it must be of the node value type.
+    fn config_value(self, value: &RpcValue) -> Result<(String, String), String> {
         let string = || match &value.value {
             Value::String(s) => Ok(s.to_string()),
             _ => Err(format!("String expected, got: {}", value.type_name())),
@@ -163,7 +166,7 @@ impl ConfigNode {
             Value::DateTime(dt) => Ok(dt.to_chrono_datetime()),
             _ => Err(format!("DateTime expected, got: {}", value.type_name())),
         };
-        let one = |key: &str, value: String| vec![(key.to_string(), value)];
+        let one = |key: &str, value: String| (key.to_string(), value);
         Ok(match self {
             Self::Root | Self::Stages | Self::Stage => return Err("Node has no value".to_string()),
             Self::Name => one(KEY_NAME, string()?),
@@ -177,14 +180,8 @@ impl ConfigNode {
                 one(KEY_STAGE_COUNT, count)
             }
             Self::CurrentStage => one(KEY_CURRENT_STAGE, int()?),
-            Self::DateTime => {
-                // stored as local date and time, see [`crate::eventdb::parse_local_date_time`]
-                let local = datetime()?.with_timezone(&chrono::Local);
-                vec![
-                    (KEY_DATE.to_string(), local.format("%Y-%m-%d").to_string()),
-                    (KEY_TIME.to_string(), local.format("%H:%M:%S").to_string()),
-                ]
-            }
+            Self::Date => one(KEY_DATE, normalize_date(&string()?).ok_or("Date YYYY-MM-DD expected")?),
+            Self::Time => one(KEY_TIME, normalize_time(&string()?).ok_or("Time HH:MM[:SS] expected")?),
             Self::Director => one(KEY_DIRECTOR, string()?),
             Self::MainReferee => one(KEY_MAIN_REFEREE, string()?),
             Self::StageStartDateTime(stage) => one(&stage_start_date_time_key(stage), datetime()?.to_rfc3339()),
@@ -222,10 +219,9 @@ pub(crate) async fn resolve_event_config_request(rq: RpcMessage, event_id: Event
                 METH_SET => {
                     let rights = escalate_event_owner_rights(&rq, app_state, Some(event_id), method.to_owned(), methods).await;
                     m.resolve(rights, async move || {
-                        let values = node.config_values(rq.param().unwrap_or_default())
+                        let (key, value) = node.config_value(rq.param().unwrap_or_default())
                             .map_err(|err| str_to_rpc_error(&err))?;
-                        let values = values.iter().map(|(k, v)| (k.as_str(), v.clone())).collect::<Vec<_>>();
-                        save_config_values(&sql_api, &values).await.map_err(anyhow_to_rpc_error)?;
+                        save_config_values(&sql_api, &[(key.as_str(), value)]).await.map_err(anyhow_to_rpc_error)?;
                         // signal the value as stored, date time loses its sub-second part for example
                         let config = EventConfig::load(&sql_api).await.map_err(anyhow_to_rpc_error)?;
                         let shv_path = format!("eventctl/{event_id}/config/{path}");
