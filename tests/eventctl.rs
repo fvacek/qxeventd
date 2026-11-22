@@ -154,7 +154,8 @@ fn list_events_returns_typed_items() {
         assert_eq!(event["owner"].as_str(), "fanda");
         assert_eq!(event["stage_count"].as_int(), 1);
         assert_eq!(event["db_mode"].as_str(), "Archived");
-        assert_eq!(event["date"].type_name(), "DateTime", "{}", res.to_cpon());
+        assert!(chrono::NaiveDate::parse_from_str(event["date"].as_str(), "%Y-%m-%d").is_ok(), "{}", res.to_cpon());
+        assert_eq!(event["time"].as_str(), "00:00:00", "{}", res.to_cpon());
         assert!(!event.contains_key("api_token"));
     });
 }
@@ -677,8 +678,8 @@ fn push_db_commit_updates_event_record() {
         let record = res.as_map();
         assert_eq!(record["name"].as_str(), "Pushed event");
         assert_eq!(record["stage_count"].as_int(), 3);
-        let date = record["date"].as_datetime().to_chrono_datetime();
-        assert_eq!(date.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-05-01 10:30:00", "{}", res.to_cpon());
+        assert_eq!(record["date"].as_str(), "2024-05-01", "{}", res.to_cpon());
+        assert_eq!(record["time"].as_str(), "10:30:00", "{}", res.to_cpon());
 
         // fields missing in the pushed DB are kept
         let ((), db_image) = with_event_db_image(b"", |conn| {
@@ -686,7 +687,8 @@ fn push_db_commit_updates_event_record() {
                 CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT);
                 INSERT INTO config (id, cvalue) VALUES
                     ('db.version', '{LATEST_EVENT_DB_VERSION}'),
-                    ('event.name', 'Renamed');
+                    ('event.name', 'Renamed'),
+                    ('event.date', '2024-05-02');
             ")).unwrap();
         });
         push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
@@ -695,6 +697,9 @@ fn push_db_commit_updates_event_record() {
         let res = client.call(request("eventctl", "readEventRecord", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
         assert_eq!(res.as_map()["name"].as_str(), "Renamed");
         assert_eq!(res.as_map()["stage_count"].as_int(), 3);
+        // date and time are synced independently
+        assert_eq!(res.as_map()["date"].as_str(), "2024-05-02");
+        assert_eq!(res.as_map()["time"].as_str(), "10:30:00");
     });
 }
 
@@ -724,8 +729,8 @@ fn push_db_commit_updates_event_record_from_quickevent_config() {
         let record = res.as_map();
         assert_eq!(record["name"].as_str(), "QE event");
         assert_eq!(record["stage_count"].as_int(), 4);
-        let date = record["date"].as_datetime().to_chrono_datetime();
-        assert_eq!(date.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-06-02 09:15:00", "{}", res.to_cpon());
+        assert_eq!(record["date"].as_str(), "2024-06-02", "{}", res.to_cpon());
+        assert_eq!(record["time"].as_str(), "09:15:00", "{}", res.to_cpon());
     });
 }
 

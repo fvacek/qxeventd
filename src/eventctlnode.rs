@@ -678,19 +678,20 @@ mod tests {
     fn event_record_rpc_types() {
         assert_eq!(
             EventRecord::RPC_TYPE_STR,
-            "{i|n:id,s:name,t:date,i:stage_count,s:owner,s:api_token,{{s[Organizer,Banned]}:members}:config,s[Archived,ReadOnly,Master,Replica]:db_mode}"
+            "{i|n:id,s:name,s:date,s:time,i:stage_count,s:owner,s:api_token,{{s[Organizer,Banned]}:members}:config,s[Archived,ReadOnly,Master,Replica]:db_mode}"
         );
         assert_eq!(
             UpdateEventRecordParams::RPC_TYPE_STR,
-            "{i:event_id,{s|n:name,t|n:date,i|n:stage_count,s|n:owner,s|n:api_token,{{s[Organizer,Banned]}:members}|n:config,s[Archived,ReadOnly,Master,Replica]|n:db_mode}:change}"
+            "{i:event_id,{s|n:name,s|n:date,s|n:time,i|n:stage_count,s|n:owner,s|n:api_token,{{s[Organizer,Banned]}:members}|n:config,s[Archived,ReadOnly,Master,Replica]|n:db_mode}:change}"
         );
         assert_eq!(EventDbMode::RPC_TYPE_STR, "s[Archived,ReadOnly,Master,Replica]");
-        assert_eq!(ListEventsResult::RPC_TYPE_STR, "[{i:id,s:name,i:stage_count,t:date,s:owner,s[Archived,ReadOnly,Master,Replica]:db_mode}]");
+        assert_eq!(ListEventsResult::RPC_TYPE_STR, "[{i:id,s:name,i:stage_count,s:date,s:time,s:owner,s[Archived,ReadOnly,Master,Replica]:db_mode}]");
 
         let record = EventRecord {
             id: Some(1),
             name: "ev".into(),
-            date: chrono::DateTime::parse_from_rfc3339("2026-10-31T10:00:00+01:00").unwrap(),
+            date: "2026-10-31".into(),
+            time: "10:00:00".into(),
             stage_count: 2,
             owner: "owner".into(),
             api_token: "tok".into(),
@@ -700,7 +701,17 @@ mod tests {
             db_mode: crate::state::EventDbMode::Master,
         };
         let value = record.to_rpcvalue();
-        assert_eq!(value.get("date").unwrap().type_name(), "DateTime");
+        assert_eq!(value.get("date").unwrap().as_str(), "2026-10-31");
+        assert_eq!(value.get("time").unwrap().as_str(), "10:00:00");
+        let change = crate::state::EventRecordChange {
+            date: Some(record.date.clone()),
+            time: Some(record.time.clone()),
+            ..Default::default()
+        };
+        assert_eq!(change.to_record(), qxsql::sql::record_from_slice(&[
+            ("date", "2026-10-31".into()),
+            ("time", "10:00:00".into()),
+        ]));
         assert_eq!(value.get("db_mode").unwrap().as_str(), "Master");
         assert_eq!(value.get("config").unwrap().get("members").unwrap().get("member").unwrap().as_str(), "Organizer");
     }

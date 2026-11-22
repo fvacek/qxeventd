@@ -64,7 +64,7 @@ impl State {
 
     pub async fn list_events(&self) -> anyhow::Result<Vec<EventListItem>> {
         let qxsql = LocalDbSqlApi::new_without_recchng(self.db_pool.clone());
-        let records = qxsql.list_records("events", Some(vec!["id", "name", "stage_count", "date", "owner", "db_mode"]), None, None).await?;
+        let records = qxsql.list_records("events", Some(vec!["id", "name", "stage_count", "date", "time", "owner", "db_mode"]), None, None).await?;
         records.iter().map(EventListItem::from_record).collect()
     }
 
@@ -78,7 +78,8 @@ impl State {
             id: None,
             db_mode: EventDbMode::Archived,
             name: String::new(),
-            date: chrono::Local::now().fixed_offset(),
+            date: default_event_date(),
+            time: default_event_time(),
             owner: owner.clone(),
             api_token: api_token.clone(),
             stage_count: default_stage_count(),
@@ -674,9 +675,10 @@ pub(crate) struct EventRecord {
     #[record_change(skip)]
     pub id: Option<i64>,
     pub name: String,
-    #[serde(with = "crate::rpctype::chrono_datetime")]
-    #[record_change(with = "crate::rpctype::chrono_datetime_opt")]
-    pub date: DateTime<chrono::FixedOffset>,
+    /// Local date of the event start `YYYY-MM-DD`, `event.date` in the event DB config
+    pub date: String,
+    /// Local time of the event start `HH:MM:SS`, `event.time` in the event DB config
+    pub time: String,
     #[serde(default = "default_stage_count")]
     pub stage_count: i64,
     pub owner: String,
@@ -686,14 +688,20 @@ pub(crate) struct EventRecord {
 }
 
 fn default_stage_count() -> i64 { 1 }
+fn default_event_date() -> String { Local::now().format("%Y-%m-%d").to_string() }
+fn default_event_time() -> String { "00:00:00".to_string() }
+/// Non-empty string value of a record field
+fn string_field(value: &DbValue) -> Option<String> {
+    value.as_str().filter(|s| !s.is_empty()).map(str::to_string)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, RpcTypeStr)]
 pub(crate) struct EventListItem {
     pub id: EventId,
     pub name: String,
     pub stage_count: i64,
-    #[serde(with = "crate::rpctype::chrono_datetime")]
-    pub date: DateTime<chrono::FixedOffset>,
+    pub date: String,
+    pub time: String,
     pub owner: String,
     pub db_mode: EventDbMode,
 }
@@ -705,7 +713,8 @@ impl EventListItem {
             id: get_field("id")?.to_int().ok_or_else(|| anyhow!("Event id is not an integer"))?,
             name: get_field("name")?.as_str().unwrap_or_default().to_string(),
             stage_count: get_field("stage_count")?.to_int().unwrap_or(default_stage_count()),
-            date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Local::now().fixed_offset()),
+            date: string_field(get_field("date")?).unwrap_or_else(default_event_date),
+            time: string_field(get_field("time")?).unwrap_or_else(default_event_time),
             owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
             db_mode: EventDbMode::from_record_value(get_field("db_mode")?),
         })
@@ -718,7 +727,8 @@ impl EventRecord {
         Ok(Self {
             id: get_field("id")?.to_int(),
             name: get_field("name")?.as_str().unwrap_or_default().to_string(),
-            date: get_field("date")?.to_datetime().unwrap_or_else(|| chrono::Local::now().fixed_offset()),
+            date: string_field(get_field("date")?).unwrap_or_else(default_event_date),
+            time: string_field(get_field("time")?).unwrap_or_else(default_event_time),
             stage_count: get_field("stage_count")?.to_int().unwrap_or(default_stage_count()),
             owner: get_field("owner")?.as_str().unwrap_or_default().to_string(),
             db_mode: EventDbMode::from_record_value(get_field("db_mode")?),

@@ -5,13 +5,12 @@ use std::sync::LazyLock;
 use anyhow::Context;
 use async_sqlite::rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use async_sqlite::{JournalMode, Pool, PoolBuilder};
-use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
 use log::*;
 use qxsql::DbValue;
 use qxsql::sql::{QxSqlApi, record_from_slice};
 use shvclient::ClientCommandSender;
 
-use crate::{localdbsqlapi::LocalDbSqlApi, state::{EventRecord, EventRecordChange}};
+use crate::{localdbsqlapi::LocalDbSqlApi, qe::{normalize_date, normalize_time}, state::{EventRecord, EventRecordChange}};
 
 fn check_file_exists(path: &str) -> bool {
     std::fs::metadata(path).is_ok()
@@ -43,8 +42,8 @@ pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_co
         let config_entries = [
             ("event.name", event_data.name.clone()),
             ("event.stageCount", event_data.stage_count.to_string()),
-            ("event.date", event_data.date.format("%Y-%m-%d").to_string()),
-            ("event.time", event_data.date.format("%H:%M:%S").to_string()),
+            ("event.date", event_data.date.clone()),
+            ("event.time", event_data.time.clone()),
         ];
 
         for (key, value) in config_entries {
@@ -92,25 +91,9 @@ fn read_event_record_change(conn: &Connection) -> anyhow::Result<EventRecordChan
 
     change.name = config.get("event.name").cloned();
     change.stage_count = config.get("event.stageCount").and_then(|v| v.parse::<i64>().ok());
-    let event_date = config.get("event.date").cloned();
-    let event_time = config.get("event.time").cloned();
-    change.date = if let Some(event_date) = event_date && let Some(event_time) = event_time {
-        parse_local_date_time(&event_date, &event_time)
-    } else {
-        None
-    };
+    change.date = config.get("event.date").and_then(|v| normalize_date(v));
+    change.time = config.get("event.time").and_then(|v| normalize_time(v));
     Ok(change)
-}
-
-/// Local date time from `event.date` (`YYYY-MM-DD`) and `event.time` (`HH:MM[:SS]`)
-/// config values, both are required.
-pub(crate) fn parse_local_date_time(date: &str, time: &str) -> Option<DateTime<FixedOffset>> {
-    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-    let time = NaiveTime::parse_from_str(time, "%H:%M:%S")
-            .or_else(|_| NaiveTime::parse_from_str(time, "%H:%M"))
-            .ok()?;
-    let local = Local.from_local_datetime(&date.and_time(time)).earliest()?;
-    Some(local.fixed_offset())
 }
 
 /// Migrates the event DB to the latest version, atomically. The version is stored
@@ -328,14 +311,19 @@ mod tests {
     }
 
     #[test]
-    fn event_date_parsing() {
-        let dt = parse_local_date_time("2024-05-01", "10:30:15").unwrap();
-        assert_eq!(dt.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-05-01 10:30:15");
-        let dt = parse_local_date_time("2024-05-01", "10:30").unwrap();
-        assert_eq!(dt.format("%H:%M:%S").to_string(), "10:30:00");
-        let dt = parse_local_date_time("2024-05-01", "00:00").unwrap();
-        assert_eq!(dt.format("%H:%M:%S").to_string(), "00:00:00");
-        assert!(parse_local_date_time("2024-05-01", "xx").is_none());
+    fn event_record_change_from_config() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("
+            CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT);
+            INSERT INTO config (id, cvalue) VALUES
+                ('event.name', 'Foo'), ('event.stageCount', '2'), ('event.date', '2024-05-01');
+        ").unwrap();
+        let change = read_event_record_change(&conn).unwrap();
+        assert_eq!(change.name.as_deref(), Some("Foo"));
+        assert_eq!(change.stage_count, Some(2));
+        // date and time are independent, a missing time does not drop the date
+        assert_eq!(change.date.as_deref(), Some("2024-05-01"));
+        assert!(change.time.is_none());
     }
 
     #[test]

@@ -87,12 +87,12 @@ impl EventConfig {
 }
 
 /// `YYYY-MM-DD` date, `None` if invalid.
-fn normalize_date(date: &str) -> Option<String> {
+pub(crate) fn normalize_date(date: &str) -> Option<String> {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").ok().map(|d| d.format("%Y-%m-%d").to_string())
 }
 
 /// `HH:MM:SS` time from `HH:MM[:SS]`, `None` if invalid.
-fn normalize_time(time: &str) -> Option<String> {
+pub(crate) fn normalize_time(time: &str) -> Option<String> {
     NaiveTime::parse_from_str(time, "%H:%M:%S")
         .or_else(|_| NaiveTime::parse_from_str(time, "%H:%M"))
         .ok()
