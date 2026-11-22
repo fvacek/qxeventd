@@ -48,8 +48,8 @@ pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_co
         ];
 
         for (key, value) in config_entries {
-            qxsql.exec("INSERT INTO config (ckey, cvalue) VALUES (:ckey, :cvalue)", Some(&record_from_slice(&[
-                ("ckey", key.into()),
+            qxsql.exec("INSERT INTO config (id, cvalue) VALUES (:id, :cvalue)", Some(&record_from_slice(&[
+                ("id", key.into()),
                 ("cvalue", value.into()),
             ]))).await?;
         }
@@ -85,7 +85,7 @@ pub fn import_event_db_file(db_file: &str) -> anyhow::Result<EventRecordChange> 
 
 fn read_event_record_change(conn: &Connection) -> anyhow::Result<EventRecordChange> {
     let mut change = EventRecordChange::default();
-    let mut stmt = conn.prepare("SELECT ckey, CAST(cvalue AS TEXT) FROM config WHERE ckey LIKE 'event.%' AND cvalue IS NOT NULL")?;
+    let mut stmt = conn.prepare("SELECT id, CAST(cvalue AS TEXT) FROM config WHERE id LIKE 'event.%' AND cvalue IS NOT NULL")?;
     let config = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?.trim().to_string())))?
         .filter(|row| row.as_ref().map_or(true, |(_, value)| !value.is_empty()))
         .collect::<Result<HashMap<_, _>, _>>()?;
@@ -133,7 +133,8 @@ fn migrate_event_db_connection(conn: &mut Connection) -> anyhow::Result<()> {
         info!("Migrating event DB from version {version} to {}", migration.version);
         (migration.up)(&tx)
             .with_context(|| format!("Event DB migration to version {} failed", migration.version))?;
-        let updated = tx.execute("UPDATE config SET cvalue = ?1 WHERE ckey = 'db.version'", [migration.version.to_string()])?;
+
+        let updated = tx.execute(&format!("UPDATE config SET cvalue = ?1 WHERE {} = 'db.version'", config_key_column(&tx)?), [migration.version.to_string()])?;
         if updated != 1 {
             anyhow::bail!("Event DB migration to version {} lost the 'db.version' config value", migration.version);
         }
@@ -143,9 +144,15 @@ fn migrate_event_db_connection(conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Name of the `config` table key column, `ckey` before version 31000, `id` since then.
+fn config_key_column(conn: &Connection) -> anyhow::Result<&'static str> {
+    let has_ckey: bool = conn.query_row("SELECT count(*) > 0 FROM pragma_table_info('config') WHERE name = 'ckey'", [], |row| row.get(0))?;
+    Ok(if has_ckey { "ckey" } else { "id" })
+}
+
 fn read_db_version(conn: &Connection) -> anyhow::Result<i64> {
     let version: Option<String> = conn
-        .query_row("SELECT CAST(cvalue AS TEXT) FROM config WHERE ckey = 'db.version'", [], |row| row.get(0))
+        .query_row(&format!("SELECT CAST(cvalue AS TEXT) FROM config WHERE {} = 'db.version'", config_key_column(conn)?), [], |row| row.get(0))
         .optional()
         .context("Cannot read event DB config, it is not an event database")?
         .flatten();
@@ -264,7 +271,7 @@ pub fn is_default_value(value: &DbValue, default: &DbValue) -> bool {
 /// Event DB schema, QuickEvent exports have this version or later.
 const CREATE_EVENT_DB_SQL: &str = include_str!("create_event_db.sql");
 /// `db.version` set by [`CREATE_EVENT_DB_SQL`].
-const CREATE_EVENT_DB_VERSION: i64 = 30800;
+const CREATE_EVENT_DB_VERSION: i64 = 30900;
 
 /// Event DB migration, `version` is the `db.version` config value once `up` is applied.
 /// The `db.version` is updated by the migration runner, not by the `up`.
@@ -279,19 +286,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 31000,
         up: |conn| {
             add_column_if_missing(conn, "qxchanges", "paid", "boolean NOT NULL DEFAULT 0")?;
-            conn.execute_batch("
-            CREATE TABLE config_new (
-                id integer PRIMARY KEY,
-                ckey character varying,
-                cname character varying,
-                cvalue character varying,
-                ctype character varying,
-                CONSTRAINT config_ckey_unique UNIQUE (ckey)
-            );
-            INSERT INTO config_new (id, ckey, cname, cvalue, ctype) SELECT ROW_NUMBER() OVER (ORDER BY ckey), ckey, cname, cvalue, ctype FROM config;
-            DROP TABLE config;
-            ALTER TABLE config_new RENAME TO config;
-            ")?;
+            conn.execute_batch("ALTER TABLE config RENAME COLUMN ckey TO id")?;
             Ok(())
         }
     },
@@ -398,7 +393,7 @@ mod tests {
     fn newer_db_is_rejected() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate_event_db_connection(&mut conn).unwrap();
-        conn.execute("UPDATE config SET cvalue = ?1 WHERE ckey = 'db.version'", [(latest_db_version() + 1).to_string()]).unwrap();
+        conn.execute("UPDATE config SET cvalue = ?1 WHERE id = 'db.version'", [(latest_db_version() + 1).to_string()]).unwrap();
         assert!(migrate_event_db_connection(&mut conn).is_err());
     }
 

@@ -48,7 +48,7 @@ struct StageConfig {
 impl EventConfig {
     /// Missing or invalid values are replaced by defaults.
     pub(crate) async fn load(sql_api: &impl QxSqlApi) -> anyhow::Result<Self> {
-        let result = sql_api.query("SELECT ckey, CAST(cvalue AS TEXT) AS cvalue FROM config WHERE ckey IS NOT NULL", None).await?;
+        let result = sql_api.query("SELECT id, CAST(cvalue AS TEXT) AS cvalue FROM config WHERE id IS NOT NULL", None).await?;
         let config = result.rows.iter()
             .filter_map(|row| {
                 let key = row.first()?.as_str()?;

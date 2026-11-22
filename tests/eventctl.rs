@@ -25,7 +25,7 @@ const LATEST_EVENT_DB_VERSION: i64 = 31000;
 
 /// Minimal event DB `config` table with the latest `db.version`.
 fn minimal_config_sql() -> String {
-    format!("CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT); INSERT INTO config (ckey, cvalue) VALUES ('db.version', '{LATEST_EVENT_DB_VERSION}');")
+    format!("CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT); INSERT INTO config (id, cvalue) VALUES ('db.version', '{LATEST_EVENT_DB_VERSION}');")
 }
 
 fn compress(data: &[u8]) -> Vec<u8> {
@@ -75,7 +75,7 @@ fn assert_no_commit_tmp_files(event_id: i64) {
 }
 
 fn read_config(conn: &Connection, key: &str) -> String {
-    conn.query_row("SELECT cvalue FROM config WHERE ckey = ?1", [key], |row| row.get(0)).unwrap()
+    conn.query_row("SELECT cvalue FROM config WHERE id = ?1", [key], |row| row.get(0)).unwrap()
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn push_db_commit_rejects_sha1_mismatch() {
         client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
         let snapshot = pull_event_db(&mut client, event_id).await;
         let ((), modified) = with_event_db_image(&snapshot, |conn| {
-            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
+            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE id = 'event.name'", []).unwrap();
         });
         let compressed = compress(&modified);
         for data in compressed.chunks(push_db_max_write(&mut client, event_id).await) {
@@ -426,7 +426,7 @@ fn push_db_commit_replaces_opened_event_db() {
 
         let snapshot = pull_event_db(&mut client, event_id).await;
         let ((), modified) = with_event_db_image(&snapshot, |conn| {
-            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
+            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE id = 'event.name'", []).unwrap();
         });
 
         let max_write = push_db_max_write(&mut client, event_id).await;
@@ -452,8 +452,9 @@ fn push_db_commit_migrates_older_database() {
 
         let snapshot = pull_event_db(&mut client, event_id).await;
         let ((), modified) = with_event_db_image(&snapshot, |conn| {
-            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE ckey = 'event.name'", []).unwrap();
-            conn.execute("UPDATE config SET cvalue = '30800' WHERE ckey = 'db.version'", []).unwrap();
+            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE id = 'event.name'", []).unwrap();
+            conn.execute("UPDATE config SET cvalue = '30800' WHERE id = 'db.version'", []).unwrap();
+            conn.execute_batch("ALTER TABLE config RENAME COLUMN id TO ckey").unwrap();
         });
 
         let max_write = push_db_max_write(&mut client, event_id).await;
@@ -660,8 +661,8 @@ fn push_db_commit_updates_event_record() {
 
         let ((), db_image) = with_event_db_image(b"", |conn| {
             conn.execute_batch(&format!("
-                CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT);
-                INSERT INTO config (ckey, cvalue) VALUES
+                CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT);
+                INSERT INTO config (id, cvalue) VALUES
                     ('db.version', '{LATEST_EVENT_DB_VERSION}'),
                     ('event.name', 'Pushed event'),
                     ('event.stageCount', '3'),
@@ -682,8 +683,8 @@ fn push_db_commit_updates_event_record() {
         // fields missing in the pushed DB are kept
         let ((), db_image) = with_event_db_image(b"", |conn| {
             conn.execute_batch(&format!("
-                CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT);
-                INSERT INTO config (ckey, cvalue) VALUES
+                CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT);
+                INSERT INTO config (id, cvalue) VALUES
                     ('db.version', '{LATEST_EVENT_DB_VERSION}'),
                     ('event.name', 'Renamed');
             ")).unwrap();
@@ -707,8 +708,8 @@ fn push_db_commit_updates_event_record_from_quickevent_config() {
         // QuickEvent stores typed values, ints as SQLite integers
         let ((), db_image) = with_event_db_image(b"", |conn| {
             conn.execute_batch(&format!("
-                CREATE TABLE config (ckey TEXT PRIMARY KEY, cvalue TEXT, ctype TEXT);
-                INSERT INTO config (ckey, cvalue, ctype) VALUES
+                CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT, ctype TEXT);
+                INSERT INTO config (id, cvalue, ctype) VALUES
                     ('db.version', {LATEST_EVENT_DB_VERSION}, 'int'),
                     ('event.name', 'QE event', 'QString'),
                     ('event.stageCount', 4, 'int'),
