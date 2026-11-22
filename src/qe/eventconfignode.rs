@@ -11,7 +11,7 @@ use crate::eventsqlapi::LocalEventSqlApi;
 use crate::rpctype::RpcTypeStr;
 use crate::rpcvalueext::RpcValueExt;
 use crate::{anyhow_to_rpc_error, split_first_fragment, str_to_rpc_error};
-use crate::state::{EventId, SharedAppState};
+use crate::state::{EventDbMode, EventId, SharedAppState, State};
 
 const METH_GET: &str = "get";
 const METH_SET: &str = "set";
@@ -208,6 +208,7 @@ async fn set_config_value(sql_api: &LocalEventSqlApi, key: &str, value: &str, is
 }
 
 /// [`EventConfig`] exposed as a node tree, `stages/<n>` is the stage `n` config.
+/// Values can be set only in [`EventDbMode::Master`] DB mode.
 pub(crate) async fn resolve_event_config_request(rq: RpcMessage, event_id: EventId, path: String, app_state: SharedAppState, client_cmd_tx: ClientCommandSender) -> RequestHandlerResult {
     let sql_api = LocalEventSqlApi::new(event_id, app_state.clone(), client_cmd_tx.clone());
     let config = match EventConfig::load(&sql_api).await {
@@ -235,9 +236,13 @@ pub(crate) async fn resolve_event_config_request(rq: RpcMessage, event_id: Event
             match method {
                 METH_GET => m.resolve(methods, async move || Ok(node.get(&config))),
                 METH_SET => {
-                    let rights = escalate_event_owner_rights(&rq, app_state, Some(event_id), method.to_owned(), methods).await;
+                    let rights = escalate_event_owner_rights(&rq, app_state.clone(), Some(event_id), method.to_owned(), methods).await;
                     let issuer = sanitize_user_id(&rq).map(str::to_owned);
                     m.resolve(rights, async move || {
+                        let db_mode = State::event_db_mode(&app_state, event_id).await.map_err(anyhow_to_rpc_error)?;
+                        if db_mode != EventDbMode::Master {
+                            return Err(str_to_rpc_error(&format!("Event config can be set only in Master DB mode, current mode: {db_mode:?}")));
+                        }
                         let (key, value) = node.config_value(rq.param().unwrap_or_default())
                             .map_err(|err| str_to_rpc_error(&err))?;
                         set_config_value(&sql_api, &key, &value, issuer).await.map_err(anyhow_to_rpc_error)?;

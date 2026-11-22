@@ -1097,6 +1097,11 @@ fn event_config_node_get_set() {
         assert!(res.contains(r#""get""#) && res.contains(r#""set""#), "{res}");
         assert_eq!(get(&mut client, "stageCount").await, RpcValue::from(1));
 
+        // value can be set only in Master DB mode
+        let err = set(&mut client, "name", r#""Renamed""#).await.unwrap_err();
+        assert!(err.message.contains("Master DB mode"), "{err}");
+        set_db_mode(&mut client, event_id, "Master", "fanda").await.unwrap();
+
         // stranger with Read access cannot set, owner can
         assert_permission_denied(client.call(request(&name, "set", r#""hacked""#, "eve", AccessLevel::Read)).await);
         client.signals.clear();
@@ -1151,6 +1156,7 @@ fn event_config_set_emits_recchng() {
         let mut client = TestClient::new().await;
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
         client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
+        set_db_mode(&mut client, event_id, "Master", "fanda").await.unwrap();
         let config_path = |node: &str| format!("eventctl/{event_id}/config/{node}");
         client.signals.clear();
 
