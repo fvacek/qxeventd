@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use qxsql::{RecDeleteParam, RecUpdateParam};
+use qxsql::{RecDeleteParam, RecId, RecUpdateParam};
 use qxsql::sql::{ExecResult, QueryResult, RecChng, RecInsertParam};
 use qxsql::sql::Record;
 use shvclient::ClientCommandSender;
-use shvproto::{make_list, to_rpcvalue, from_rpcvalue};
+use shvproto::{RpcValue, make_list, to_rpcvalue, from_rpcvalue};
 use crate::state::remote_event_sql_path;
 use crate::{call_rpc_error_to_anyhow, state::EventId};
 
@@ -40,18 +40,18 @@ impl qxsql::QxSqlApi for RemoteEventSqlApi {
     }
 
     // Record operations are forwarded as RPC calls, so the remote side emits the recchng signals.
-    async fn create_record(&self, table: &str, record: &Record) -> anyhow::Result<i64> {
+    async fn create_record(&self, table: &str, record: &Record) -> anyhow::Result<RecId> {
         let param = RecInsertParam {
             table: table.to_string(),
             record: record.clone(),
             issuer: None,
         };
-        let id: i64 = self.rpc_client.call_rpc_method(remote_event_sql_path(self.event_id), "create", Some(to_rpcvalue(&param)?), None, None, None::<fn(f64)>).await
+        let id: RpcValue = self.rpc_client.call_rpc_method(remote_event_sql_path(self.event_id), "create", Some(to_rpcvalue(&param)?), None, None, None::<fn(f64)>).await
             .map_err(call_rpc_error_to_anyhow)?;
-        Ok(id)
+        Ok(from_rpcvalue(&id)?)
     }
 
-    async fn update_record(&self, table: &str, id: i64, record: &Record) -> anyhow::Result<bool> {
+    async fn update_record(&self, table: &str, id: RecId, record: &Record) -> anyhow::Result<bool> {
         let param = RecUpdateParam {
             table: table.to_string(),
             id,
@@ -63,7 +63,7 @@ impl qxsql::QxSqlApi for RemoteEventSqlApi {
         Ok(updated)
     }
 
-    async fn delete_record(&self, table: &str, id: i64) -> anyhow::Result<bool> {
+    async fn delete_record(&self, table: &str, id: RecId) -> anyhow::Result<bool> {
         let param = RecDeleteParam {
             table: table.to_string(),
             id,

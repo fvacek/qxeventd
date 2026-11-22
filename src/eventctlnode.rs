@@ -379,14 +379,14 @@ pub(crate) async fn request_handler(
                                 if let Some(qxchange_id) = params.change_id {
                                     if params.late_entry.is_none() {
                                         // delete existing record with no changes
-                                        let ok = qxsql.delete_record_with_recchng("qxchanges", qxchange_id, None).await.map_err(anyhow_to_rpc_error)?;
+                                        let ok = qxsql.delete_record_with_recchng("qxchanges", qxchange_id.into(), None).await.map_err(anyhow_to_rpc_error)?;
                                         return Ok(RpcValue::from(ok))
                                     }
                                     let qxchange = QxChangeRecordChange {
                                         data: params.late_entry.map(Data::LateEntry),
                                         ..Default::default()
                                     };
-                                    let ok = qxsql.update_record_with_recchng("qxchanges", qxchange_id, &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
+                                    let ok = qxsql.update_record_with_recchng("qxchanges", qxchange_id.into(), &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
                                     Ok(RpcValue::from(ok))
                                 } else {
                                     let (foreign_table, foreign_id) = if let Some(le) = &params.late_entry {
@@ -412,7 +412,7 @@ pub(crate) async fn request_handler(
                                     };
 
                                     let id = qxsql.create_record_with_recchng("qxchanges", &qxchange.to_record(), None).await.map_err(anyhow_to_rpc_error)?;
-                                    Ok(RpcValue::from(id))
+                                    shvproto::to_rpcvalue(&id).map_err(|err| str_to_rpc_error(&err.to_string()))
                                 }
                             })
                         },

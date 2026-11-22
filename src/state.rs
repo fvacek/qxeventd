@@ -12,7 +12,7 @@ use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Local;
 use log::*;
-use qxsql::{QxSqlApiRecChng, RecChng, RecOp};
+use qxsql::{QxSqlApiRecChng, RecChng, RecId, RecOp};
 use qxsql::{DbValue, Record, ToRecord};
 use qxsql::{sql::{QxSqlApi, record_from_slice}};
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,7 @@ impl State {
         let db_pool = app_state.read().await.db_pool.clone();
         let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
         let event_id = qxsql.create_record_with_recchng("events", &event_record.to_record(), Some(owner)).await?;
+        let event_id = event_id.as_int().ok_or_else(|| anyhow!("Created event has non-integer id: {event_id}"))?;
         info!("Created event {event_id}");
         Ok((event_id, api_token))
     }
@@ -103,7 +104,7 @@ impl State {
             false
         } else {
             let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
-            let updated = qxsql.update_record_with_recchng("events", event_id, &rec, None).await?;
+            let updated = qxsql.update_record_with_recchng("events", event_id.into(), &rec, None).await?;
             Self::forget_event_record(app_state, event_id).await;
             updated
         };
@@ -129,7 +130,7 @@ impl State {
         let mut record = Record::new();
         record.insert("db_mode".to_string(), db_mode.as_record_value().into());
         let qxsql = LocalDbSqlApi::new(db_pool, rpc_client.clone());
-        let result = qxsql.update_record_with_recchng("events", event_id, &record, None).await;
+        let result = qxsql.update_record_with_recchng("events", event_id.into(), &record, None).await;
         Self::forget_event_record(app_state, event_id).await;
         if matches!(result, Ok(true)) {
             emit_event_db_mode_chng(&rpc_client, event_id, db_mode);
@@ -361,7 +362,7 @@ impl State {
             .map_err(|e| anyhow!("Failed to remove mount point of event {event_id}: {e}"))?;
         Self::close_event(app_state, event_id, rpc_client.clone()).await?;
         let qxsql = LocalDbSqlApi::new(db_pool, rpc_client);
-        let was_deleted = qxsql.delete_record_with_recchng("events", event_id, None).await?;
+        let was_deleted = qxsql.delete_record_with_recchng("events", event_id.into(), None).await?;
         Self::forget_event_record(app_state, event_id).await;
         Ok(was_deleted)
     }
@@ -425,7 +426,7 @@ async fn close_event_db(db: &async_sqlite::Pool) -> anyhow::Result<()> {
 
 async fn load_event_record(db_pool: &async_sqlite::Pool, event_id: EventId) -> anyhow::Result<EventRecord> {
     let qxsql = LocalDbSqlApi::new_without_recchng(db_pool.clone());
-    let record = qxsql.read_record("events", event_id, None).await?
+    let record = qxsql.read_record("events", event_id.into(), None).await?
         .ok_or_else(||anyhow!("Event id: {event_id} not found"))?;
     EventRecord::from_record(&record)
 }
@@ -539,11 +540,11 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
     match &recchng.op {
         RecOp::Insert => match recchng.record.as_ref() {
             Some(record) => {
-                if recchng.id <= 0 {
+                if !is_valid_rec_id(&recchng.id) {
                     return Err(anyhow!("Insert recchng to table '{table}' has no id, replica mode requires id even for inserts", table = recchng.table));
                 }
                 let mut record = remove_default_and_generated_columns(&recchng.table, record);
-                record.insert("id".to_owned(), recchng.id.into());
+                record.insert("id".to_owned(), recchng.id.clone().into());
                 info!(target: "ApplyRecChng", "Insert recchng: table='{}', id={}", recchng.table, recchng.id);
                 sql_api.create_record_with_recchng(&recchng.table, &record, recchng.issuer.clone()).await?;
                 Ok(())
@@ -555,11 +556,11 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
                 info!(target: "ApplyRecChng", "Update recchng: table='{}', id={}", recchng.table, recchng.id);
                 let mut record = record.clone();
                 remove_generated_columns(&recchng.table, &mut record);
-                if record.is_empty() || recchng.id == 0 {
+                if record.is_empty() || !is_valid_rec_id(&recchng.id) {
                     return Ok(());
                 }
                 sql_api
-                    .update_record_with_recchng(&recchng.table, recchng.id, &record, recchng.issuer.clone())
+                    .update_record_with_recchng(&recchng.table, recchng.id.clone(), &record, recchng.issuer.clone())
                     .await?;
                 Ok(())
             }
@@ -568,10 +569,18 @@ async fn apply_remote_db_recchng(app_state: SharedAppState, event_id: EventId, r
         RecOp::Delete => {
             info!(target: "ApplyRecChng", "Delete recchng: table='{}', id={}", recchng.table, recchng.id);
             sql_api
-                .delete_record_with_recchng(&recchng.table, recchng.id, recchng.issuer.clone())
+                .delete_record_with_recchng(&recchng.table, recchng.id.clone(), recchng.issuer.clone())
                 .await?;
             Ok(())
         }
+    }
+}
+
+/// Positive integer or non-empty string record id.
+fn is_valid_rec_id(id: &RecId) -> bool {
+    match id {
+        RecId::Int(id) => *id > 0,
+        RecId::String(id) => !id.is_empty(),
     }
 }
 

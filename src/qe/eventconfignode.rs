@@ -1,6 +1,5 @@
-use anyhow::anyhow;
 use chrono::{DateTime, FixedOffset};
-use qxsql::{DbValue, QxSqlApi, QxSqlApiRecChng, sql::record_from_slice};
+use qxsql::{QxSqlApi, QxSqlApiRecChng, sql::record_from_slice};
 use shvclient::{ClientCommandSender, clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request}};
 use shvproto::{RpcValue, Value};
 use shvrpc::{RpcMessage, metamethod::{AccessLevel, Flags, MetaMethod}};
@@ -193,16 +192,13 @@ impl ConfigNode {
 
 /// Inserts or updates the event `config` table value of `key` and emits `recchng`.
 async fn set_config_value(sql_api: &LocalEventSqlApi, key: &str, value: &str, issuer: Option<String>) -> anyhow::Result<()> {
-    let result = sql_api.query("SELECT id FROM config WHERE ckey = :ckey", Some(&record_from_slice(&[("ckey", key.into())]))).await?;
-    let record = record_from_slice(&[("ckey", key.into()), ("cvalue", value.into())]);
-    match result.rows.first().and_then(|row| row.first()) {
-        Some(DbValue::Int(id)) => {
-            sql_api.update_record_with_recchng("config", *id, &record, issuer).await?;
-        }
-        Some(id) => return Err(anyhow!("Config key '{key}' has invalid id: {id:?}")),
-        None => {
-            sql_api.create_record_with_recchng("config", &record, issuer).await?;
-        }
+    let result = sql_api.query("SELECT id FROM config WHERE id = :id", Some(&record_from_slice(&[("id", key.into())]))).await?;
+    if result.rows.is_empty() {
+        let record = record_from_slice(&[("id", key.into()), ("cvalue", value.into())]);
+        sql_api.create_record_with_recchng("config", &record, issuer).await?;
+    } else {
+        let record = record_from_slice(&[("cvalue", value.into())]);
+        sql_api.update_record_with_recchng("config", key.into(), &record, issuer).await?;
     }
     Ok(())
 }

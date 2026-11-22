@@ -1498,8 +1498,8 @@ dependencies = [
 
 [[package]]
 name = "qxsql"
-version = "0.2.0"
-source = "git+https://github.com/fvacek/qxsql.git?branch=master#6a06693e090bb0ca2390674cb51e1fcc8a0b9bd6"
+version = "0.3.0"
+source = "git+https://github.com/fvacek/qxsql.git?branch=master#b13a48e8e32958265fbe5145af8cec75c0178cdb"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1517,7 +1517,7 @@ dependencies = [
 [[package]]
 name = "qxsql-derive"
 version = "0.1.0"
-source = "git+https://github.com/fvacek/qxsql.git?branch=master#6a06693e090bb0ca2390674cb51e1fcc8a0b9bd6"
+source = "git+https://github.com/fvacek/qxsql.git?branch=master#b13a48e8e32958265fbe5145af8cec75c0178cdb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2368,7 +2368,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

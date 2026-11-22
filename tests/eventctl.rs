@@ -1167,18 +1167,16 @@ fn event_config_set_emits_recchng() {
         assert_eq!(recchngs.len(), 1, "{recchngs:?}");
         let recchng = recchngs[0].as_map();
         assert_eq!(recchng["table"].as_str(), "config");
-        assert!(recchng["id"].as_int() > 0, "{}", recchngs[0].to_cpon());
+        assert_eq!(recchng["id"].as_str(), "event.name", "{}", recchngs[0].to_cpon());
         assert_eq!(recchng["op"].as_str(), "Update");
         assert_eq!(recchng["issuer"].as_str(), "fanda");
-        assert_eq!(recchng["record"].as_map()["ckey"].as_str(), "event.name");
         assert_eq!(recchng["record"].as_map()["cvalue"].as_str(), "Renamed");
-        let name_id = recchng["id"].as_int();
 
         // the same row is updated again
         client.call(request(&config_path("name"), "set", r#""Renamed again""#, "fanda", AccessLevel::Write)).await.unwrap();
         let recchngs = take_recchng_signals(&mut client, event_id);
         assert_eq!(recchngs.len(), 1, "{recchngs:?}");
-        assert_eq!(recchngs[0].as_map()["id"].as_int(), name_id);
+        assert_eq!(recchngs[0].as_map()["id"].as_str(), "event.name");
         let res = client.call(request(&config_path("name"), "get", "", "fanda", AccessLevel::Read)).await.unwrap();
         assert_eq!(res.as_str(), "Renamed again");
 
@@ -1188,9 +1186,8 @@ fn event_config_set_emits_recchng() {
         assert_eq!(recchngs.len(), 1, "{recchngs:?}");
         let recchng = recchngs[0].as_map();
         assert_eq!(recchng["op"].as_str(), "Insert");
-        assert!(recchng["id"].as_int() > 0, "{}", recchngs[0].to_cpon());
-        assert_ne!(recchng["id"].as_int(), name_id);
-        assert_eq!(recchng["record"].as_map()["ckey"].as_str(), "event.place");
+        assert_eq!(recchng["id"].as_str(), "event.place", "{}", recchngs[0].to_cpon());
+        assert_eq!(recchng["record"].as_map()["id"].as_str(), "event.place");
         let res = client.call(request(&config_path("place"), "get", "", "fanda", AccessLevel::Read)).await.unwrap();
         assert_eq!(res.as_str(), "Prague");
     });
