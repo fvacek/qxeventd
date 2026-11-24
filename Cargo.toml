@@ -8,8 +8,7 @@ members = ["rpc-type-derive"]
 
 [dependencies]
 rpc-type-derive = { path = "rpc-type-derive" }
-const_format = "0.2"
-shvproto = { version = "8.0", features = ["serde"] }
+shvproto = { version = "8.1", features = ["serde"] }
 shvrpc = { version = "23.0" }
 shvclient = { git = "https://github.com/silicon-heaven/libshvclient-rs", branch = "main", default-features = false, features = ["smol"]}
 qxsql = { git = "https://github.com/fvacek/qxsql.git", branch = "master", default-features = false, features = ["recchng-smol"] }
@@ -48,3 +47,7 @@ smol-potat = "1.1.2"
 # shvclient = { path = "../libshvclient-rs" }
 # [patch."https://github.com/fvacek/qxsql"]
 # qxsql = { path = "../qxsql" }
+
+# TODO: remove after shvproto 8.1.0 is released, https://github.com/silicon-heaven/libshvproto-rs/pull/137
+[patch.crates-io]
+shvproto = { git = "https://github.com/silicon-heaven/libshvproto-rs", branch = "rpc-type-str" }

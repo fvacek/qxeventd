@@ -6,7 +6,7 @@ use serde::{Serialize, Deserialize};
 use crate::eventsqlapi::LocalEventSqlApi;
 use crate::filenode::{META_FILE_APPEND, META_FILE_CRC, META_FILE_READ, META_FILE_SHA1, META_FILE_SIZE, META_FILE_STAT, META_FILE_TRUNCATE, META_FILE_WRITE};
 use crate::rpcvalueext::RpcValueExt;
-use crate::rpctype::RpcTypeStr;
+use shvproto::RpcTypeStr;
 use shvclient::ClientCommandSender;
 use shvclient::clientnode::{META_METHOD_DIR, META_METHOD_LS, Method, RequestHandlerResult, err_unresolved_request};
 use shvproto::{RpcValue, from_rpcvalue};

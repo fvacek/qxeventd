@@ -1,7 +1,8 @@
 use std::fmt::Display;
 
 use qxsql::{DbValue, ToRecord};
-use rpc_type_derive::{RecordChange, RpcTypeStr};
+use rpc_type_derive::RecordChange;
+use shvproto::RpcTypeStr;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, ToRecord, RecordChange, RpcTypeStr)]
@@ -14,8 +15,8 @@ pub struct QxChangeRecord {
     pub status: Status,
     pub status_message: Option<String>,
     pub stage_id: i64,
-    #[serde(with = "crate::rpctype::chrono_datetime")]
-    #[record_change(with = "crate::rpctype::chrono_datetime_opt")]
+    #[serde(with = "shvproto::datetime::chrono_datetime")]
+    #[record_change(with = "shvproto::datetime::chrono_datetime_opt")]
     pub created: chrono::DateTime<chrono::FixedOffset>,
     pub paid: bool,
 }
@@ -90,7 +91,6 @@ pub enum Data {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpctype::RpcTypeStr;
 
     #[test]
     fn rpc_types() {
