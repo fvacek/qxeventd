@@ -14,7 +14,7 @@
 //!     #[record_change(skip)]
 //!     id: Option<i64>,
 //!     name: String,
-//!     #[record_change(with = "crate::rpctype::chrono_datetime_opt")]
+//!     #[record_change(with = "shvproto::datetime::chrono_datetime_opt")]
 //!     date: DateTime<FixedOffset>,
 //!     #[record_change(rename = "master_db_mode")]
 //!     db_mode: EventDbMode,
@@ -28,7 +28,7 @@
 //! - `#[record_change(derive(...))]` — derives applied to the change struct, replacing the
 //!   default `Debug, Clone, Default, serde::Serialize, serde::Deserialize`; `derive()` means
 //!   no derives
-//! - `#[record_change(rpc_type_str)]` — additionally derive `crate::rpctype::RpcTypeStr` for the
+//! - `#[record_change(rpc_type_str)]` — additionally derive `shvproto::RpcTypeStr` for the
 //!   change struct, every field type has to implement `RpcTypeStr` then
 //!
 //! # Field attributes
@@ -147,7 +147,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
         ],
     };
     if struct_attrs.rpc_type_str {
-        derives.push(syn::parse_quote!(crate::rpctype::RpcTypeStr));
+        derives.push(syn::parse_quote!(::shvproto::RpcTypeStr));
     }
     // `#[serde]` field attributes are only known with a serde derive
     let has_serde = derives.iter().any(|path| {

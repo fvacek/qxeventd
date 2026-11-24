@@ -7,7 +7,7 @@ use shvrpc::{RpcMessage, metamethod::{AccessLevel, Flags, MetaMethod}};
 use super::{EventConfig, KEY_COUNTRY, KEY_CURRENT_STAGE, KEY_DATE, KEY_DIRECTOR, KEY_MAIN_REFEREE, KEY_NAME, KEY_PLACE, KEY_STAGE_COUNT, KEY_TIME, normalize_date, normalize_time, stage_start_date_time_key};
 use crate::eventctlnode::{escalate_event_owner_rights, sanitize_user_id};
 use crate::eventsqlapi::LocalEventSqlApi;
-use crate::rpctype::RpcTypeStr;
+use shvproto::RpcTypeStr;
 use crate::rpcvalueext::RpcValueExt;
 use crate::{anyhow_to_rpc_error, split_first_fragment, str_to_rpc_error};
 use crate::state::{EventDbMode, EventId, SharedAppState, State};

@@ -31,7 +31,8 @@ use crate::eventsqlapi::LocalEventSqlApi;
 use crate::generate_api_token;
 use crate::global_config;
 use crate::qxeventconfig::QxEventConfig;
-use crate::rpctype::{RecordChange, RpcTypeStr};
+use rpc_type_derive::RecordChange;
+use shvproto::RpcTypeStr;
 use crate::rpcvalueext::RpcValueExt;
 
 

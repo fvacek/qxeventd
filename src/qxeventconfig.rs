@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::rpctype::RpcTypeStr;
+use shvproto::RpcTypeStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, RpcTypeStr)]
 pub enum Role {

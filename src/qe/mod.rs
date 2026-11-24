@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime};
 use qxsql::{QxSqlApi, sql::DbValue};
-use rpc_type_derive::RpcTypeStr;
+use shvproto::RpcTypeStr;
 use serde::{Deserialize, Serialize};
 
 const KEY_NAME: &str = "event.name";
@@ -41,7 +41,7 @@ pub(crate) struct EventConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, RpcTypeStr)]
 struct StageConfig {
-    #[serde(with = "crate::rpctype::chrono_datetime")]
+    #[serde(with = "shvproto::datetime::chrono_datetime")]
     start_date_time: DateTime<FixedOffset>,
 }
 

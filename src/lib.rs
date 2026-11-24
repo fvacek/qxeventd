@@ -18,7 +18,8 @@ use crate::{
 };
 
 pub mod rpcvalueext;
-mod rpctype;
+#[cfg(test)]
+mod record_change_tests;
 mod state;
 pub mod config;
 mod migrate;
