@@ -3,13 +3,12 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::Context;
-use async_sqlite::rusqlite::{Connection, OptionalExtension, TransactionBehavior};
-use async_sqlite::{JournalMode, Pool, PoolBuilder};
 use log::*;
 use qxsql::DbValue;
 use qxsql::sql::{QxSqlApi, record_from_slice};
 use shvclient::ClientCommandSender;
 
+use crate::db::{Connection, Db, TransactionBehavior, query_all, query_one, query_value};
 use crate::{localdbsqlapi::LocalDbSqlApi, qe::{normalize_date, normalize_time}, state::{EventRecord, EventRecordChange}};
 
 fn check_file_exists(path: &str) -> bool {
@@ -21,7 +20,7 @@ fn create_file_path(db_file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_command_sender: ClientCommandSender) -> anyhow::Result<Pool> {
+pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_command_sender: ClientCommandSender) -> anyhow::Result<Db> {
     let db_file_exists = check_file_exists(db_file);
     if !db_file_exists {
         info!("Creating event database file {}", db_file);
@@ -29,15 +28,11 @@ pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_co
     }
     info!("Opening db {db_file}");
 
-    let pool = PoolBuilder::new()
-                    .path(db_file)
-                    .journal_mode(JournalMode::Wal);
-    let pool = pool.open()
-                    .await?;
+    let db = Db::open(db_file).await?;
 
     // Update the database schema, atomically
-    pool.conn_mut(|conn| Ok(migrate_event_db_connection(conn))).await??;
-    let qxsql = LocalDbSqlApi::new(pool.clone(), client_command_sender);
+    migrate_event_db_connection(&mut *db.conn().await?).await?;
+    let qxsql = LocalDbSqlApi::new(db.clone(), client_command_sender);
     if !db_file_exists {
         let config_entries = [
             ("event.name", event_data.name.clone()),
@@ -55,39 +50,40 @@ pub async fn migrate_event_db(db_file: &str, event_data: &EventRecord, client_co
     }
     info!("Migration of: {db_file} OK");
 
-    Ok(pool)
+    Ok(db)
 }
 
 /// Checks that the file can be opened as an event database, migrates it, so it can be
 /// installed without a risk of the event failing to open afterwards, and reads the event
 /// record values from its config. Failure to read them is not an error, empty change is
-/// returned then. Blocking.
+/// returned then.
 ///
-/// The database is switched to the rollback journal mode, so all changes are in the main file
-/// once the connection is closed, and no `-wal` or `-shm` file is left next to it, the file
-/// can be moved then. The event pool switches it back to WAL mode when it is opened.
-/// The connection is closed explicitly, so a failure to close it is reported.
-pub fn import_event_db_file(db_file: &str) -> anyhow::Result<EventRecordChange> {
-    let mut conn = Connection::open(db_file)?;
-    let journal_mode: String = conn.query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))?;
-    if !journal_mode.eq_ignore_ascii_case("delete") {
-        anyhow::bail!("Cannot switch {db_file} to rollback journal mode, journal mode is {journal_mode}");
-    }
-    migrate_event_db_connection(&mut conn)?;
-    let change = read_event_record_change(&conn).unwrap_or_else(|err| {
-        warn!("Failed to read event record change from {db_file}: {err}");
-        EventRecordChange::default()
-    });
-    conn.close().map_err(|(_, err)| err)?;
+/// The database is checkpointed and closed, see [`Db::close`], so all changes are in the main
+/// file and no `-wal` file is left next to it, the file can be moved then. A failure to close
+/// it is reported.
+pub async fn import_event_db_file(db_file: &str) -> anyhow::Result<EventRecordChange> {
+    let db = Db::open(db_file).await?;
+    let result = async {
+        let mut conn = db.conn().await?;
+        migrate_event_db_connection(&mut conn).await?;
+        anyhow::Ok(read_event_record_change(&conn).await.unwrap_or_else(|err| {
+            warn!("Failed to read event record change from {db_file}: {err}");
+            EventRecordChange::default()
+        }))
+    }.await;
+    let close_result = db.close().await;
+    let change = result?;
+    close_result?;
     Ok(change)
 }
 
-fn read_event_record_change(conn: &Connection) -> anyhow::Result<EventRecordChange> {
+async fn read_event_record_change(conn: &Connection) -> anyhow::Result<EventRecordChange> {
     let mut change = EventRecordChange::default();
-    let mut stmt = conn.prepare("SELECT id, CAST(cvalue AS TEXT) FROM config WHERE id LIKE 'event.%' AND cvalue IS NOT NULL")?;
-    let config = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?.trim().to_string())))?
-        .filter(|row| row.as_ref().map_or(true, |(_, value)| !value.is_empty()))
-        .collect::<Result<HashMap<_, _>, _>>()?;
+    let config = query_all(conn, "SELECT id, CAST(cvalue AS TEXT) FROM config WHERE id LIKE 'event.%' AND cvalue IS NOT NULL", ()).await?
+        .into_iter()
+        .map(|row| Ok((row.get::<String>(0)?, row.get::<String>(1)?.trim().to_string())))
+        .filter(|row: &anyhow::Result<(String, String)>| row.as_ref().map_or(true, |(_, value)| !value.is_empty()))
+        .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
     change.name = config.get("event.name").cloned();
     change.stage_count = config.get("event.stageCount").and_then(|v| v.parse::<i64>().ok());
@@ -99,14 +95,14 @@ fn read_event_record_change(conn: &Connection) -> anyhow::Result<EventRecordChan
 /// Migrates the event DB to the latest version, atomically. The version is stored
 /// in the `db.version` config value, a database exported by QuickEvent has it set too.
 /// An empty database gets the [`CREATE_EVENT_DB_SQL`] schema first.
-fn migrate_event_db_connection(conn: &mut Connection) -> anyhow::Result<()> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let table_count: i64 = tx.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
+async fn migrate_event_db_connection(conn: &mut Connection) -> anyhow::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).await?;
+    let table_count: i64 = query_value(&tx, "SELECT count(*) FROM sqlite_master WHERE type = 'table'", ()).await?;
     if table_count == 0 {
         info!("Creating event DB schema, version {CREATE_EVENT_DB_VERSION}");
-        tx.execute_batch(CREATE_EVENT_DB_SQL)?;
+        tx.execute_batch(CREATE_EVENT_DB_SQL).await?;
     }
-    let mut version = read_db_version(&tx)?;
+    let mut version = read_db_version(&tx).await?;
     let latest = latest_db_version();
     if version > latest {
         anyhow::bail!("Event DB version {version} is newer than the latest supported version {latest}");
@@ -114,30 +110,31 @@ fn migrate_event_db_connection(conn: &mut Connection) -> anyhow::Result<()> {
     let current = version;
     for migration in MIGRATIONS.iter().filter(|m| m.version > current) {
         info!("Migrating event DB from version {version} to {}", migration.version);
-        (migration.up)(&tx)
+        (migration.up)(&tx).await
             .with_context(|| format!("Event DB migration to version {} failed", migration.version))?;
 
-        let updated = tx.execute(&format!("UPDATE config SET cvalue = ?1 WHERE {} = 'db.version'", config_key_column(&tx)?), [migration.version.to_string()])?;
+        let updated = tx.execute(format!("UPDATE config SET cvalue = ?1 WHERE {} = 'db.version'", config_key_column(&tx).await?), [migration.version.to_string()]).await?;
         if updated != 1 {
             anyhow::bail!("Event DB migration to version {} lost the 'db.version' config value", migration.version);
         }
         version = migration.version;
     }
-    tx.commit()?;
+    tx.commit().await?;
     Ok(())
 }
 
 /// Name of the `config` table key column, `ckey` before version 31000, `id` since then.
-fn config_key_column(conn: &Connection) -> anyhow::Result<&'static str> {
-    let has_ckey: bool = conn.query_row("SELECT count(*) > 0 FROM pragma_table_info('config') WHERE name = 'ckey'", [], |row| row.get(0))?;
+async fn config_key_column(conn: &Connection) -> anyhow::Result<&'static str> {
+    let has_ckey: bool = query_value(conn, "SELECT count(*) > 0 FROM pragma_table_info('config') WHERE name = 'ckey'", ()).await?;
     Ok(if has_ckey { "ckey" } else { "id" })
 }
 
-fn read_db_version(conn: &Connection) -> anyhow::Result<i64> {
-    let version: Option<String> = conn
-        .query_row(&format!("SELECT CAST(cvalue AS TEXT) FROM config WHERE {} = 'db.version'", config_key_column(conn)?), [], |row| row.get(0))
-        .optional()
+async fn read_db_version(conn: &Connection) -> anyhow::Result<i64> {
+    let sql = format!("SELECT CAST(cvalue AS TEXT) FROM config WHERE {} = 'db.version'", config_key_column(conn).await?);
+    let version: Option<String> = query_one(conn, &sql, ()).await
         .context("Cannot read event DB config, it is not an event database")?
+        .map(|row| row.get::<Option<String>>(0))
+        .transpose()?
         .flatten();
     let version = version.context("Event DB has no 'db.version' config value")?;
     version.trim().parse().with_context(|| format!("Invalid event DB 'db.version' config value: {version:?}"))
@@ -158,7 +155,7 @@ struct TableColumns {
 /// migrated the same way, at application start, see [`init_schema_columns`].
 /// The bundled schema validity is checked by tests.
 static SCHEMA_COLUMNS: LazyLock<HashMap<String, TableColumns>> = LazyLock::new(|| {
-    let schema_columns = load_schema_columns().expect("Bundled event DB schema should be valid");
+    let schema_columns = smol::block_on(load_schema_columns()).expect("Bundled event DB schema should be valid");
     info!("Event DB schema columns: {schema_columns:?}");
     schema_columns
 });
@@ -182,22 +179,22 @@ pub fn column_default(table: &str, column: &str) -> Option<&'static DbValue> {
     table_columns(table)?.defaults.get(&column.to_ascii_lowercase())
 }
 
-fn load_schema_columns() -> anyhow::Result<HashMap<String, TableColumns>> {
-    let mut conn = Connection::open_in_memory()?;
-    migrate_event_db_connection(&mut conn)?;
+async fn load_schema_columns() -> anyhow::Result<HashMap<String, TableColumns>> {
+    let db = Db::open(":memory:").await?;
+    let mut conn = db.conn().await?;
+    migrate_event_db_connection(&mut conn).await?;
     // pragma_table_xinfo.hidden: 2 = VIRTUAL generated column, 3 = STORED generated column
-    let mut stmt = conn.prepare(
+    let rows = query_all(&conn,
         "SELECT m.name, x.name, x.hidden IN (2, 3), x.dflt_value FROM sqlite_master m, pragma_table_xinfo(m.name) x
-         WHERE m.type = 'table' AND (x.hidden IN (2, 3) OR x.dflt_value IS NOT NULL)")?;
+         WHERE m.type = 'table' AND (x.hidden IN (2, 3) OR x.dflt_value IS NOT NULL)", ()).await?;
     let mut schema_columns: HashMap<String, TableColumns> = HashMap::new();
-    let rows = stmt.query_map([], |row| Ok((
-        row.get::<_, String>(0)?,
-        row.get::<_, String>(1)?,
-        row.get::<_, bool>(2)?,
-        row.get::<_, Option<String>>(3)?,
-    )))?;
     for row in rows {
-        let (table, column, generated, default) = row?;
+        let (table, column, generated, default) = (
+            row.get::<String>(0)?,
+            row.get::<String>(1)?,
+            row.get::<bool>(2)?,
+            row.get::<Option<String>>(3)?,
+        );
         let table_columns = schema_columns.entry(table.to_ascii_lowercase()).or_default();
         let column = column.to_ascii_lowercase();
         if let Some(value) = default.as_deref().and_then(parse_default_literal) {
@@ -225,10 +222,15 @@ fn parse_default_literal(default: &str) -> Option<DbValue> {
     if let Some(s) = default.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
         return Some(DbValue::String(s.replace("''", "'")));
     }
-    if let Ok(n) = default.parse::<i64>() {
+    // signed numbers are reported with a space after the sign, like `- 1`
+    let number = match default.strip_prefix(['-', '+']) {
+        Some(rest) => format!("{}{}", &default[..1], rest.trim_start()),
+        None => default.to_string(),
+    };
+    if let Ok(n) = number.parse::<i64>() {
         return Some(DbValue::Int(n));
     }
-    if let Ok(d) = default.parse::<f64>() {
+    if let Ok(d) = number.parse::<f64>() {
         return Some(DbValue::Double(d));
     }
     // CURRENT_TIMESTAMP, expressions, ...
@@ -260,27 +262,29 @@ const CREATE_EVENT_DB_VERSION: i64 = 30900;
 /// The `db.version` is updated by the migration runner, not by the `up`.
 struct Migration {
     version: i64,
-    up: fn(&Connection) -> anyhow::Result<()>,
+    up: for<'a> fn(&'a Connection) -> BoxFuture<'a, anyhow::Result<()>>,
 }
+
+type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Migrations after [`CREATE_EVENT_DB_VERSION`], ordered by version.
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 31000,
-        up: |conn| {
-            add_column_if_missing(conn, "qxchanges", "paid", "boolean NOT NULL DEFAULT 0")?;
-            conn.execute_batch("ALTER TABLE config RENAME COLUMN ckey TO id")?;
+        up: |conn| Box::pin(async move {
+            add_column_if_missing(conn, "qxchanges", "paid", "boolean NOT NULL DEFAULT 0").await?;
+            conn.execute_batch("ALTER TABLE config RENAME COLUMN ckey TO id").await?;
             Ok(())
-        }
+        }),
     },
 ];
 
-fn add_column_if_missing(conn: &Connection, table: &str, column: &str, definition: &str) -> anyhow::Result<()> {
-    let exists: bool = conn.query_row(
+async fn add_column_if_missing(conn: &Connection, table: &str, column: &str, definition: &str) -> anyhow::Result<()> {
+    let exists: bool = query_value(conn,
         "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 COLLATE NOCASE)",
-        [table, column], |row| row.get(0))?;
+        [table, column]).await?;
     if !exists {
-        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
+        conn.execute_batch(format!("ALTER TABLE {table} ADD COLUMN {column} {definition}")).await?;
     }
     Ok(())
 }
@@ -292,6 +296,10 @@ fn latest_db_version() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn memory_db() -> Db {
+        Db::open(":memory:").await.unwrap()
+    }
 
     #[test]
     fn generated_columns_of_bundled_schema() {
@@ -311,19 +319,30 @@ mod tests {
     }
 
     #[test]
-    fn event_record_change_from_config() {
-        let conn = Connection::open_in_memory().unwrap();
+    fn event_record_change_from_config() { smol::block_on(async {
+        let db = memory_db().await;
+        let conn = db.conn().await.unwrap();
         conn.execute_batch("
             CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT);
             INSERT INTO config (id, cvalue) VALUES
                 ('event.name', 'Foo'), ('event.stageCount', '2'), ('event.date', '2024-05-01');
-        ").unwrap();
-        let change = read_event_record_change(&conn).unwrap();
+        ").await.unwrap();
+        let change = read_event_record_change(&conn).await.unwrap();
         assert_eq!(change.name.as_deref(), Some("Foo"));
         assert_eq!(change.stage_count, Some(2));
         // date and time are independent, a missing time does not drop the date
         assert_eq!(change.date.as_deref(), Some("2024-05-01"));
         assert!(change.time.is_none());
+    }) }
+
+    #[test]
+    fn default_literal_parsing() {
+        assert_eq!(parse_default_literal("-1"), Some(DbValue::Int(-1)));
+        assert_eq!(parse_default_literal("- 1"), Some(DbValue::Int(-1)));
+        assert_eq!(parse_default_literal("+ 2"), Some(DbValue::Int(2)));
+        assert_eq!(parse_default_literal("- 1.5"), Some(DbValue::Double(-1.5)));
+        assert_eq!(parse_default_literal("'it''s'"), Some(DbValue::String("it's".into())));
+        assert_eq!(parse_default_literal("CURRENT_TIMESTAMP"), None);
     }
 
     #[test]
@@ -346,49 +365,54 @@ mod tests {
     }
 
     #[test]
-    fn new_db_is_migrated_to_latest_version() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate_event_db_connection(&mut conn).unwrap();
-        assert_eq!(read_db_version(&conn).unwrap(), latest_db_version());
+    fn new_db_is_migrated_to_latest_version() { smol::block_on(async {
+        let db = memory_db().await;
+        let mut conn = db.conn().await.unwrap();
+        migrate_event_db_connection(&mut conn).await.unwrap();
+        assert_eq!(read_db_version(&conn).await.unwrap(), latest_db_version());
         // migrating again is a no-op
-        migrate_event_db_connection(&mut conn).unwrap();
-        assert_eq!(read_db_version(&conn).unwrap(), latest_db_version());
-    }
+        migrate_event_db_connection(&mut conn).await.unwrap();
+        assert_eq!(read_db_version(&conn).await.unwrap(), latest_db_version());
+    }) }
 
     #[test]
-    fn quickevent_db_is_migrated_from_its_version() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(CREATE_EVENT_DB_SQL).unwrap();
-        assert_eq!(read_db_version(&conn).unwrap(), CREATE_EVENT_DB_VERSION);
-        migrate_event_db_connection(&mut conn).unwrap();
-        assert_eq!(read_db_version(&conn).unwrap(), latest_db_version());
-        let paid: i64 = conn.query_row("SELECT count(*) FROM pragma_table_info('qxchanges') WHERE name = 'paid'", [], |row| row.get(0)).unwrap();
+    fn quickevent_db_is_migrated_from_its_version() { smol::block_on(async {
+        let db = memory_db().await;
+        let mut conn = db.conn().await.unwrap();
+        conn.execute_batch(CREATE_EVENT_DB_SQL).await.unwrap();
+        assert_eq!(read_db_version(&conn).await.unwrap(), CREATE_EVENT_DB_VERSION);
+        migrate_event_db_connection(&mut conn).await.unwrap();
+        assert_eq!(read_db_version(&conn).await.unwrap(), latest_db_version());
+        let paid: i64 = query_value(&conn, "SELECT count(*) FROM pragma_table_info('qxchanges') WHERE name = 'paid'", ()).await.unwrap();
         assert_eq!(paid, 1);
-        let id: i64 = conn.query_row("SELECT count(*) FROM pragma_table_info('config') WHERE name = 'id'", [], |row| row.get(0)).unwrap();
+        let id: i64 = query_value(&conn, "SELECT count(*) FROM pragma_table_info('config') WHERE name = 'id'", ()).await.unwrap();
         assert_eq!(id, 1);
-    }
+    }) }
 
     #[test]
-    fn db_with_paid_column_at_30800_is_migrated() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(CREATE_EVENT_DB_SQL).unwrap();
-        conn.execute_batch("ALTER TABLE qxchanges ADD COLUMN paid boolean NOT NULL DEFAULT 0").unwrap();
-        migrate_event_db_connection(&mut conn).unwrap();
-        assert_eq!(read_db_version(&conn).unwrap(), latest_db_version());
-    }
+    fn db_with_paid_column_at_30800_is_migrated() { smol::block_on(async {
+        let db = memory_db().await;
+        let mut conn = db.conn().await.unwrap();
+        conn.execute_batch(CREATE_EVENT_DB_SQL).await.unwrap();
+        conn.execute_batch("ALTER TABLE qxchanges ADD COLUMN paid boolean NOT NULL DEFAULT 0").await.unwrap();
+        migrate_event_db_connection(&mut conn).await.unwrap();
+        assert_eq!(read_db_version(&conn).await.unwrap(), latest_db_version());
+    }) }
 
     #[test]
-    fn newer_db_is_rejected() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate_event_db_connection(&mut conn).unwrap();
-        conn.execute("UPDATE config SET cvalue = ?1 WHERE id = 'db.version'", [(latest_db_version() + 1).to_string()]).unwrap();
-        assert!(migrate_event_db_connection(&mut conn).is_err());
-    }
+    fn newer_db_is_rejected() { smol::block_on(async {
+        let db = memory_db().await;
+        let mut conn = db.conn().await.unwrap();
+        migrate_event_db_connection(&mut conn).await.unwrap();
+        conn.execute("UPDATE config SET cvalue = ?1 WHERE id = 'db.version'", [(latest_db_version() + 1).to_string()]).await.unwrap();
+        assert!(migrate_event_db_connection(&mut conn).await.is_err());
+    }) }
 
     #[test]
-    fn non_event_db_is_rejected() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE foo (id integer)").unwrap();
-        assert!(migrate_event_db_connection(&mut conn).is_err());
-    }
+    fn non_event_db_is_rejected() { smol::block_on(async {
+        let db = memory_db().await;
+        let mut conn = db.conn().await.unwrap();
+        conn.execute_batch("CREATE TABLE foo (id integer)").await.unwrap();
+        assert!(migrate_event_db_connection(&mut conn).await.is_err());
+    }) }
 }

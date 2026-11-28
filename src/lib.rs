@@ -21,6 +21,7 @@ pub mod rpcvalueext;
 mod rpctype;
 mod state;
 pub mod config;
+pub mod db;
 mod migrate;
 mod localdbsqlapi;
 mod remotedbsqlapi;

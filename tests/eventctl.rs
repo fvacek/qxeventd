@@ -3,7 +3,7 @@
 mod common;
 
 use std::io::{Read, Write};
-use async_sqlite::rusqlite::Connection;
+use qxeventd::db::{Connection, Db, query_value};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -53,16 +53,17 @@ fn write_event_db(event_id: i64, data: &[u8]) {
     std::fs::write(format!("{dir}/event.qbe"), data).unwrap();
 }
 
-/// Open event DB image in a temporary file, to check its content or to modify it
-fn with_event_db_image<T>(data: &[u8], f: impl FnOnce(&Connection) -> T) -> (T, Vec<u8>) {
+/// Open event DB image in a temporary file, to check its content or to modify it.
+/// The DB is checkpointed and closed before the image is read, so it contains all the changes.
+async fn with_event_db_image<T>(data: &[u8], f: impl AsyncFnOnce(&Connection) -> T) -> (T, Vec<u8>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("event.qbe");
     std::fs::write(&path, data).unwrap();
-    let conn = Connection::open(&path).unwrap();
-    let result = f(&conn);
-    conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
-    drop(conn);
-    (result, std::fs::read(&path).unwrap())
+    let path = path.to_str().unwrap();
+    let db = Db::open(path).await.unwrap();
+    let result = f(&*db.conn().await.unwrap()).await;
+    db.close().await.unwrap();
+    (result, std::fs::read(path).unwrap())
 }
 
 /// Commit must not leave the decompressed upload or its SQLite journal files behind
@@ -74,8 +75,8 @@ fn assert_no_commit_tmp_files(event_id: i64) {
     assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
-fn read_config(conn: &Connection, key: &str) -> String {
-    conn.query_row("SELECT cvalue FROM config WHERE id = ?1", [key], |row| row.get(0)).unwrap()
+async fn read_config(conn: &Connection, key: &str) -> String {
+    query_value(conn, "SELECT CAST(cvalue AS TEXT) FROM config WHERE id = ?1", [key]).await.unwrap()
 }
 
 #[test]
@@ -239,9 +240,9 @@ fn push_db_upload_in_chunks_and_commit() {
         assert_eq!(pull_event_db(&mut client, event_id).await, b"old");
 
         push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
-        let ((), db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch(&format!("CREATE TABLE t (id INTEGER); {}", minimal_config_sql())).unwrap();
-        });
+        let ((), db_image) = with_event_db_image(b"", async |conn| {
+            conn.execute_batch(&format!("CREATE TABLE t (id INTEGER); {}", minimal_config_sql())).await.unwrap();
+        }).await;
         for data in compress(&db_image).chunks(4) {
             push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
         }
@@ -272,8 +273,8 @@ fn push_db_commit_rejects_invalid_compressed_data() {
             assert_eq!(push_db_call(&mut client, event_id, "size", RpcValue::null()).await.unwrap().as_int(), data.len() as i64);
             let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
             assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
-            let (event_name, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, |conn| read_config(conn, "event.name"));
-            let (expected_name, _) = with_event_db_image(&snapshot, |conn| read_config(conn, "event.name"));
+            let (event_name, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, async |conn| read_config(conn, "event.name").await).await;
+            let (expected_name, _) = with_event_db_image(&snapshot, async |conn| read_config(conn, "event.name").await).await;
             assert_eq!(event_name, expected_name);
         }
     });
@@ -286,9 +287,9 @@ fn push_db_commit_wal_mode_database() {
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
         write_event_db(event_id, b"old");
 
-        let ((), mut db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch(&format!("CREATE TABLE t (id INTEGER); {}", minimal_config_sql())).unwrap();
-        });
+        let ((), mut db_image) = with_event_db_image(b"", async |conn| {
+            conn.execute_batch(&format!("CREATE TABLE t (id INTEGER); {}", minimal_config_sql())).await.unwrap();
+        }).await;
         // file format read and write versions of a WAL mode database
         db_image[18] = 2;
         db_image[19] = 2;
@@ -296,12 +297,12 @@ fn push_db_commit_wal_mode_database() {
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
         assert_no_commit_tmp_files(event_id);
 
-        // installed in rollback journal mode, so no changes can be left in a WAL file
+        // installed checkpointed, so no changes can be left in a WAL file
+        assert!(!std::path::Path::new(&format!("{}/{event_id}/event.qbe-wal", data_dir())).exists());
         let installed = pull_event_db(&mut client, event_id).await;
-        assert_eq!(&installed[18..20], &[1, 1]);
-        let (rows, _) = with_event_db_image(&installed, |conn| {
-            conn.query_row("SELECT count(*) FROM t", [], |row| row.get::<_, i64>(0)).unwrap()
-        });
+        let (rows, _) = with_event_db_image(&installed, async |conn| {
+            query_value::<i64>(conn, "SELECT count(*) FROM t", ()).await.unwrap()
+        }).await;
         assert_eq!(rows, 0);
     });
 }
@@ -313,9 +314,9 @@ fn push_db_commit_rejects_sha1_mismatch() {
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
         client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
         let snapshot = pull_event_db(&mut client, event_id).await;
-        let ((), modified) = with_event_db_image(&snapshot, |conn| {
-            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE id = 'event.name'", []).unwrap();
-        });
+        let ((), modified) = with_event_db_image(&snapshot, async |conn| {
+            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE id = 'event.name'", ()).await.unwrap();
+        }).await;
         let compressed = compress(&modified);
         for data in compressed.chunks(push_db_max_write(&mut client, event_id).await) {
             push_db_call(&mut client, event_id, "append", RpcValue::from(data)).await.unwrap();
@@ -336,7 +337,7 @@ fn push_db_commit_rejects_sha1_mismatch() {
 
         // upload can be committed with the correct SHA-1 then
         push_db_call(&mut client, event_id, "commit", sha1_of(&modified)).await.unwrap();
-        let (event_name, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, |conn| read_config(conn, "event.name"));
+        let (event_name, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, async |conn| read_config(conn, "event.name").await).await;
         assert_eq!(event_name, "pushed");
     });
 }
@@ -407,9 +408,9 @@ fn push_db_commit_removes_stale_wal_files() {
             std::fs::write(file, b"stale").unwrap();
         }
 
-        let ((), db_image) = with_event_db_image(b"", |conn| {
-            conn.execute_batch(&format!("CREATE TABLE t (id INTEGER); {}", minimal_config_sql())).unwrap();
-        });
+        let ((), db_image) = with_event_db_image(b"", async |conn| {
+            conn.execute_batch(&format!("CREATE TABLE t (id INTEGER); {}", minimal_config_sql())).await.unwrap();
+        }).await;
         push_db_call(&mut client, event_id, "append", RpcValue::from(&compress(&db_image)[..])).await.unwrap();
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
         for file in &stale_files {
@@ -426,9 +427,9 @@ fn push_db_commit_replaces_opened_event_db() {
         client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
 
         let snapshot = pull_event_db(&mut client, event_id).await;
-        let ((), modified) = with_event_db_image(&snapshot, |conn| {
-            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE id = 'event.name'", []).unwrap();
-        });
+        let ((), modified) = with_event_db_image(&snapshot, async |conn| {
+            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE id = 'event.name'", ()).await.unwrap();
+        }).await;
 
         let max_write = push_db_max_write(&mut client, event_id).await;
         for (ix, data) in compress(&modified).chunks(max_write).enumerate() {
@@ -439,7 +440,7 @@ fn push_db_commit_replaces_opened_event_db() {
         let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
         assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
         let snapshot = pull_event_db(&mut client, event_id).await;
-        let (event_name, _) = with_event_db_image(&snapshot, |conn| read_config(conn, "event.name"));
+        let (event_name, _) = with_event_db_image(&snapshot, async |conn| read_config(conn, "event.name").await).await;
         assert_eq!(event_name, "pushed");
     });
 }
@@ -452,11 +453,11 @@ fn push_db_commit_migrates_older_database() {
         client.call(request("eventctl", "openEvent", &format!(r#"{{"event_id":{event_id}}}"#), "fanda", AccessLevel::Read)).await.unwrap();
 
         let snapshot = pull_event_db(&mut client, event_id).await;
-        let ((), modified) = with_event_db_image(&snapshot, |conn| {
-            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE id = 'event.name'", []).unwrap();
-            conn.execute("UPDATE config SET cvalue = '30800' WHERE id = 'db.version'", []).unwrap();
-            conn.execute_batch("ALTER TABLE config RENAME COLUMN id TO ckey").unwrap();
-        });
+        let ((), modified) = with_event_db_image(&snapshot, async |conn| {
+            conn.execute("UPDATE config SET cvalue = 'pushed' WHERE id = 'event.name'", ()).await.unwrap();
+            conn.execute("UPDATE config SET cvalue = '30800' WHERE id = 'db.version'", ()).await.unwrap();
+            conn.execute_batch("ALTER TABLE config RENAME COLUMN id TO ckey").await.unwrap();
+        }).await;
 
         let max_write = push_db_max_write(&mut client, event_id).await;
         for data in compress(&modified).chunks(max_write) {
@@ -467,9 +468,9 @@ fn push_db_commit_migrates_older_database() {
         let res = client.call(request("eventctl", "ls", "", "fanda", AccessLevel::Browse)).await.unwrap();
         assert_eq!(res.to_cpon(), format!(r#"["{event_id}"]"#));
         let snapshot = pull_event_db(&mut client, event_id).await;
-        let ((event_name, db_version), _) = with_event_db_image(&snapshot, |conn| {
-            (read_config(conn, "event.name"), read_config(conn, "db.version"))
-        });
+        let ((event_name, db_version), _) = with_event_db_image(&snapshot, async |conn| {
+            (read_config(conn, "event.name").await, read_config(conn, "db.version").await)
+        }).await;
         assert_eq!(event_name, "pushed");
         assert_eq!(db_version, LATEST_EVENT_DB_VERSION.to_string());
     });
@@ -660,7 +661,7 @@ fn push_db_commit_updates_event_record() {
         let (event_id, _api_token) = create_event_with_own_db(&mut client, "fanda").await;
         write_event_db(event_id, b"old");
 
-        let ((), db_image) = with_event_db_image(b"", |conn| {
+        let ((), db_image) = with_event_db_image(b"", async |conn| {
             conn.execute_batch(&format!("
                 CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT);
                 INSERT INTO config (id, cvalue) VALUES
@@ -669,8 +670,8 @@ fn push_db_commit_updates_event_record() {
                     ('event.stageCount', '3'),
                     ('event.date', '2024-05-01'),
                     ('event.time', '10:30:00');
-            ")).unwrap();
-        });
+            ")).await.unwrap();
+        }).await;
         push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
 
@@ -682,15 +683,15 @@ fn push_db_commit_updates_event_record() {
         assert_eq!(record["time"].as_str(), "10:30:00", "{}", res.to_cpon());
 
         // fields missing in the pushed DB are kept
-        let ((), db_image) = with_event_db_image(b"", |conn| {
+        let ((), db_image) = with_event_db_image(b"", async |conn| {
             conn.execute_batch(&format!("
                 CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT);
                 INSERT INTO config (id, cvalue) VALUES
                     ('db.version', '{LATEST_EVENT_DB_VERSION}'),
                     ('event.name', 'Renamed'),
                     ('event.date', '2024-05-02');
-            ")).unwrap();
-        });
+            ")).await.unwrap();
+        }).await;
         push_db_call(&mut client, event_id, "truncate", cpon("0")).await.unwrap();
         push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
@@ -711,7 +712,7 @@ fn push_db_commit_updates_event_record_from_quickevent_config() {
         write_event_db(event_id, b"old");
 
         // QuickEvent stores typed values, ints as SQLite integers
-        let ((), db_image) = with_event_db_image(b"", |conn| {
+        let ((), db_image) = with_event_db_image(b"", async |conn| {
             conn.execute_batch(&format!("
                 CREATE TABLE config (id TEXT PRIMARY KEY, cvalue TEXT, ctype TEXT);
                 INSERT INTO config (id, cvalue, ctype) VALUES
@@ -720,8 +721,8 @@ fn push_db_commit_updates_event_record_from_quickevent_config() {
                     ('event.stageCount', 4, 'int'),
                     ('event.date', '2024-06-02', 'QDate'),
                     ('event.time', '09:15', 'QTime');
-            ")).unwrap();
-        });
+            ")).await.unwrap();
+        }).await;
         push_db_call(&mut client, event_id, "write", chunk(0, &compress(&db_image))).await.unwrap();
         push_db_call(&mut client, event_id, "commit", sha1_of(&db_image)).await.unwrap();
 
@@ -749,7 +750,7 @@ fn pulled_db_can_be_pushed_back() {
         }
         let snapshot = decompress(&compressed);
         push_db_call(&mut client, event_id, "commit", sha1_of(&snapshot)).await.unwrap();
-        let (stage_count, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, |conn| read_config(conn, "event.stageCount"));
+        let (stage_count, _) = with_event_db_image(&pull_event_db(&mut client, event_id).await, async |conn| read_config(conn, "event.stageCount").await).await;
         assert_eq!(stage_count, "1");
     });
 }
@@ -763,7 +764,7 @@ fn pull_db_snapshot_of_opened_event() {
 
         pull_db_call(&mut client, event_id, "snapshot", "").await.unwrap();
         let data = pull_db_read_all(&mut client, event_id).await;
-        let (stage_count, _) = with_event_db_image(&data, |conn| read_config(conn, "event.stageCount"));
+        let (stage_count, _) = with_event_db_image(&data, async |conn| read_config(conn, "event.stageCount").await).await;
         assert_eq!(stage_count, "1");
 
         // event stays opened
@@ -807,7 +808,7 @@ fn pull_closed_event_db_contains_data_written_while_opened() {
         client.call(request(&format!("eventctl/{event_id}"), "close", "", "fanda", AccessLevel::Read)).await.unwrap();
 
         let data = pull_event_db(&mut client, event_id).await;
-        let (stage_count, _) = with_event_db_image(&data, |conn| read_config(conn, "event.stageCount"));
+        let (stage_count, _) = with_event_db_image(&data, async |conn| read_config(conn, "event.stageCount").await).await;
         assert_eq!(stage_count, "1");
     });
 }

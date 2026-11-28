@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use async_sqlite::Pool;
 use async_trait::async_trait;
 use qxsql::sql::{ExecResult, QueryResult, RecChng};
 use qxsql::sql::Record;
@@ -46,14 +45,14 @@ impl qxsql::QxSqlApi for LocalEventSqlApi {
     async fn query(&self, query: &str, params: Option<&Record>) -> anyhow::Result<QueryResult> {
         let event = self.opened_event().await?;
         let db = event.use_db().await?;
-        let qxsql = LocalDbSqlApi::new(Pool::clone(&db), self.rpc_client.clone());
+        let qxsql = LocalDbSqlApi::new(crate::db::Db::clone(&db), self.rpc_client.clone());
         qxsql.query(query, params).await
     }
 
     async fn exec(&self, query: &str, params: Option<&Record>) -> anyhow::Result<ExecResult> {
         let event = self.opened_event().await?;
         let db = event.use_db().await?;
-        let qxsql = LocalDbSqlApi::new(Pool::clone(&db), self.rpc_client.clone());
+        let qxsql = LocalDbSqlApi::new(crate::db::Db::clone(&db), self.rpc_client.clone());
         qxsql.exec(query, params).await
     }
 }
